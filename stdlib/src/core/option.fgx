@@ -1,0 +1,16 @@
+module core.option
+
+export fn core_option_some_u8(value: u8) -> Option[u8]:
+    return Some(value)
+
+export fn core_option_none_u8() -> Option[u8]:
+    return None()
+
+export fn core_option_is_some_u8(value: Option[u8]) -> bool:
+    return is_some(value)
+
+export fn core_option_is_none_u8(value: Option[u8]) -> bool:
+    return is_none(value)
+
+export fn core_option_unwrap_or_u8(value: Option[u8], fallback: u8) -> u8:
+    return unwrap_or(value, fallback)

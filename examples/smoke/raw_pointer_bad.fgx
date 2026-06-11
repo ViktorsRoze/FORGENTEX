@@ -1,0 +1,2 @@
+fn bad(ptr: *const u8) -> u8:
+    return ptr[0]

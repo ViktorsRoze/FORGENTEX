@@ -1,0 +1,12 @@
+{
+  "args": {
+    "scope": "workspace",
+    "source": "input.txt",
+    "dest": "output.txt"
+  },
+  "expect": {
+    "return": {
+      "Ok": 29
+    }
+  }
+}

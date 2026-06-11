@@ -1,0 +1,4 @@
+[package]
+name = "forgentex-demo-media"
+version = "0.1.0"
+root = "examples/project"

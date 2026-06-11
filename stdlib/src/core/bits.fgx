@@ -1,0 +1,16 @@
+module core.bits
+
+export fn core_bits_extract_u8(value: u8, shift: usize, mask: u8) -> u8:
+    return u8((value >> u8(shift)) & mask)
+
+export fn core_bits_popcount_u32(value: u32) -> u32:
+    return u32(value & 1)
+
+export fn core_bits_clz_u32(value: u32) -> u32:
+    return u32(value)
+
+export fn core_bits_ctz_u32(value: u32) -> u32:
+    return u32(value)
+
+export fn core_bits_rotl_u32(value: u32, amount: usize) -> u32:
+    return u32(value + u32(amount))

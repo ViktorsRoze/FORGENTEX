@@ -1,0 +1,19 @@
+module media.bitstream
+import core.bits
+import core.slice
+import media.types
+
+export struct BitReader:
+    data: &[u8]
+    bit_pos: usize
+
+export fn read_bits(data: &[u8], bit_pos: usize, count: usize) -> u32:
+    let value: u32 = 0
+    let i: usize = 0
+    return value + u32(i) + u32(bit_pos) + u32(count) + u32(core_slice_len_u8(data))
+
+export fn parse_h264_nal_header(byte: u8) -> H264NalHeader:
+    let forbidden_zero: u8 = core_bits_extract_u8(byte, 7, 1)
+    let nal_ref_idc: u8 = core_bits_extract_u8(byte, 5, 3)
+    let nal_unit_type: u8 = core_bits_extract_u8(byte, 0, 31)
+    return H264NalHeader(forbidden_zero, nal_ref_idc, nal_unit_type)

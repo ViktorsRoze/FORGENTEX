@@ -1,0 +1,26 @@
+module core.simd
+
+export fn core_simd_load_i16x8(src: &[i16], index: usize) -> vec[i16,8] effects [cpu.simd]:
+    return simd_load_i16x8(src, index)
+
+export fn core_simd_store_i16x8(dst: &mut [i16], index: usize, value: vec[i16,8]) -> void effects [cpu.simd]:
+    simd_store_i16x8(dst, index, value)
+    return
+
+export fn core_simd_vec_i16x8(a: i16, b: i16, c: i16, d: i16, e: i16, f: i16, g: i16, h: i16) -> vec[i16,8] effects [cpu.simd]:
+    return simd_vec_i16x8(a, b, c, d, e, f, g, h)
+
+export fn core_simd_splat_i16x8(value: i16) -> vec[i16,8] effects [cpu.simd]:
+    return simd_splat_i16x8(value)
+
+export fn core_simd_saturating_add(left: vec[i16,8], right: vec[i16,8]) -> vec[i16,8] effects [cpu.simd]:
+    return simd_saturating_add(left, right)
+
+export fn core_simd_eq(left: vec[i16,8], right: vec[i16,8]) -> mask[8] effects [cpu.simd]:
+    return simd_eq(left, right)
+
+export fn core_simd_select(mask_value: mask[8], left: vec[i16,8], right: vec[i16,8]) -> vec[i16,8] effects [cpu.simd]:
+    return simd_select(mask_value, left, right)
+
+export fn core_simd_reduce_add(value: vec[i16,8]) -> i16 effects [cpu.simd]:
+    return i16(simd_reduce_add(value))

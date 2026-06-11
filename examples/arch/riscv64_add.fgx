@@ -1,0 +1,7 @@
+unsafe fn add_riscv64(a: u64, b: u64) -> u64:
+    asm riscv64:
+        in a0: a
+        in a1: b
+        out a0: y
+        op add a0 a0 a1
+    return y

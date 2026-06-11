@@ -1,0 +1,8 @@
+unsafe fn vector_add_riscv64_v(a: u64, b: u64) -> u64 effects [cpu.v]:
+    asm riscv64:
+        in a0: a
+        in a1: b
+        out a0: y
+        op vadd.vv v0 v0 v1
+        op add a0 a0 a1
+    return y

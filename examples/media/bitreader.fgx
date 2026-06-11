@@ -1,0 +1,10 @@
+import core.slice
+
+struct BitReader:
+    data: &[u8]
+    bit_pos: usize
+
+fn read_bits(data: &[u8], bit_pos: usize, count: usize) -> u32:
+    let value: u32 = 0
+    let i: usize = 0
+    return value + u32(i) + u32(bit_pos) + u32(count) + u32(core_slice_len_u8(data))

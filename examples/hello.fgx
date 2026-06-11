@@ -1,0 +1,6 @@
+struct Point:
+    x: i32
+    y: i32
+
+fn area(width: i32, height: i32) -> i32:
+    return width * height

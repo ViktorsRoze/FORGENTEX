@@ -1,0 +1,9 @@
+# Rust build output
+/target
+
+# Generated fgx build artifacts (fgx build, fgx map, fgx graph outputs)
+/build
+
+# Editor and local tool state
+/.idea
+

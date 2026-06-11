@@ -1,0 +1,7 @@
+unsafe fn popcount_riscv64(x: u64) -> u32 effects [cpu.zbb]:
+    asm riscv64:
+        in a0: x
+        out a0: y
+        clobber memory
+        op cpop a0 a0
+    return u32(y)

@@ -1,0 +1,5 @@
+module codec.app
+import codec.common
+
+export fn app_scale(value: i32, gain: i32) -> i32:
+    return codec_scale_i32(value, gain)

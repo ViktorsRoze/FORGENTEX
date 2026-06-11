@@ -1,0 +1,7 @@
+unsafe fn popcount_aarch64(x: u64) -> u32 effects [cpu.neon]:
+    asm aarch64:
+        in x0: x
+        out x0: y
+        clobber flags
+        op cnt x0 x0
+    return u32(y)

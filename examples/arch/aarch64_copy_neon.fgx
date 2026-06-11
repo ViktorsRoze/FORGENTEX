@@ -1,0 +1,8 @@
+unsafe fn copy_neon_aarch64(src: *const u8, dst: *mut u8) -> void effects [cpu.neon]:
+    asm aarch64:
+        in x0: src
+        in x1: dst
+        clobber memory
+        op ld1 v0 x0
+        op st1 v0 x1
+    return

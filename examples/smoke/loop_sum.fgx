@@ -1,0 +1,7 @@
+import core.slice
+
+fn sum_u8(values: &[u8]) -> u32:
+    let total: u32 = 0
+    for i in 0 .. core_slice_len_u8(values):
+        total = total + u32(values[i])
+    return total

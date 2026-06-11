@@ -1,0 +1,216 @@
+{
+  "name": "forgentex-vscode",
+  "displayName": "Forgentex",
+  "description": "Editor workflow for Forgentex human, agent, patch, and project-map files.",
+  "version": "0.1.0",
+  "publisher": "forgentex-demo",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "activationEvents": [
+    "onLanguage:forgentex-fgx",
+    "onLanguage:forgentex-fgai",
+    "onLanguage:forgentex-fgp",
+    "onLanguage:forgentex-fgmap",
+    "onCommand:forgentex.showHumanAgentViews",
+    "onCommand:forgentex.contextForSymbol",
+    "onCommand:forgentex.reviewPatch",
+    "onCommand:forgentex.applyPatchPreview",
+    "onCommand:forgentex.runDiagnostics",
+    "onCommand:forgentex.showUnsafeArchitectureSlices"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "forgentex-fgx",
+        "aliases": [
+          "Forgentex Human",
+          "fgx"
+        ],
+        "extensions": [
+          ".fgx"
+        ],
+        "configuration": "./language-configuration/fgx.json"
+      },
+      {
+        "id": "forgentex-fgai",
+        "aliases": [
+          "Forgentex Agent",
+          "fgai"
+        ],
+        "extensions": [
+          ".fgai"
+        ],
+        "configuration": "./language-configuration/fgai.json"
+      },
+      {
+        "id": "forgentex-fgp",
+        "aliases": [
+          "Forgentex Patch",
+          "fgp"
+        ],
+        "extensions": [
+          ".fgp"
+        ],
+        "configuration": "./language-configuration/fgp.json"
+      },
+      {
+        "id": "forgentex-fgmap",
+        "aliases": [
+          "Forgentex Project Map",
+          "fgmap"
+        ],
+        "extensions": [
+          ".fgmap"
+        ],
+        "configuration": "./language-configuration/fgmap.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "forgentex-fgx",
+        "scopeName": "source.fgx",
+        "path": "./syntaxes/fgx.tmLanguage.json"
+      },
+      {
+        "language": "forgentex-fgai",
+        "scopeName": "source.fgai",
+        "path": "./syntaxes/fgai.tmLanguage.json"
+      },
+      {
+        "language": "forgentex-fgp",
+        "scopeName": "source.fgp",
+        "path": "./syntaxes/fgp.tmLanguage.json"
+      },
+      {
+        "language": "forgentex-fgmap",
+        "scopeName": "source.fgmap",
+        "path": "./syntaxes/fgmap.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "forgentex-fgx",
+        "path": "./snippets/forgentex.json"
+      },
+      {
+        "language": "forgentex-fgp",
+        "path": "./snippets/forgentex.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "forgentex.showHumanAgentViews",
+        "title": "Forgentex: Show Human/Agent Views",
+        "category": "Forgentex"
+      },
+      {
+        "command": "forgentex.contextForSymbol",
+        "title": "Forgentex: Open Symbol Context",
+        "category": "Forgentex"
+      },
+      {
+        "command": "forgentex.reviewPatch",
+        "title": "Forgentex: Review Semantic Patch",
+        "category": "Forgentex"
+      },
+      {
+        "command": "forgentex.applyPatchPreview",
+        "title": "Forgentex: Approve Patch Preview",
+        "category": "Forgentex"
+      },
+      {
+        "command": "forgentex.runDiagnostics",
+        "title": "Forgentex: Run Diagnostics",
+        "category": "Forgentex"
+      },
+      {
+        "command": "forgentex.showUnsafeArchitectureSlices",
+        "title": "Forgentex: Show Unsafe Architecture Slices",
+        "category": "Forgentex"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "forgentex.showHumanAgentViews",
+          "when": "resourceExtname == .fgx || resourceExtname == .fgai",
+          "group": "navigation@20"
+        },
+        {
+          "command": "forgentex.runDiagnostics",
+          "when": "resourceExtname == .fgx || resourceExtname == .fgai",
+          "group": "navigation@21"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "forgentex.contextForSymbol",
+          "when": "resourceExtname == .fgx || resourceExtname == .fgai || resourceExtname == .fgmap",
+          "group": "forgentex@10"
+        },
+        {
+          "command": "forgentex.showUnsafeArchitectureSlices",
+          "when": "resourceExtname == .fgx || resourceExtname == .fgai || resourceExtname == .fgmap",
+          "group": "forgentex@20"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "forgentex.reviewPatch",
+          "when": "resourceExtname == .fgp",
+          "group": "forgentex@10"
+        },
+        {
+          "command": "forgentex.applyPatchPreview",
+          "when": "resourceExtname == .fgp",
+          "group": "forgentex@20"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Forgentex",
+      "properties": {
+        "forgentex.fgxPath": {
+          "type": "string",
+          "default": "fgx",
+          "description": "Path to the Forgentex CLI binary."
+        },
+        "forgentex.defaultDeps": {
+          "type": "string",
+          "default": "types,effects,tests",
+          "description": "Default dependency slices requested by the symbol context command."
+        },
+        "forgentex.languageServiceMode": {
+          "type": "string",
+          "enum": [
+            "cli",
+            "disabled"
+          ],
+          "default": "cli",
+          "description": "Language service integration mode. Stage 20 uses the fgx CLI as the editor language service."
+        }
+      }
+    },
+    "problemMatchers": [
+      {
+        "name": "forgentex",
+        "owner": "forgentex",
+        "fileLocation": [
+          "relative",
+          "${workspaceFolder}"
+        ],
+        "pattern": {
+          "regexp": "^(.*)$",
+          "message": 1
+        }
+      }
+    ]
+  }
+}

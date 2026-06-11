@@ -1,0 +1,24 @@
+module core.slice
+
+export fn core_slice_len_i16(values: &[i16]) -> usize:
+    return values.len
+
+export fn core_slice_len_u8(values: &[u8]) -> usize:
+    return values.len
+
+export fn core_slice_len_mut_i16(values: &mut [i16]) -> usize:
+    return values.len
+
+export fn core_slice_require_same_len_i16(left: &[i16], right: &[i16]) -> void:
+    require left.len == right.len
+    return
+
+export fn core_slice_require_mut_same_len_i16(dst: &mut [i16], src: &[i16]) -> void:
+    require dst.len == src.len
+    return
+
+export fn core_slice_copy_i16(dst: &mut [i16], src: &[i16]) -> void:
+    require dst.len == src.len
+    for i in 0 .. dst.len:
+        dst[i] = src[i]
+    return

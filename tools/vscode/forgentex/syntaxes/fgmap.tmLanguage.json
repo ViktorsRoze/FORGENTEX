@@ -1,0 +1,57 @@
+{
+  "name": "Forgentex Project Map",
+  "scopeName": "source.fgmap",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#nodeIds" },
+    { "include": "#records" },
+    { "include": "#effects" },
+    { "include": "#numbers" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.number-sign.fgmap",
+          "match": "#.*$"
+        }
+      ]
+    },
+    "nodeIds": {
+      "patterns": [
+        {
+          "name": "entity.name.tag.node-id.fgmap",
+          "match": "@(?:function|struct|module|statement|expression)\\.[A-Za-z0-9_.]+"
+        }
+      ]
+    },
+    "records": {
+      "patterns": [
+        {
+          "name": "keyword.other.map-record.fgmap",
+          "match": "^\\s*(?:PROJECT|FILE|MODULE|STRUCT|FUNCTION|UNSAFE|ASM|ABI|TOKENS|DEPS|P|M|S|F)\\b"
+        }
+      ]
+    },
+    "effects": {
+      "patterns": [
+        {
+          "name": "support.constant.effect.fgmap",
+          "match": "\\b(?:cpu|target|crypto|network|fs|io|agent|ledger|memory)\\.[A-Za-z0-9_]+\\b"
+        },
+        {
+          "name": "support.constant.architecture.fgmap",
+          "match": "\\b(?:x86_64|aarch64|arm64|armv7|riscv32|riscv64|risc-v)\\b"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.fgmap",
+          "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    }
+  }
+}

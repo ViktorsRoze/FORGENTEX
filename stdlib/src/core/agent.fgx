@@ -1,0 +1,17 @@
+module core.agent
+
+export fn core_agent_token_amount(symbol: str, amount: usize) -> TokenAmount[MockLedger] effects [ledger.mock]:
+    return core_runtime_agent_token_amount(symbol, amount)
+
+export fn core_agent_payment_receipt(payer: PublicKey[Ed25519], payee: PublicKey[Ed25519], amount: TokenAmount[MockLedger], memo_hash: Hash[Blake3]) -> Receipt effects [agent.payment, ledger.mock]:
+    return core_runtime_agent_payment_receipt(payer, payee, amount, memo_hash)
+
+export fn core_agent_receipt_ok(receipt: Receipt) -> bool:
+    return core_runtime_agent_receipt_ok(receipt)
+
+export fn core_agent_signed_patch_hash(patch_text: str) -> Hash[Blake3] effects [agent.patch, crypto.hash]:
+    return core_runtime_agent_signed_patch_hash(patch_text)
+
+export unsafe fn core_agent_log_secret(secret: SecretKey[Ed25519]) -> void effects [crypto.secret, io.write]:
+    core_runtime_agent_log_secret(secret)
+    return

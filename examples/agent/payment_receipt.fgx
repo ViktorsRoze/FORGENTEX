@@ -1,0 +1,10 @@
+import core.crypto
+import core.agent
+
+fn issue_receipt(payer: PublicKey[Ed25519], payee: PublicKey[Ed25519], symbol: str, amount: usize, memo: str) -> Receipt effects [crypto.hash, ledger.mock, agent.payment]:
+    let token: TokenAmount[MockLedger] = core_agent_token_amount(symbol, amount)
+    let memo_hash: Hash[Blake3] = core_crypto_hash_blake3(memo)
+    return core_agent_payment_receipt(payer, payee, token, memo_hash)
+
+fn receipt_ok(receipt: Receipt) -> bool:
+    return core_agent_receipt_ok(receipt)

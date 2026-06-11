@@ -1,0 +1,28 @@
+module core.target
+
+export fn core_target_has_feature_neon() -> bool:
+    return cpu_has_neon()
+
+export fn core_target_has_feature_avx2() -> bool:
+    return cpu_has_avx2()
+
+export fn core_target_has_feature_riscv_v() -> bool:
+    return cpu_has_v()
+
+export fn core_target_feature_enabled_neon() -> bool:
+    return cpu_has_neon()
+
+export fn core_target_feature_enabled_avx2() -> bool:
+    return cpu_has_avx2()
+
+export fn core_target_feature_enabled_riscv_v() -> bool:
+    return cpu_has_v()
+
+export fn core_target_is_x86_64() -> bool:
+    return false
+
+export fn core_target_is_aarch64() -> bool:
+    return false
+
+export fn core_target_is_riscv64() -> bool:
+    return false

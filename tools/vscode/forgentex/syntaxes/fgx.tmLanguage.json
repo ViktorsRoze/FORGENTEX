@@ -1,0 +1,116 @@
+{
+  "name": "Forgentex Human",
+  "scopeName": "source.fgx",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#nodeIds" },
+    { "include": "#effects" },
+    { "include": "#assembly" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#numbers" },
+    { "include": "#functions" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.number-sign.fgx",
+          "match": "#.*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.fgx",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.fgx",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "nodeIds": {
+      "patterns": [
+        {
+          "name": "entity.name.tag.node-id.fgx",
+          "match": "@(?:function|struct|module|statement|expression)\\.[A-Za-z0-9_.]+"
+        }
+      ]
+    },
+    "effects": {
+      "patterns": [
+        {
+          "name": "support.constant.effect.fgx",
+          "match": "\\b(?:cpu|target|crypto|network|fs|io|agent|ledger|memory)\\.[A-Za-z0-9_]+\\b"
+        },
+        {
+          "name": "support.constant.architecture.fgx",
+          "match": "\\b(?:x86_64|aarch64|arm64|armv7|riscv32|riscv64|risc-v)\\b"
+        }
+      ]
+    },
+    "assembly": {
+      "patterns": [
+        {
+          "name": "keyword.control.unsafe.fgx",
+          "match": "\\bunsafe\\b"
+        },
+        {
+          "name": "keyword.other.asm.fgx",
+          "match": "\\b(?:asm|ASM|abi|clobbers|inputs|outputs)\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.fgx",
+          "match": "\\b(?:struct|fn|let|return|require|if|else|for|in|while|break|continue|as|effects|pub|mut)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "storage.type.fgx",
+          "match": "\\b(?:bool|i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|usize|void)\\b"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.fgx",
+          "match": "\\b(?:0x[0-9A-Fa-f_]+|[0-9][0-9_]*(?:\\.[0-9_]+)?)\\b"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "name": "meta.function.fgx",
+          "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.control.fgx" },
+            "2": { "name": "entity.name.function.fgx" }
+          }
+        },
+        {
+          "name": "meta.struct.fgx",
+          "match": "\\b(struct)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.control.fgx" },
+            "2": { "name": "entity.name.type.struct.fgx" }
+          }
+        }
+      ]
+    }
+  }
+}

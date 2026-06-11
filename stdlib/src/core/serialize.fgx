@@ -1,0 +1,4 @@
+module core.serialize
+
+export fn core_serialize_text_len(value: str) -> usize effects [serialize]:
+    return core_runtime_serialize_text_len(value)

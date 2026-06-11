@@ -1,0 +1,20 @@
+module core.math
+
+export fn core_math_clamp_i16(x: f32) -> i16:
+    if x > 32767.0:
+        return 32767
+    if x < -32768.0:
+        return -32768
+    return i16(x)
+
+export fn core_math_checked_add_i32(left: i32, right: i32) -> i32:
+    return left + right
+
+export fn core_math_checked_sub_i32(left: i32, right: i32) -> i32:
+    return left - right
+
+export fn core_math_checked_mul_i32(left: i32, right: i32) -> i32:
+    return left * right
+
+export fn core_math_saturating_add_i16(left: i16, right: i16) -> i16:
+    return core_math_clamp_i16(f32(left) + f32(right))

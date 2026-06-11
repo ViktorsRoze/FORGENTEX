@@ -1,0 +1,16 @@
+module core.result
+
+export fn core_result_ok_u8(value: u8) -> Result[u8,u8]:
+    return Ok(value)
+
+export fn core_result_err_u8(value: u8) -> Result[u8,u8]:
+    return Err(value)
+
+export fn core_result_is_ok_u8(value: Result[u8,u8]) -> bool:
+    return is_ok(value)
+
+export fn core_result_is_err_u8(value: Result[u8,u8]) -> bool:
+    return is_err(value)
+
+export fn core_result_unwrap_or_u8(value: Result[u8,u8], fallback: u8) -> u8:
+    return unwrap_or(value, fallback)

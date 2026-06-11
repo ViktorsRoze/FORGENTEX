@@ -1,0 +1,11 @@
+{
+  "args": {
+    "scope": "demo",
+    "endpoint": "https://agent.local/ping"
+  },
+  "expect": {
+    "return": {
+      "Ok": "pong:demo:https://agent.local/ping"
+    }
+  }
+}

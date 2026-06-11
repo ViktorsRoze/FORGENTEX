@@ -1,0 +1,6 @@
+fn clamp_small(x: i32) -> i32:
+    if x < 0:
+        return 0
+    if x > 10:
+        return 10
+    return x

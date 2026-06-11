@@ -1,0 +1,96 @@
+M abi/layout_demo.fgx
+  S AbiPacket @struct.AbiPacket fields=5 tokens~35
+  S PackedHeader @struct.PackedHeader fields=2 tokens~35
+  F inspect_packet @function.inspect_packet unsafe params=1 tokens~35
+M agent/payment_receipt.fgx
+  F issue_receipt @function.issue_receipt effects=crypto.hash,ledger.mock,agent.payment params=5 tokens~44
+  F receipt_ok @function.receipt_ok params=1 tokens~44
+M agent/signed_patch.fgx
+  F patch_hash @function.patch_hash effects=agent.patch,crypto.hash params=1 tokens~42
+  F sign_patch @function.sign_patch effects=crypto.sign,crypto.secret params=2 tokens~42
+  F verify_patch @function.verify_patch effects=crypto.verify params=3 tokens~42
+M arch/aarch64_copy_neon.fgx
+  F copy_neon_aarch64 @function.copy_neon_aarch64 unsafe asm effects=cpu.neon params=2 tokens~31
+M arch/aarch64_popcount.fgx
+  F popcount_aarch64 @function.popcount_aarch64 unsafe asm effects=cpu.neon params=1 tokens~24
+M arch/riscv64_add.fgx
+  F add_riscv64 @function.add_riscv64 unsafe asm params=2 tokens~26
+M arch/riscv64_vector_add_v.fgx
+  F vector_add_riscv64_v @function.vector_add_riscv64_v unsafe asm effects=cpu.v params=2 tokens~33
+M arch/x86_64_popcount.fgx
+  F popcount_x86_64 @function.popcount_x86_64 unsafe asm effects=cpu.popcnt params=1 tokens~24
+M hello.fgx
+  S Point @struct.Point fields=2 tokens~17
+  F area @function.area params=2 tokens~17
+M io/file_copy.fgx
+  F file_copy_demo @function.file_copy_demo effects=fs.read,fs.write params=3 tokens~29
+  F count_payload @function.count_payload effects=stream params=1 tokens~29
+M media/audio_mix.fgx
+  S AudioBlock @struct.AudioBlock fields=3 tokens~53
+  F clamp_i16 @function.clamp_i16 params=1 tokens~53
+  F mix_samples @function.mix_samples params=4 tokens~53
+M media/audio_mix_simd.fgx
+  S AudioBlock @struct.AudioBlock fields=3 tokens~147
+  F clamp_i16 @function.clamp_i16 params=1 tokens~147
+  F mix_samples_scalar @function.mix_samples_scalar params=4 tokens~147
+  F mix_samples_simd @function.mix_samples_simd effects=cpu.simd params=4 tokens~147
+  F test_mix_samples_simd_equivalence @function.test_mix_samples_simd_equivalence params=0 tokens~147
+M media/bitreader.fgx
+  S BitReader @struct.BitReader fields=2 tokens~37
+  F read_bits @function.read_bits params=3 tokens~37
+M media/h264_nal_header.fgx
+  S H264NalHeader @struct.H264NalHeader fields=3 tokens~40
+  F parse_h264_nal_header @function.parse_h264_nal_header params=1 tokens~40
+M media/idct4x4.fgx
+  F idct_4x4_scalar @function.idct_4x4_scalar params=2 tokens~21
+M media/popcount_aarch64.fgx
+  F popcount_aarch64 @function.popcount_aarch64 unsafe asm effects=cpu.neon params=1 tokens~24
+M media/popcount_riscv64.fgx
+  F popcount_riscv64 @function.popcount_riscv64 unsafe asm effects=cpu.zbb params=1 tokens~24
+M media/popcount_x86.fgx
+  F popcount_x86 @function.popcount_x86 unsafe asm effects=cpu.popcnt params=1 tokens~24
+M network/agent_ping.fgx
+  F agent_ping @function.agent_ping effects=network.connect,network.read,network.http params=2 tokens~45
+  F agent_ping_post @function.agent_ping_post effects=network.connect,network.write,network.read,network.http params=3 tokens~45
+  F payload_size @function.payload_size effects=serialize params=1 tokens~45
+M packages/codec_app/src/app.fgx
+  F app_scale @function.app_scale params=2 tokens~15
+M packages/codec_common/src/common.fgx
+  F codec_scale_i32 @function.codec_scale_i32 params=2 tokens~14
+M project/media/audio.fgx
+  F clamp_i16 @function.clamp_i16 params=1 tokens~51
+  F mix_samples @function.mix_samples params=4 tokens~51
+M project/media/bitstream.fgx
+  S BitReader @struct.BitReader fields=2 tokens~76
+  F read_bits @function.read_bits params=3 tokens~76
+  F parse_h264_nal_header @function.parse_h264_nal_header params=1 tokens~76
+M project/media/types.fgx
+  S AudioBlock @struct.AudioBlock fields=3 tokens~20
+  S H264NalHeader @struct.H264NalHeader fields=3 tokens~20
+M smoke/arithmetic.fgx
+  F add_mul @function.add_mul params=3 tokens~15
+M smoke/asm_review_only.fgx
+  F popcount_demo @function.popcount_demo unsafe asm effects=cpu.popcnt params=1 tokens~24
+M smoke/borrow_alias_bad.fgx
+  F fill @function.fill params=2 tokens~24
+  F bad @function.bad params=1 tokens~24
+M smoke/branching.fgx
+  F clamp_small @function.clamp_small params=1 tokens~19
+M smoke/inline_tests.fgx
+  F clamp_byte @function.clamp_byte params=1 tokens~53
+  T clamp high @test.clamp_high xfail=false expectations=1 tokens~53
+  T clamp low @test.clamp_low xfail=false expectations=1 tokens~53
+  T safe assembly rejected @test.safe_assembly_rejected xfail=true expectations=1 tokens~53
+  F asm_bad @function.asm_bad asm params=1 tokens~53
+M smoke/loop_sum.fgx
+  F sum_u8 @function.sum_u8 params=1 tokens~25
+M smoke/move_if_bad.fgx
+  S Packet @struct.Packet fields=1 tokens~20
+  F bad @function.bad params=2 tokens~20
+M smoke/raw_pointer_bad.fgx
+  F bad @function.bad params=1 tokens~8
+M smoke/slice_write.fgx
+  F fill_ramp @function.fill_ramp params=1 tokens~17
+M smoke/struct_point.fgx
+  S Point @struct.Point fields=2 tokens~23
+  F point_sum @function.point_sum params=2 tokens~23

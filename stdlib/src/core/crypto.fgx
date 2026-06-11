@@ -1,0 +1,25 @@
+module core.crypto
+
+export fn core_crypto_mock_secret_key(label: str) -> SecretKey[Ed25519] effects [crypto.secret]:
+    return core_runtime_crypto_mock_secret_key(label)
+
+export fn core_crypto_public_key_ed25519(secret: SecretKey[Ed25519]) -> PublicKey[Ed25519] effects [crypto.derive, crypto.secret]:
+    return core_runtime_crypto_public_key_ed25519(secret)
+
+export fn core_crypto_hash_blake3(message: str) -> Hash[Blake3] effects [crypto.hash]:
+    return core_runtime_crypto_hash_blake3(message)
+
+export fn core_crypto_sign_ed25519(secret: SecretKey[Ed25519], message: str) -> Signature[Ed25519] effects [crypto.sign, crypto.secret]:
+    return core_runtime_crypto_sign_ed25519(secret, message)
+
+export fn core_crypto_verify_ed25519(public_key: PublicKey[Ed25519], message: str, signature: Signature[Ed25519]) -> bool effects [crypto.verify]:
+    return core_runtime_crypto_verify_ed25519(public_key, message, signature)
+
+export fn core_crypto_nonce(label: str) -> Nonce effects [crypto.nonce]:
+    return core_runtime_crypto_nonce(label)
+
+export unsafe fn core_crypto_export_secret_key(secret: SecretKey[Ed25519]) -> str effects [crypto.secret, serialize]:
+    return core_runtime_crypto_export_secret_key(secret)
+
+export unsafe fn core_crypto_clone_secret_key(secret: SecretKey[Ed25519]) -> SecretKey[Ed25519] effects [crypto.secret]:
+    return core_runtime_crypto_clone_secret_key(secret)

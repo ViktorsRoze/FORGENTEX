@@ -1,0 +1,7 @@
+struct Point:
+    x: i32
+    y: i32
+
+fn point_sum(x: i32, y: i32) -> i32:
+    let p: Point = Point(x, y)
+    return p.x + p.y

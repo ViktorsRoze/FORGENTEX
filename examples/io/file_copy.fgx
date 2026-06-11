@@ -1,0 +1,8 @@
+import core.fs
+import core.stream
+
+fn file_copy_demo(scope: str, source: str, dest: str) -> Result[usize,str] effects [fs.read, fs.write]:
+    return core_fs_copy_text(scope, source, dest)
+
+fn count_payload(payload: str) -> usize effects [stream]:
+    return core_stream_count_bytes(payload)

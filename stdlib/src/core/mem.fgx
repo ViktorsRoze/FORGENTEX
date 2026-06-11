@@ -1,0 +1,4 @@
+module core.mem
+
+export fn core_mem_is_aligned_i16(values: &[i16], alignment: usize) -> bool:
+    return aligned(values, alignment)

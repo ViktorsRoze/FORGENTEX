@@ -1,0 +1,3 @@
+PATCH @function.mix_samples
+INSERT_FAST_PATH target=x86_64,avx2 call=mix_samples_avx2
+ADD_UNSAFE_ASM_STUB name=mix_samples_avx2 target=x86_64 effect=cpu.avx2

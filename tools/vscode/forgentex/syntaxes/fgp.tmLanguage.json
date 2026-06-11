@@ -1,0 +1,82 @@
+{
+  "name": "Forgentex Patch",
+  "scopeName": "source.fgp",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#headers" },
+    { "include": "#operations" },
+    { "include": "#nodeIds" },
+    { "include": "#effects" },
+    { "include": "#numbers" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.number-sign.fgp",
+          "match": "#.*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.fgp",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.fgp",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "headers": {
+      "patterns": [
+        {
+          "name": "keyword.other.patch-header.fgp",
+          "match": "\\b(?:VERSION|AUTHOR|INTENT|SIGNED_BY|SIGNATURE|SIGNATURE_ALG|KEY_ID|TARGET|PRECONDITION|EXPECTS|EFFECTS|APPROVAL|REVIEW)\\b"
+        }
+      ]
+    },
+    "operations": {
+      "patterns": [
+        {
+          "name": "keyword.control.patch-operation.fgp",
+          "match": "\\b(?:OP|ADD_FUNCTION|ADD_STRUCT_FIELD|REPLACE_FUNCTION_BODY|REPLACE_RETURN_TYPE|RENAME_FUNCTION|INSERT_FAST_PATH|ADD_UNSAFE_ASM_STUB|ADD_EFFECT|REPLACE_EFFECTS|ADD_ARCH_VARIANT|LOWER_TO_IR)\\b"
+        }
+      ]
+    },
+    "nodeIds": {
+      "patterns": [
+        {
+          "name": "entity.name.tag.node-id.fgp",
+          "match": "@(?:function|struct|module|statement|expression)\\.[A-Za-z0-9_.]+"
+        }
+      ]
+    },
+    "effects": {
+      "patterns": [
+        {
+          "name": "support.constant.effect.fgp",
+          "match": "\\b(?:cpu|target|crypto|network|fs|io|agent|ledger|memory)\\.[A-Za-z0-9_]+\\b"
+        },
+        {
+          "name": "support.constant.architecture.fgp",
+          "match": "\\b(?:x86_64|aarch64|arm64|armv7|riscv32|riscv64|risc-v)\\b"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.fgp",
+          "match": "\\b(?:0x[0-9A-Fa-f_]+|[0-9][0-9_]*(?:\\.[0-9_]+)?)\\b"
+        }
+      ]
+    }
+  }
+}

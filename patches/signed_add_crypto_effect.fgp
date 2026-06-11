@@ -1,0 +1,8 @@
+VERSION 1
+AUTHOR agent.demo
+SIGNED_BY agent-public-demo
+SIGNATURE_ALGORITHM Ed25519
+SIGNATURE mock-sig-stage18-demo
+TARGET @function.mix_samples
+PRECONDITION NODE_EXISTS @function.mix_samples
+OP ADD_EFFECT effect=crypto.verify

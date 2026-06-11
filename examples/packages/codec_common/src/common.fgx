@@ -1,0 +1,4 @@
+module codec.common
+
+export fn codec_scale_i32(value: i32, gain: i32) -> i32:
+    return value * gain

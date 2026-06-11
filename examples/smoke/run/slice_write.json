@@ -1,0 +1,11 @@
+{
+  "args": {
+    "dst": [9, 9, 9, 9]
+  },
+  "expect": {
+    "return": null,
+    "bindings": {
+      "dst": [0, 1, 2, 3]
+    }
+  }
+}

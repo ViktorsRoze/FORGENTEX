@@ -1,0 +1,11 @@
+import core.net
+import core.serialize
+
+fn agent_ping(scope: str, endpoint: str) -> Result[str,str] effects [network.connect, network.read, network.http]:
+    return core_net_http_get(scope, endpoint)
+
+fn agent_ping_post(scope: str, endpoint: str, payload: str) -> Result[str,str] effects [network.connect, network.write, network.read, network.http]:
+    return core_net_http_post(scope, endpoint, payload)
+
+fn payload_size(payload: str) -> usize effects [serialize]:
+    return core_serialize_text_len(payload)

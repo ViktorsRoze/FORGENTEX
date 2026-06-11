@@ -1,0 +1,11 @@
+module media.types
+
+export struct AudioBlock:
+    samples: &[i16]
+    rate: u32
+    channels: u8
+
+export struct H264NalHeader:
+    forbidden_zero: u8
+    nal_ref_idc: u8
+    nal_unit_type: u8

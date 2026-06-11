@@ -1,0 +1,34 @@
+[package]
+name = "codec-app"
+version = "0.1.0"
+root = "src"
+
+[dependencies]
+codec_common = { path = "../codec_common", version = "0.1.0" }
+
+[targets]
+matrix = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "riscv64gc-unknown-linux-gnu"]
+
+[profile.dev]
+backend = "c"
+optimize = "none"
+debug = true
+
+[security]
+trust = "untrusted"
+signed_by = "agent-public-demo"
+signature_algorithm = "Ed25519"
+signature = "mock-sig-codec-app"
+reproducible = true
+
+[permissions]
+fs.read = ["src", "../codec_common/src"]
+fs.write = ["build"]
+io = ["stdout"]
+crypto = ["verify"]
+
+[sandbox]
+build_scripts = "deny"
+codegen = "deny"
+tests = "sandboxed"
+agent_tools = "deny"

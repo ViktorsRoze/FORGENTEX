@@ -1,0 +1,20 @@
+@repr(C)
+@aligned(16)
+struct AbiPacket:
+    @endian(little)
+    version: u32
+    flags: u8
+    _pad0: padding[3]
+    data: *const u8
+    len: usize
+
+@repr(C)
+@packed
+struct PackedHeader:
+    kind: u8
+    @endian(big)
+    length: u32
+
+@extern(C)
+unsafe fn inspect_packet(packet: *const AbiPacket) -> usize:
+    return 0

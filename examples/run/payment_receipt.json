@@ -1,0 +1,9 @@
+{
+  "args": {
+    "payer": "public:ed25519:payer",
+    "payee": "public:ed25519:payee",
+    "symbol": "MOCK",
+    "amount": 25,
+    "memo": "stage18 demo"
+  }
+}

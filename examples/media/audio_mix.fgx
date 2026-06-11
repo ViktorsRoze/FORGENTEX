@@ -1,0 +1,17 @@
+import core.math
+import core.slice
+
+struct AudioBlock:
+    samples: &[i16]
+    rate: u32
+    channels: u8
+
+fn clamp_i16(x: f32) -> i16:
+    return core_math_clamp_i16(x)
+
+fn mix_samples(dst: &mut [i16], a: &[i16], b: &[i16], gain: f32) -> void:
+    core_slice_require_mut_same_len_i16(dst, a)
+    core_slice_require_mut_same_len_i16(dst, b)
+    for i in 0 .. core_slice_len_mut_i16(dst):
+        let x: f32 = f32(a[i]) * gain + f32(b[i])
+        dst[i] = core_math_clamp_i16(x)

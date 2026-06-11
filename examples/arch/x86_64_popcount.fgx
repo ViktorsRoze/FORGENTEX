@@ -1,0 +1,7 @@
+unsafe fn popcount_x86_64(x: u64) -> u32 effects [cpu.popcnt]:
+    asm x86_64:
+        in rax: x
+        out rax: y
+        clobber flags
+        op popcnt rax rax
+    return u32(y)

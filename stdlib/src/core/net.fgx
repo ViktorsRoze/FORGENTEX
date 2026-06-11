@@ -1,0 +1,16 @@
+module core.net
+
+export fn core_net_http_get(scope: str, url: str) -> Result[str,str] effects [network.connect, network.read, network.http]:
+    return core_runtime_net_http_get(scope, url)
+
+export fn core_net_http_post(scope: str, url: str, body: str) -> Result[str,str] effects [network.connect, network.write, network.read, network.http]:
+    return core_runtime_net_http_post(scope, url, body)
+
+export fn core_net_tcp_send(scope: str, endpoint: str, payload: str) -> Result[usize,str] effects [network.connect, network.write]:
+    return core_runtime_net_tcp_send(scope, endpoint, payload)
+
+export fn core_net_udp_send(scope: str, endpoint: str, payload: str) -> Result[usize,str] effects [network.udp, network.write]:
+    return core_runtime_net_udp_send(scope, endpoint, payload)
+
+export fn core_net_websocket_send(scope: str, endpoint: str, payload: str) -> Result[usize,str] effects [network.connect, network.write, network.websocket]:
+    return core_runtime_net_websocket_send(scope, endpoint, payload)

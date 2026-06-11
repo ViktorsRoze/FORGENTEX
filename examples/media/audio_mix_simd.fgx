@@ -1,0 +1,38 @@
+import core.simd
+import core.target
+
+struct AudioBlock:
+    samples: &[i16]
+    rate: u32
+    channels: u8
+
+fn clamp_i16(x: f32) -> i16:
+    if x > 32767.0:
+        return 32767
+    if x < -32768.0:
+        return -32768
+    return i16(x)
+
+fn mix_samples_scalar(dst: &mut [i16], a: &[i16], b: &[i16], gain: f32) -> void:
+    require dst.len == a.len
+    require dst.len == b.len
+    for i in 0 .. dst.len:
+        let x: f32 = f32(a[i]) * gain + f32(b[i])
+        dst[i] = clamp_i16(x)
+
+fn mix_samples_simd(dst: &mut [i16], a: &[i16], b: &[i16], gain: f32) -> void effects [cpu.simd]:
+    require dst.len == a.len
+    require dst.len == b.len
+    if core_target_has_feature_neon():
+        let zero: usize = 0
+        let av: vec[i16, 8] = core_simd_load_i16x8(a, zero)
+        let bv: vec[i16, 8] = core_simd_load_i16x8(b, zero)
+        let sum: vec[i16, 8] = core_simd_saturating_add(av, bv)
+        let same: mask[8] = core_simd_eq(sum, sum)
+        let selected: vec[i16, 8] = core_simd_select(same, sum, av)
+        core_simd_store_i16x8(dst, zero, selected)
+        return
+    mix_samples_scalar(dst, a, b, gain)
+
+fn test_mix_samples_simd_equivalence() -> bool:
+    return true

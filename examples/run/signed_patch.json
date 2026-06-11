@@ -1,0 +1,6 @@
+{
+  "args": {
+    "agent_secret": "secret:ed25519:demo",
+    "patch_text": "VERSION 1\nTARGET @function.mix_samples\nOP ADD_EFFECT effect=crypto.verify\n"
+  }
+}

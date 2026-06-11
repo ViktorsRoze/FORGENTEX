@@ -1,0 +1,16 @@
+module core.fs
+
+export fn core_fs_scope_read(scope: str) -> bool effects [fs.read]:
+    return core_runtime_fs_scope_read(scope)
+
+export fn core_fs_scope_write(scope: str) -> bool effects [fs.write]:
+    return core_runtime_fs_scope_write(scope)
+
+export fn core_fs_read_text(scope: str, path: str) -> Result[str,str] effects [fs.read]:
+    return core_runtime_fs_read_text(scope, path)
+
+export fn core_fs_write_text(scope: str, path: str, contents: str) -> Result[usize,str] effects [fs.write]:
+    return core_runtime_fs_write_text(scope, path, contents)
+
+export fn core_fs_copy_text(scope: str, source: str, dest: str) -> Result[usize,str] effects [fs.read, fs.write]:
+    return core_runtime_fs_copy_text(scope, source, dest)

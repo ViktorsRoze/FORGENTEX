@@ -1,0 +1,4 @@
+module core.stream
+
+export fn core_stream_count_bytes(chunk: str) -> usize effects [stream]:
+    return core_runtime_stream_count_bytes(chunk)

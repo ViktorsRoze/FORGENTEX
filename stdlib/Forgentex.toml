@@ -1,0 +1,4 @@
+[package]
+name = "forgentex-stdlib"
+version = "0.1.0"
+root = "src"

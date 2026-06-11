@@ -1,0 +1,20 @@
+[package]
+name = "forgentex"
+version = "0.1.0"
+edition = "2021"
+description = "Forgentex first demo CLI: dual syntax, shared AST, patching, diagnostics, and tiny interpreter."
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "forgentex"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fgx"
+path = "src/main.rs"
+
+[[bin]]
+name = "forgentex-lsp"
+path = "src/lsp_main.rs"
+
+[dependencies]

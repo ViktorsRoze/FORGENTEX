@@ -1,0 +1,11 @@
+import core.crypto
+import core.agent
+
+fn patch_hash(patch_text: str) -> Hash[Blake3] effects [agent.patch, crypto.hash]:
+    return core_agent_signed_patch_hash(patch_text)
+
+fn sign_patch(agent_secret: SecretKey[Ed25519], patch_text: str) -> Signature[Ed25519] effects [crypto.sign, crypto.secret]:
+    return core_crypto_sign_ed25519(agent_secret, patch_text)
+
+fn verify_patch(agent_public: PublicKey[Ed25519], patch_text: str, signature: Signature[Ed25519]) -> bool effects [crypto.verify]:
+    return core_crypto_verify_ed25519(agent_public, patch_text, signature)
