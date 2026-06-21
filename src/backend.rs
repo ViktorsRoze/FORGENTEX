@@ -418,7 +418,9 @@ fn lower_project_to_ir(project: &Project) -> BackendIr {
                         Item::Function(function) => {
                             functions.push(lower_function(function, &public))
                         }
-                        Item::Test(_) => {}
+                        // Capsules are review-only foreign code; shares are
+                        // metadata. Neither is lowered to backend IR.
+                        Item::Test(_) | Item::Capsule(_) | Item::Share(_) => {}
                     }
                 }
                 IrModule {

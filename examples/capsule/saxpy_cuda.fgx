@@ -1,0 +1,13 @@
+foreign saxpy cuda version "cuda-12.4" env "cuda-12.4-sm_80" effects [gpu.compute, alloc]:
+    input x: &[f32]
+    input y: &mut [f32]
+    output ok: bool
+    dep "github:org/saxpy@a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+    sandbox "gpu.compute device:0"
+    sandbox "limit.mem_mb 512"
+    code:
+        // y = a*x + y on the GPU; raw device buffers cross the C ABI
+        __global__ void saxpy(int n, float a, const float* x, float* y) {
+            int i = blockIdx.x * blockDim.x + threadIdx.x;
+            if (i < n) y[i] = a * x[i] + y[i];
+        }

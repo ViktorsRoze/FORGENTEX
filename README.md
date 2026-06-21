@@ -5,14 +5,15 @@
 <h1 align="center">Forgentex</h1>
 
 <p align="center">
-  <b>The systems language designed for AI coding agents — and the humans who review them.</b>
+  <b>The agent-native language that brings tools, agents, and other programming languages together — typed, gated, audited, token-efficient.</b>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/release-v1.0-blue" alt="v1.0">
+  <img src="https://img.shields.io/badge/v1.0-released-blue" alt="v1.0">
+  <img src="https://img.shields.io/badge/v2%20polyglot-complete-blue" alt="v2 polyglot complete">
   <img src="https://img.shields.io/badge/dependencies-zero-brightgreen" alt="zero dependencies">
-  <img src="https://img.shields.io/badge/tests-218%20passing-brightgreen" alt="218 tests">
-  <img src="https://img.shields.io/badge/borrow%20conformance-30%2F30-brightgreen" alt="borrow conformance">
+  <img src="https://img.shields.io/badge/tests-377%20passing-brightgreen" alt="377 tests">
+  <img src="https://img.shields.io/badge/languages-7%20runtimes-brightgreen" alt="7 language runtimes">
   <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-lightgrey" alt="license">
 </p>
 
@@ -64,136 +65,208 @@ F area(width i32, height i32) -> i32 {
 </tr>
 </table>
 
-And agents don't rewrite files — they send **semantic patches** that the
-compiler validates before anything touches disk:
+Agents don't rewrite files — they send **semantic patches** the compiler
+validates before anything touches disk, and the compiler answers with a
+review report a human can act on in seconds: *what changed, which
+unsafe/assembly/ABI/effect surfaces it touched, and which tests prove it.*
+
+## Now it runs for real — the v2 polyglot arc (v2.0 → v2.24)
+
+v1 made the language. **v2 made it execute — across seven language families,
+all under one typed boundary, one capability gate, one audit, with a
+dependency-free core.** The strategy: never reimplement a runtime — *stand on
+host toolchains* and govern them.
+
+Every bridge was **verified on a real host runtime** this development cycle:
+
+| Language | Backend | Verified on |
+| --- | --- | --- |
+| C / C++ / Rust / Zig | native object + C-ABI FFI | **gcc 15.2.0** |
+| Python | host CPython | **CPython 3.8.5** |
+| JavaScript / TypeScript | host Node | **Node 24.17.0** |
+| Java | host JDK (`javac` + `java`) | **OpenJDK 21.0.11** |
+| C# | host .NET SDK | **.NET SDK 2.1.801** |
+| Go | host `go run` | **go 1.26.4** |
+
+One command runs them all through **one calling convention and one gate**, and
+the shared typed namespace becomes a **cross-language data plane** — a value
+declared once flows across languages *by name*:
 
 ```text
-PATCH @function.mix_samples
-INSERT_FAST_PATH target=x86_64,avx2 call=mix_samples_avx2
-ADD_UNSAFE_ASM_STUB name=mix_samples_avx2 target=x86_64 effect=cpu.avx2
+$ fgx polyglot-run examples/web/one_roof.fgx
+schema=forgentex.polyglot_abi.v1 status=ok languages=[javascript, python]
+  @accumulate   python      backend=python  gate=allow exec=ok  2/2
+  @render       javascript  backend=node    gate=allow exec=ok  2/2
+  data plane (declare once, flow by name):
+    total : i64 -> accumulate[python:rw], render[javascript:read]
+  wired fixtures: 4/4 passed
 ```
 
-The compiler answers with a review report a human can act on in seconds:
-*what changed, which unsafe/assembly/ABI/effect surfaces it touched, and
-which tests prove it*.
+Alongside the bridges, v2 shipped the rest of a real runtime — all gated and
+transcribed: **native build** (`fgx build --native` → host `cc` → a linkable
+object), **effect-gated I/O** (`core.io`), **effect-gated TCP** (`core.net`),
+**real crypto hashing** (`core.hash` — SHA-256/HMAC), and an **agent trust
+fabric** (signed capability tokens, replay/tamper rejection, audit receipts).
+
+## Experiment results
+
+Forgentex's culture is *measure, don't assume*. The numbers below come from
+the toolchain's own measurement commands.
+
+**Token efficiency**
+
+- 🩹 **Edit-task benchmark** (`fgx edit-bench`): an agent that edits via
+  *map + per-symbol read + semantic patch* beats *whole-file resend* **from the
+  very first edit** — ~**2×** cheaper on a 2-function file, ~**8×** on a
+  12-function file.
+- 🧩 **Polyglot boundary equalizer** (`fgx capsule-tokens`): agents work from a
+  one-line **boundary card**, not the foreign body. Body-vs-boundary tokens
+  run **3.1× (C)** to **6.8× (Java, ~85% saved)** — verbose languages cost no
+  more to *use* than terse ones, because the body is content-addressed and
+  pulled only when edited.
+- 🔤 **Dual-name prelude**: high-frequency builtins get two-letter `.fgai`
+  aliases, moving `audio_mix` agent/human tokens **0.93 → 0.82**, lossless.
+
+**Real execution, verified**
+
+- 🔧 **Native**: `fgx build --native` produced a real object via gcc with
+  linkable exported symbols (`nm` shows `T clamp_i32`, …).
+- 🔐 **Crypto**: `fgx crypto-selftest` passes **6/6** official NIST/RFC 4231
+  vectors; `SHA-256("abc")` matches CPython's `hashlib` byte-for-byte.
+- 📁 **I/O fails closed**: a copy is **denied without an `fs` grant** and the
+  destination file is *never created*; allowed with the grant, it copies for
+  real — every op in a deterministic transcript.
+- 🌐 **Networking fails closed**: a TCP request to an **unlisted endpoint never
+  opens a socket**; an allowlisted one does a real loopback round-trip.
+- 🤝 **Agent trust**: an HMAC capability token + signed message crosses a real
+  TCP socket; **replay and tampering are rejected**; the secret key is never
+  logged (only a `key_id`).
+
+Reproduce any of these:
+
+```bash
+fgx edit-bench examples/audio/src/dsp.fgx          # token benchmark
+fgx capsule-tokens examples/capsule/order_total_java.fgx
+fgx crypto-selftest                                # known-answer crypto vectors
+fgx trust-session                                  # end-to-end agent trust loop
+fgx polyglot-run examples/web/one_roof.fgx         # backend + frontend, one roof
+```
 
 ## Why would I want this?
 
-When an LLM edits a normal codebase it burns tokens on formatting, reads
-whole files to change one function, breaks things with fragile text diffs,
-and gets compiler errors written for humans. Forgentex treats the program
-as a **typed semantic database** instead:
+When an LLM edits a normal codebase it burns tokens on formatting, reads whole
+files to change one function, breaks things with fragile text diffs, and gets
+compiler errors written for humans. Forgentex treats the program as a **typed
+semantic database** and the surrounding tools/agents/languages as a **governed
+fabric**:
 
-- 🗺️ **Project maps** (`.fgmap`) let an agent navigate a codebase by symbol
-  and load only the nodes it needs — with token-cost estimates.
-- 🩹 **Semantic patches** (`.fgp`) are small, validated, signable, and
-  conflict-checked by node hash — no more "the diff didn't apply".
-- 🤖 **Machine-readable diagnostics**: every error has a stable code, a node
-  ID, expected/found types, and *suggested repair patches* an agent can
-  apply directly (`fgx fix --plan`).
-- 🛡️ **Safety you can audit**: ownership and borrow checking, an effect
-  system (`io.read`, `network.write`, `crypto.sign`, `cpu.avx2`, …),
-  explicit `unsafe`, and structured assembly with validated registers and
-  clobbers — all surfaced in review reports.
-- ⚡ **A systems core**: Rust-inspired ownership, Zig-inspired explicitness,
-  slices, SIMD vector types, ABI/layout reports, C11 and Zig backends.
+- 🗺️ **Project maps** (`.fgmap`) — navigate by symbol, load only the nodes you
+  need, with token-cost estimates.
+- 🩹 **Semantic patches** (`.fgp`) — small, validated, signable, conflict-checked
+  by node hash.
+- 🤖 **Machine-readable diagnostics** — stable codes, node IDs, expected/found
+  types, and *suggested repair patches* (`fgx fix --plan`).
+- 🛡️ **Safety you can audit** — ownership/borrow checking, an effect system
+  (`fs.read`, `network.write`, `crypto.sign`, `gpu`, …) now *enforced at
+  runtime*, explicit `unsafe`, structured assembly, capability sandboxing.
+- 🧬 **Foreign code, governed** — Python/JS/TS/Java/C#/Go/C/… run behind a
+  typed boundary, sandbox, pinned + audited dependencies, and a deterministic
+  fixture transcript.
 
 ## Try it in two minutes
 
 All you need is [Rust](https://rustup.rs). The toolchain has **zero
-dependencies** — `cargo build` and you have the whole thing.
+dependencies** — `cargo build` and you have the whole thing. (The language
+*bridges* use whatever host runtimes you have installed, and degrade
+gracefully to `runtime_unavailable` when one is absent.)
 
 ```bash
 git clone <this-repo> && cd Forgentex
 cargo build --release
 
-# parse the same program in both syntaxes
+# the same program in both syntaxes
 cargo run --bin fgx -- fmt examples/hello.fgx --to fgai
 
 # type-check with agent-readable diagnostics
 cargo run --bin fgx -- check examples/media/audio_mix.fgx --json
 
-# run a real program through the interpreter
-cargo run --bin fgx -- run examples/media/audio_mix.fgx
+# run a Python capsule for real, behind a typed boundary
+cargo run --bin fgx -- capsule-run examples/capsule/celsius_python.fgx --python
 
-# apply a semantic patch and get the human review report
-cargo run --bin fgx -- patch examples/media/audio_mix.fgx patches/add_fast_path.fgp --review
-
-# see the borrow checker's dataflow evidence
-cargo run --bin fgx -- borrow-report examples/media/audio_mix.fgx --json
+# build Forgentex's own code to a native object via the host C compiler
+cargo run --bin fgx -- build examples/native --native
 
 # ask the toolchain to grade itself
 cargo run --bin fgx -- release-check --target v1.0 --strict
 ```
 
-That last command exits zero: **all fifteen v1.0 maturity gates pass.**
+That last command exits zero: **all fifteen v1.0 maturity gates still pass.**
 
 ## The project in numbers
 
 | | |
 | --- | --- |
-| 🧰 CLI commands (`fgx`) | **41** — parse, check, patch, run, build, bench, audit, map, graph, lsp… |
-| 📚 Standard library modules | **14** (`core.mem`, `core.slice`, `core.math`, `core.simd`, `core.crypto`, …) |
-| 🏗️ Compiler modules | **40** files, **~34,800 lines** of dependency-free Rust |
-| ✅ Tests | **218** (unit + integration) plus a **30-case** borrow conformance suite |
-| 🧪 Diagnostic catalog | **47** stable error codes, each with explanation and repair plan |
-| 🖥️ CPU architectures | **5** (x86_64, ARMv7, AArch64, RISC-V 32, RISC-V 64), 8 target triples |
-| ⚙️ Backends | AST interpreter + **C11** and **Zig** source backends |
-| 📦 Examples | **52** — media/DSP kernels, assembly, networking, signed patches, packages |
-| 📖 Design docs | **51** in [`docs/`](docs/), one per subsystem with acceptance gates |
-| 🏁 Milestones shipped | **27**, from v0.1 first demo to the v1.0 release |
-| 🔌 Editor support | Dependency-free **LSP server** + **VS Code extension** package |
+| 🧰 CLI commands (`fgx`) | **61** — parse, check, patch, run, build, capsule-run, polyglot-run, trust-session, edit-bench, capsule-tokens… |
+| 📚 Standard library modules | **17** (`core.math`, `core.simd`, `core.io`, `core.net`/`core.socket`, `core.hash`, …) |
+| 🌉 Language runtimes | **7 families** (C/C++/Rust/Zig via FFI, Python, JS, TS, Java, C#, Go) |
+| 🏗️ Compiler | **133** Rust files, **~41,900 lines** of dependency-free core |
+| ✅ Tests | **377** (unit + integration) plus a 30-case borrow conformance suite |
+| 📊 Report schemas | **60+** stable `forgentex.*.v1` JSON reports (one per subsystem) |
+| 🖥️ CPU architectures | **5** (x86_64, ARMv7, AArch64, RISC-V 32/64) |
+| ⚙️ Backends | AST interpreter + **C11**/**Zig** source + **native object** (host `cc`) |
+| 📦 Examples | **66** — media/DSP, capsules in 7 languages, I/O, networking, trust, polyglot |
+| 📖 Design docs | **80** in [`docs/`](docs/), one per subsystem with acceptance gates |
+| 🏁 Milestones | v0.1 → **v1.0**, then the full **v2.0–v2.24** polyglot arc |
 
-## The road to v1.0
+## The road through v1.0
 
-The hardest gate was the last one: ownership and borrow checking. It was
-built in 13 staged increments (field-sensitive moves, non-lexical borrow
-endings, loop-carried liveness, conditional borrow-state joins, reborrow
-chains, projection alias analysis, interprocedural lifetime contracts…)
-and then unified in v1.0 by a **CFG dataflow borrow checker**: moved paths,
-alias places, and liveness computed as fixpoint analyses over the
-control-flow graph, so every control-flow shape — nested loops, branch
-reassignments, re-moves across loop back edges — is checked by one
-algorithm instead of special cases. A built-in conformance suite
-(`fgx borrow-conformance`) pins all of it.
+The hardest v1.0 gate was ownership and borrow checking, built in 13 staged
+increments and unified by a **CFG dataflow borrow checker**: moved paths,
+alias places, and liveness as fixpoint analyses over the control-flow graph,
+so every control-flow shape is checked by one algorithm. A conformance suite
+(`fgx borrow-conformance`) pins all of it. Every other v1.0 gate shipped along
+the way — dual grammar + AST schema, the semantic patch protocol, project-wide
+checking, the effect system, structured assembly for five architectures,
+portable SIMD with enforced fallbacks, ABI/layout reports, a package manager
+with lockfiles and audits, fuzzing, and differential tests.
 
-Every other gate shipped along the way: stable dual grammar and AST schema,
-the semantic patch protocol, project-wide checking with manifests and
-public-API reports, the effect system, structured assembly validation for
-five architectures, portable SIMD with enforced scalar fallbacks, ABI and
-layout reports, a package manager with lockfiles and audits, fuzzing and
-interpreter-vs-backend differential tests, and the agent workbench protocol
-(compact context packets with token budgets).
+## What's next (v3)
 
-## What's next (v2)
+Planned and designed (see [`docs/v3_backend_plan.md`](docs/v3_backend_plan.md)):
 
-- 🧬 **Foreign code capsules** — typed, sandboxed, version-pinned blocks of
-  Python, JavaScript, TypeScript, C, CUDA, Solidity and more, inside
-  Forgentex projects ([roadmap](docs/v2_roadmap.md))
-- 🔗 **Shared typed namespace** — declare a variable once in Forgentex, use
-  it by the same name natively in Python *and* JavaScript, with the
-  backend and frontend of one app under one roof
-  ([design](docs/v2_shared_namespace.md))
-- 🪙 **Token optimization** — compressed capsule views, the compact
-  documentation register, and a 20-technique catalog for cutting agent
-  token costs ([design](docs/token_optimization_v2.md))
+- ⚙️ **Backend maturity** — a stable Forgentex IR, dependency-free IR
+  optimization, then an **optional, feature-flagged** Cranelift JIT (REPL +
+  hot function reload) and LLVM path. The trusted core stays zero-dependency;
+  backends are opt-in. (Why: C-emission already gives a world-class optimizing
+  backend for free; we only add a dependency for JIT/IR needs.)
+- 🪙 **Project codebook** — an opt-in, per-project *learned* token optimizer
+  that compresses a project's own vocabulary into a committable codebook agents
+  reference ([`docs/project_codebook.md`](docs/project_codebook.md)).
+- 🧠 **Latent agent-message protocol** — the typed, signed, model-versioned
+  *envelope and audit* for latent multi-agent collaboration (inspired by
+  LatentMAS): Forgentex governs the exchange and wraps the model runtime as a
+  capsule; it never computes latents itself
+  ([`docs/latent_agent_protocol.md`](docs/latent_agent_protocol.md)).
 
 ## Dig deeper
 
-- [docs/mature_language_development_plan.md](docs/mature_language_development_plan.md) — the complete development plan
-- [docs/grammar_human_fgx.md](docs/grammar_human_fgx.md) / [docs/grammar_agent_fgai.md](docs/grammar_agent_fgai.md) — the two grammars
-- [docs/semantic_patch_protocol_v1.md](docs/semantic_patch_protocol_v1.md) — how agents edit code
-- [docs/borrow_checker_v1.md](docs/borrow_checker_v1.md) — the safety model
-- [docs/agent_workbench_protocol.md](docs/agent_workbench_protocol.md) — how agents talk to the compiler
+- [commands.md](commands.md) — full command reference and scope
+- [docs/v2_roadmap.md](docs/v2_roadmap.md) — the v2.0–v2.24 polyglot arc, milestone by milestone
+- [docs/native_polyglot_plan.md](docs/native_polyglot_plan.md) — the "stand on host toolchains" architecture
+- [docs/polyglot_abi.md](docs/polyglot_abi.md) — one calling convention across every backend
+- [docs/agent_trust_fabric.md](docs/agent_trust_fabric.md) — signed, replay-protected agent messages
+- [docs/token_efficiency_findings.md](docs/token_efficiency_findings.md) — the measured token results
+- [docs/semantic_patch_protocol_v1.md](docs/semantic_patch_protocol_v1.md) / [docs/borrow_checker_v1.md](docs/borrow_checker_v1.md) — how agents edit, and the safety model
 
 ## Status & contributing
 
-Forgentex is a research-grade v1.0: the language surface is intentionally
-small, the workflow is real. Everything is verified by
-`cargo test`, `cargo clippy -- -D warnings`, fuzzing, differential tests,
-and the toolchain's own `fgx release-check`. If the idea of an
-agent-native, human-auditable systems language excites you — issues, ideas,
-and experiments are very welcome.
+Forgentex is research-grade: the language surface is intentionally small, the
+workflow is real, and everything is verified by `cargo test`,
+`cargo clippy -- -D warnings`, fuzzing, differential tests, and the
+toolchain's own `fgx release-check`. The language *bridges* run on whatever
+host runtimes you have and degrade gracefully when one is missing. If an
+agent-native, human-auditable, polyglot systems language excites you — issues,
+ideas, and experiments are very welcome.
 
 **License:** MIT OR Apache-2.0
 **Viktors Roze**

@@ -1,0 +1,34 @@
+# Web one-roof (v2.20): a Python backend and a JavaScript frontend under one
+# Forgentex roof, sharing one typed value by name.
+#
+#   fgx polyglot-run examples/web/one_roof.fgx
+#   fgx capsule-run examples/web/one_roof.fgx --node --capsule render
+#
+# `total` is declared once; the backend accumulates it (rw) and the frontend
+# renders it (read). polyglot-run runs the Python capsule on host CPython and
+# the JS capsule on host Node, under one schema and one gate.
+
+share total: i64 = 0
+
+foreign accumulate python version "3.13" env "cpython-3.13" effects [alloc]:
+    input amount: i64
+    output running: i64
+    sandbox "fs.none"
+    bind total rw
+    mock 5 -> 5
+    mock 12 -> 12
+    code:
+        def accumulate(amount):
+            return amount
+
+foreign render javascript version "node-22" effects [alloc]:
+    input running: i64
+    output html: str
+    sandbox "fs.none"
+    bind total read
+    mock 5 -> "<b>5</b>"
+    mock 12 -> "<b>12</b>"
+    code:
+        export function render(running) {
+            return "<b>" + running + "</b>";
+        }

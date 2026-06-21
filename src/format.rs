@@ -1,6 +1,6 @@
 use crate::ast::{
-    AsmBlock, Attribute, Expr, FunctionDecl, Item, Program, Stmt, StructDecl, TestDecl,
-    TestExpectation,
+    AsmBlock, Attribute, Capsule, CapsuleBinding, CapsuleFixture, Expr, FunctionDecl, Item,
+    Program, ShareDecl, Stmt, StructDecl, TestDecl, TestExpectation,
 };
 
 pub fn format_human(program: &Program) -> String {
@@ -13,6 +13,8 @@ pub fn format_human(program: &Program) -> String {
             Item::Struct(decl) => format_struct_human(&mut out, decl),
             Item::Function(function) => format_function_human(&mut out, function),
             Item::Test(test) => format_test_human(&mut out, test),
+            Item::Capsule(capsule) => format_capsule_human(&mut out, capsule),
+            Item::Share(share) => format_share_human(&mut out, share),
         }
     }
     finish_document(out)
@@ -28,9 +30,12 @@ pub fn format_agent(program: &Program) -> String {
             Item::Struct(decl) => format_struct_agent(&mut out, decl),
             Item::Function(function) => format_function_agent(&mut out, function),
             Item::Test(test) => format_test_agent(&mut out, test),
+            Item::Capsule(capsule) => format_capsule_agent(&mut out, capsule),
+            Item::Share(share) => format_share_agent(&mut out, share),
         }
     }
-    finish_document(out)
+    // Render high-frequency builtins with their short two-letter aliases.
+    finish_document(crate::prelude::apply_aliases(&out))
 }
 
 fn finish_document(out: String) -> String {
@@ -249,6 +254,139 @@ fn format_test_agent(out: &mut String, test: &TestDecl) {
         }
     }
     out.push_str("}\n");
+}
+
+fn format_share_human(out: &mut String, share: &ShareDecl) {
+    format_attrs_human(out, &share.attrs, 0);
+    out.push_str(&format!("share {}: {}", share.name, share.ty.to_human()));
+    if let Some(default) = &share.default {
+        out.push_str(&format!(" = {}", default.to_literal()));
+    }
+    out.push('\n');
+}
+
+fn format_share_agent(out: &mut String, share: &ShareDecl) {
+    format_attrs_agent(out, &share.attrs);
+    out.push_str(&format!("SHARE {} {}", share.name, share.ty.to_agent()));
+    if let Some(default) = &share.default {
+        out.push_str(&format!(" = {}", default.to_literal()));
+    }
+    out.push('\n');
+}
+
+fn format_capsule_fixture(fixture: &CapsuleFixture) -> String {
+    let render = |values: &[crate::ast::CapsuleValue]| {
+        values
+            .iter()
+            .map(|value| value.to_literal())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "{} -> {}",
+        render(&fixture.inputs),
+        render(&fixture.outputs)
+    )
+}
+
+fn capsule_header_suffix(capsule: &Capsule) -> String {
+    let mut suffix = String::new();
+    if let Some(env) = &capsule.env {
+        suffix.push_str(&format!(" env {}", quoted_string(env)));
+    }
+    if !capsule.effects.is_empty() {
+        suffix.push_str(&format!(" effects [{}]", capsule.effects.join(", ")));
+    }
+    suffix
+}
+
+fn format_capsule_human(out: &mut String, capsule: &Capsule) {
+    format_attrs_human(out, &capsule.attrs, 0);
+    out.push_str(&format!(
+        "foreign {} {} version {}{}:\n",
+        capsule.name,
+        capsule.language,
+        quoted_string(&capsule.version),
+        capsule_header_suffix(capsule)
+    ));
+    for input in &capsule.inputs {
+        out.push_str(&format!(
+            "    input {}: {}\n",
+            input.name,
+            input.ty.to_human()
+        ));
+    }
+    for output in &capsule.outputs {
+        out.push_str(&format!(
+            "    output {}: {}\n",
+            output.name,
+            output.ty.to_human()
+        ));
+    }
+    for dep in &capsule.deps {
+        out.push_str(&format!("    dep {}\n", quoted_string(&dep.source)));
+    }
+    for rule in &capsule.sandbox {
+        out.push_str(&format!("    sandbox {}\n", quoted_string(rule)));
+    }
+    for binding in &capsule.bindings {
+        out.push_str(&format!(
+            "    bind {} {}\n",
+            binding.name,
+            binding.mode.as_str()
+        ));
+    }
+    for fixture in &capsule.fixtures {
+        out.push_str(&format!("    mock {}\n", format_capsule_fixture(fixture)));
+    }
+    out.push_str("    code:\n");
+    for line in &capsule.code {
+        if line.is_empty() {
+            out.push('\n');
+        } else {
+            out.push_str(&format!("        {line}\n"));
+        }
+    }
+}
+
+fn format_capsule_agent(out: &mut String, capsule: &Capsule) {
+    format_attrs_agent(out, &capsule.attrs);
+    out.push_str(&format!(
+        "CAP {} {} {}{}\n",
+        capsule.name,
+        capsule.language,
+        quoted_string(&capsule.version),
+        capsule_header_suffix(capsule)
+    ));
+    let binding = |out: &mut String, label: &str, bindings: &[CapsuleBinding]| {
+        for b in bindings {
+            out.push_str(&format!("  {label} {} {}\n", b.name, b.ty.to_agent()));
+        }
+    };
+    binding(out, "IN", &capsule.inputs);
+    binding(out, "OUT", &capsule.outputs);
+    for dep in &capsule.deps {
+        out.push_str(&format!("  DEP {}\n", quoted_string(&dep.source)));
+    }
+    for rule in &capsule.sandbox {
+        out.push_str(&format!("  SBX {}\n", quoted_string(rule)));
+    }
+    for binding in &capsule.bindings {
+        out.push_str(&format!(
+            "  BIND {} {}\n",
+            binding.name,
+            binding.mode.as_str()
+        ));
+    }
+    for fixture in &capsule.fixtures {
+        out.push_str(&format!("  MOCK {}\n", format_capsule_fixture(fixture)));
+    }
+    out.push_str(&format!("  CODE {}\n", capsule.code.len()));
+    for line in &capsule.code {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str("ENDCAP\n");
 }
 
 fn format_attrs_agent(out: &mut String, attrs: &[Attribute]) {

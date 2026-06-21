@@ -546,7 +546,9 @@ impl TypeRegistry {
                         self.collect_type(&param.ty);
                     }
                 }
-                Item::Test(_) => {}
+                // Capsules are review-only foreign code; shares are metadata.
+                // Neither contributes C types nor is lowered by the backend.
+                Item::Test(_) | Item::Capsule(_) | Item::Share(_) => {}
             }
         }
     }

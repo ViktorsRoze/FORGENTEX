@@ -59,7 +59,7 @@ impl<'a> ProgramContext<'a> {
                 Item::Struct(decl) => {
                     structs.insert(decl.name.clone(), decl);
                 }
-                Item::Test(_) => {}
+                Item::Test(_) | Item::Capsule(_) | Item::Share(_) => {}
             }
         }
         let mut mutating_params = HashMap::new();

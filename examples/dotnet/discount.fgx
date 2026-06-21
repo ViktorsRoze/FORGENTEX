@@ -1,0 +1,21 @@
+# C# as a business-language runtime (v2.23): a typed pricing rule, run for real
+# on the host .NET SDK.
+#
+#   fgx capsule-run examples/dotnet/discount.fgx --csharp
+#
+# Forgentex scaffolds a console project (driver Main + this class), builds it
+# with `dotnet build`, and runs each fixture against the built assembly.
+
+foreign apply_discount csharp version "netcoreapp" effects [alloc]:
+    input price_cents: i64
+    output discounted_cents: i64
+    sandbox "fs.none"
+    mock 10000 -> 9000
+    mock 0 -> 0
+    mock 25000 -> 22500
+    code:
+        public static class Pricing {
+            public static long ApplyDiscount(long priceCents) {
+                return priceCents - priceCents / 10;
+            }
+        }

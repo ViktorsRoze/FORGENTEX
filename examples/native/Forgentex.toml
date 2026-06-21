@@ -1,0 +1,26 @@
+[package]
+name = "native-demo"
+version = "0.1.0"
+root = "src"
+
+[profile.dev]
+backend = "c"
+optimize = "none"
+debug = true
+
+[security]
+trust = "untrusted"
+signed_by = "agent-public-demo"
+signature_algorithm = "Ed25519"
+signature = "mock-sig-native-demo"
+reproducible = true
+
+[permissions]
+fs.read = ["src"]
+fs.write = ["build"]
+
+[sandbox]
+build_scripts = "deny"
+codegen = "deny"
+tests = "sandboxed"
+agent_tools = "deny"

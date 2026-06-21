@@ -24,7 +24,7 @@ pub fn analyze_contracts(program: &Program) -> Vec<LifetimeContract> {
         .iter()
         .filter_map(|item| match item {
             Item::Function(function) => Some(lifetime_contract(function, &functions)),
-            Item::Struct(_) | Item::Test(_) => None,
+            Item::Struct(_) | Item::Test(_) | Item::Capsule(_) | Item::Share(_) => None,
         })
         .collect()
 }
@@ -356,7 +356,7 @@ fn function_index(program: &Program) -> HashMap<String, &FunctionDecl> {
         .iter()
         .filter_map(|item| match item {
             Item::Function(function) => Some((function.name.clone(), function)),
-            Item::Struct(_) | Item::Test(_) => None,
+            Item::Struct(_) | Item::Test(_) | Item::Capsule(_) | Item::Share(_) => None,
         })
         .collect()
 }

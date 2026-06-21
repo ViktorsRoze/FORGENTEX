@@ -827,6 +827,11 @@ Deliverables:
 - shared typed namespace design (`docs/v2_shared_namespace.md`)
 - token optimization design: capsule compression, doc-compact register, and
   the generation/reading idea catalog (`docs/token_optimization_v2.md`)
+- audio DSP track: native DSP core + miniaudio capsule contract, with
+  realtime-safety as a checked effect property (`docs/audio_dsp_track.md`)
+- numeric determinism and precision: exact fixed-point path, deterministic
+  float across backends, explicit rounding, checked arithmetic
+  (`docs/numeric_determinism.md`)
 - foreign language catalog for Python, JavaScript, TypeScript, Java, C#, C,
   C++, CUDA, Go, Bash, PowerShell, Solidity, and Vyper
 - Python 3.13 capsule examples

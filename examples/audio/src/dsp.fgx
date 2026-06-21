@@ -1,0 +1,107 @@
+module audio.dsp
+
+# Forgentex native audio DSP core (audio.1)
+#
+# Pure, realtime-safe signal processing over sample buffers. Every function
+# is effect-free (no alloc, no I/O) so it is safe to run inside an audio
+# callback. This is the part of the audio stack Forgentex owns natively;
+# the OS device and the realtime thread come from a wrapped library
+# (miniaudio) at the capsule boundary. See docs/audio_dsp_track.md.
+
+# Clamp a float sample into the signed 16-bit range.
+export fn clamp_i16(x: f32) -> i16:
+    if x > 32767.0:
+        return 32767
+    if x < -32768.0:
+        return -32768
+    return i16(x)
+
+# Clamp a 32-bit integer accumulator into the signed 16-bit range. Used by
+# the exact fixed-point path so wide integer math never silently wraps.
+@exact
+export fn clamp_i16_from_i32(x: i32) -> i16:
+    if x > 32767:
+        return 32767
+    if x < -32768:
+        return -32768
+    return i16(x)
+
+# Exact Q15 fixed-point gain: gain_q15 is the gain scaled by 2^15
+# (1.0 = 32768). The math is pure integer with a single arithmetic shift,
+# so the result is bit-exact and identical on every backend and platform -
+# no IEEE-754 rounding is involved. This is the precise path for audio.
+@exact
+export fn apply_gain_q15(dst: &mut [i16], gain_q15: i32) -> void:
+    for i in 0 .. dst.len:
+        let scaled: i32 = (i32(dst[i]) * gain_q15) >> 15
+        dst[i] = clamp_i16_from_i32(scaled)
+
+# Exact Q15 fixed-point mix: dst[i] = clamp((a[i] * gain_q15 >> 15) + b[i]).
+@exact
+export fn mix_q15(dst: &mut [i16], a: &[i16], b: &[i16], gain_q15: i32) -> void:
+    for i in 0 .. dst.len:
+        let scaled: i32 = (i32(a[i]) * gain_q15) >> 15
+        dst[i] = clamp_i16_from_i32(scaled + i32(b[i]))
+
+# Convert an i16 sample to a normalized f32 in roughly [-1.0, 1.0).
+export fn to_f32(x: i16) -> f32:
+    return f32(x) / 32768.0
+
+# Convert a normalized f32 sample back to i16 with clamping.
+export fn from_f32(x: f32) -> i16:
+    return clamp_i16(x * 32768.0)
+
+# Scale a buffer in place by a linear gain factor.
+export fn apply_gain(dst: &mut [i16], gain: f32) -> void:
+    for i in 0 .. dst.len:
+        dst[i] = clamp_i16(f32(dst[i]) * gain)
+
+# dst[i] = clamp(a[i] * gain + b[i]) for every frame.
+export fn mix_buffers(dst: &mut [i16], a: &[i16], b: &[i16], gain: f32) -> void:
+    for i in 0 .. dst.len:
+        dst[i] = clamp_i16(f32(a[i]) * gain + f32(b[i]))
+
+# Interleave two mono channels into one stereo buffer (L,R,L,R,...).
+export fn interleave_stereo(dst: &mut [i16], left: &[i16], right: &[i16]) -> void:
+    for i in 0 .. left.len:
+        dst[2 * i] = left[i]
+        dst[2 * i + 1] = right[i]
+
+# Split a stereo buffer back into two mono channels.
+export fn deinterleave_stereo(left: &mut [i16], right: &mut [i16], src: &[i16]) -> void:
+    for i in 0 .. left.len:
+        left[i] = src[2 * i]
+        right[i] = src[2 * i + 1]
+
+# Peak amplitude (maximum absolute sample value).
+export fn peak(xs: &[i16]) -> i16:
+    let m: i16 = 0
+    for i in 0 .. xs.len:
+        let v: i16 = xs[i]
+        if v < 0:
+            v = i16(0) - v
+        if v > m:
+            m = v
+    return m
+
+# Sum of squared samples (RMS energy without the square root).
+export fn energy(xs: &[i16]) -> i64:
+    let sum: i64 = 0
+    for i in 0 .. xs.len:
+        let v: i64 = i64(xs[i])
+        sum = sum + v * v
+    return sum
+
+test "clamp saturates and passes through":
+    expect clamp_i16(40000.0) == 32767
+    expect clamp_i16(-40000.0) == -32768
+    expect clamp_i16(100.0) == 100
+
+test "round trip conversion stays in range":
+    expect from_f32(to_f32(16000)) == 16000
+    expect from_f32(1.5) == 32767
+
+test "q15 gain is exact integer math":
+    expect clamp_i16_from_i32((i32(20000) * 16384) >> 15) == 10000
+    expect clamp_i16_from_i32((i32(20000) * 32768) >> 15) == 20000
+    expect clamp_i16_from_i32((i32(30000) * 49152) >> 15) == 32767

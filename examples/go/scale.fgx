@@ -1,0 +1,20 @@
+# Go as a cloud/network-services runtime (v2.24): a typed function run for real
+# on the host Go toolchain.
+#
+#   fgx capsule-run examples/go/scale.fgx --go
+#
+# Forgentex assembles a `package main` program (this body plus a generated main
+# that parses args, calls the entry, and prints the result) and runs it with
+# `go run`, checking each fixture.
+
+foreign scale go version "1.26" effects [alloc]:
+    input value: i64
+    output doubled: i64
+    sandbox "fs.none"
+    mock 21 -> 42
+    mock 0 -> 0
+    mock -5 -> -10
+    code:
+        func scale(value int64) int64 {
+            return value * 2
+        }

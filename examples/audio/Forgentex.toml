@@ -1,0 +1,30 @@
+[package]
+name = "audio-dsp"
+version = "0.1.0"
+root = "src"
+
+[targets]
+matrix = ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+
+[profile.dev]
+backend = "c"
+optimize = "none"
+debug = true
+
+[security]
+trust = "untrusted"
+signed_by = "agent-public-demo"
+signature_algorithm = "Ed25519"
+signature = "mock-sig-audio-dsp"
+reproducible = true
+
+[permissions]
+fs.read = ["src"]
+fs.write = ["build"]
+io = ["stdout"]
+
+[sandbox]
+build_scripts = "deny"
+codegen = "deny"
+tests = "sandboxed"
+agent_tools = "deny"

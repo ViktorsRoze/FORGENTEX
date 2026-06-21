@@ -64,6 +64,26 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         "borrow-report" => cmd_borrow_report(&args[2..]),
         "borrow-conformance" => cmd_borrow_conformance(&args[2..]),
         "cfg" => cmd_cfg(&args[2..]),
+        "capsule" => cmd_capsule(&args[2..]),
+        "capsule-run" => cmd_capsule_run(&args[2..]),
+        "capsule-lock" => cmd_capsule_lock(&args[2..]),
+        "capsule-audit" => cmd_capsule_audit(&args[2..]),
+        "namespace" => cmd_namespace(&args[2..]),
+        "sandbox" => cmd_sandbox(&args[2..]),
+        "runtimes" => cmd_runtimes(&args[2..]),
+        "native-review" => cmd_native_review(&args[2..]),
+        "shell-review" => cmd_shell_review(&args[2..]),
+        "contract-review" => cmd_contract_review(&args[2..]),
+        "capsule-context" => cmd_capsule_context(&args[2..]),
+        "compress" => cmd_compress(&args[2..]),
+        "token-report" => cmd_token_report(&args[2..]),
+        "edit-bench" => cmd_edit_bench(&args[2..]),
+        "capsule-tokens" => cmd_capsule_tokens(&args[2..]),
+        "io-run" => cmd_io_run(&args[2..]),
+        "net-run" => cmd_net_run(&args[2..]),
+        "crypto-selftest" => cmd_crypto_selftest(&args[2..]),
+        "polyglot-run" => cmd_polyglot_run(&args[2..]),
+        "trust-session" => cmd_trust_session(&args[2..]),
         "asm-check" => cmd_asm_check(&args[2..]),
         "abi" => cmd_abi(&args[2..]),
         "header" => cmd_header(&args[2..]),
@@ -446,6 +466,9 @@ fn cmd_api(args: &[String]) -> Result<(), String> {
 
 fn cmd_build(args: &[String]) -> Result<(), String> {
     let project = required_arg(args, 0, "build <project> --backend c|zig [--out <dir>]")?;
+    if args.iter().any(|arg| arg == "--native") {
+        return cmd_build_native(project, args);
+    }
     let backend = option_value(args, "--backend").unwrap_or("c");
     let default_out = format!("build/{backend}");
     let out_dir = option_value(args, "--out").unwrap_or(&default_out);
@@ -475,6 +498,27 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
         println!("generated {}", file.display());
     }
     Ok(())
+}
+
+fn cmd_build_native(project: &str, args: &[String]) -> Result<(), String> {
+    let kind = match option_value(args, "--emit") {
+        Some(value) => crate::native_build::ArtifactKind::parse(value)
+            .ok_or_else(|| format!("unknown --emit kind '{value}' (expected obj|shared)"))?,
+        None => crate::native_build::ArtifactKind::Object,
+    };
+    let out_dir = option_value(args, "--out").unwrap_or("build/native");
+    enforce_package_security(Path::new(project))?;
+    let report = crate::native_build::build(Path::new(project), Path::new(out_dir), kind);
+    if args.iter().any(|arg| arg == "--json") {
+        println!("{}", report.to_json());
+    } else {
+        print!("{}", report.to_text());
+    }
+    if report.is_success() {
+        Ok(())
+    } else {
+        Err(format!("native build failed: {}", report.status))
+    }
 }
 
 fn cmd_new(args: &[String]) -> Result<(), String> {
@@ -593,6 +637,474 @@ fn cmd_verify(args: &[String]) -> Result<(), String> {
     } else {
         Err("package verification failed".to_string())
     }
+}
+
+fn cmd_capsule_lock(args: &[String]) -> Result<(), String> {
+    let file = required_arg(args, 0, "capsule-lock <file> [--json]")?;
+    let program = read_program(file)?;
+    let report = crate::capsule_lock::lock(file, &program);
+    if args.iter().any(|arg| arg == "--json") {
+        println!("{}", report.to_json());
+    } else {
+        print!("{}", report.to_text());
+    }
+    Ok(())
+}
+
+fn cmd_capsule_audit(args: &[String]) -> Result<(), String> {
+    let file = required_arg(args, 0, "capsule-audit <file> [--json] [--strict]")?;
+    let program = read_program(file)?;
+    let report = crate::capsule_lock::audit(file, &program);
+    if args.iter().any(|arg| arg == "--json") {
+        println!("{}", report.to_json());
+    } else {
+        print!("{}", report.to_text());
+    }
+    if args.iter().any(|arg| arg == "--strict") && report.has_high_risk() {
+        return Err(format!(
+            "capsule supply-chain audit found high risk in {file}"
+        ));
+    }
+    Ok(())
+}
+
+fn collect_option_values(args: &[String], flag: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == flag {
+            if let Some(value) = args.get(i + 1) {
+                out.push(value.clone());
+                i += 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+fn cmd_io_run(args: &[String]) -> Result<(), String> {
+    let file = required_arg(
+        args,
+        0,
+        "io-run <file> --entry <fn> [--grant fs.read] [--grant fs.write] [--arg <v>]... [--json]",
+    )?;
+    let program = read_program(file)?;
+    let entry =
+        option_value(args, "--entry").ok_or_else(|| "io-run requires --entry <fn>".to_string())?;
+    let grants = collect_option_values(args, "--grant");
+    let call_args = collect_option_values(args, "--arg");
+    let report = crate::io_run::run(file, &program, entry, call_args, grants);
+    if args.iter().any(|arg| arg == "--json") {
+        println!("{}", report.to_json());
+    } else {
+        print!("{}", report.to_text());
+    }
+    if report.is_success() {
+        Ok(())
+    } else {
+        Err(format!("io run: {}", report.status))
+    }
+}
+
+fn cmd_trust_session(args: &[String]) -> Result<(), String> {
+    let capability = option_value(args, "--capability").unwrap_or("optimize.media.h264");
+    let payload = option_value(args, "--payload").unwrap_or("patch:add_fast_path");
+    let session = crate::trust::run(capability, payload);
+    if args.iter().any(|arg| arg == "--json") {
+        println!("{}", session.to_json());
+    } else {
+        print!("{}", session.to_text());
+    }
+    if session.is_success() {
+        Ok(())
+    } else {
+        Err(format!("trust session: {}", session.status))
+    }
+}
+
+fn cmd_polyglot_run(args: &[String]) -> Result<(), String> {
+    let file = required_arg(args, 0, "polyglot-run <file> [--out <dir>] [--json]")?;
+    let program = read_program(file)?;
+    let out_dir = option_value(args, "--out").unwrap_or("build/polyglot");
+    let report = crate::polyglot::run(file, &program, Path::new(out_dir));
+    if args.iter().any(|arg| arg == "--json") {
+        println!("{}", report.to_json());
+    } else {
+        print!("{}", report.to_text());
+    }
+    if report.is_success() {
+        Ok(())
+    } else {
+        Err(format!("polyglot run: {}", report.status))
+    }
+}
+
+fn cmd_crypto_selftest(args: &[String]) -> Result<(), String> {
+    let report = crate::crypto::self_test();
+    if args.iter().any(|arg| arg == "--json") {
+        println!("{}", report.to_json());
+    } else {
+        print!("{}", report.to_text());
+    }
+    if report.is_success() {
+        Ok(())
+    } else {
+        Err("crypto self-test failed".to_string())
+    }
+}
+
+fn cmd_net_run(args: &[String]) -> Result<(), String> {
+    let file = required_arg(
+        args,
+        0,
+        "net-run <file> --entry <fn> [--allow <host:port>]... [--arg <v>]... [--json]",
+    )?;
+    let program = read_program(file)?;
+    let entry =
+        option_value(args, "--entry").ok_or_else(|| "net-run requires --entry <fn>".to_string())?;
+    let allow = collect_option_values(args, "--allow");
+    let call_args = collect_option_values(args, "--arg");
+    let report = crate::net_run::run(file, &program, entry, call_args, allow);
+    if args.iter().any(|arg| arg == "--json") {
+        println!("{}", report.to_json());
+    } else {
+        print!("{}", report.to_text());
+    }
+    if report.is_success() {
+        Ok(())
+    } else {
+        Err(format!("net run: {}", report.status))
+    }
+}
+
+fn cmd_capsule_tokens(args: &[String]) -> Result<(), String> {
+    let file = required_arg(args, 0, "capsule-tokens <file> [--json]")?;
+    let program = read_program(file)?;
+    let report = crate::capsule_tokens::report(file, &program);
+    if args.iter().any(|arg| arg == "--json") {
+        println!("{}", report.to_json());
+    } else {
+        print!("{}", report.to_text());
+    }
+    Ok(())
+}
+
+fn cmd_edit_bench(args: &[String]) -> Result<(), String> {
+    let file = required_arg(args, 0, "edit-bench <file> [--edits <n>] [--json]")?;
+    let program = read_program(file)?;
+    let edits = option_value(args, "--edits")
+        .and_then(|n| n.parse::<usize>().ok())
+        .unwrap_or(8);
+    let report = crate::edit_bench::run(file, &program, edits);
+    if args.iter().any(|arg| arg == "--json") {
+        println!("{}", report.to_json());
+    } else {
+        print!("{}", report.to_text());
+    }
+    Ok(())
+}
+
+fn cmd_token_report(args: &[String]) -> Result<(), String> {
+    let file = required_arg(args, 0, "token-report <file> [--json]")?;
+    let program = read_program(file)?;
+    let report = crate::tokens::report(file, &program);
+    if args.iter().any(|arg| arg == "--json") {
+        println!("{}", report.to_json());
+    } else {
+        print!("{}", report.to_text());
+    }
+    Ok(())
+}
+
+fn cmd_compress(args: &[String]) -> Result<(), String> {
+    let file = required_arg(args, 0, "compress <file> [--emit] [--json]")?;
+    let program = read_program(file)?;
+    let agent = format_agent(&program);
+    let report = crate::compress::compress(&agent);
+    if args.iter().any(|arg| arg == "--emit") {
+        print!("{}", report.compressed);
+        return Ok(());
+    }
+    if args.iter().any(|arg| arg == "--json") {
+        println!("{}", report.to_json());
+    } else {
+        print!("{}", report.to_text());
+    }
+    if !report.roundtrip_ok {
+        return Err(format!("compression is not lossless for {file}"));
+    }
+    Ok(())
+}
+
+fn cmd_capsule_context(args: &[String]) -> Result<(), String> {
+    let file = required_arg(
+        args,
+        0,
+        "capsule-context <file> [--capsule <name>] [--json]",
+    )?;
+    let program = read_program(file)?;
+    let json_mode = args.iter().any(|arg| arg == "--json");
+    match option_value(args, "--capsule") {
+        Some(name) => {
+            let context = crate::capsule_workbench::context(file, &program, name)?;
+            if json_mode {
+                println!("{}", context.to_json());
+            } else {
+                print!("{}", context.to_text());
+            }
+        }
+        None => {
+            let inventory = crate::capsule_workbench::inventory(file, &program);
+            if json_mode {
+                println!("{}", inventory.to_json());
+            } else {
+                print!("{}", inventory.to_text());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_contract_review(args: &[String]) -> Result<(), String> {
+    let file = required_arg(args, 0, "contract-review <file> [--json] [--strict]")?;
+    let program = read_program(file)?;
+    let report = crate::contract::analyze(file, &program);
+    if args.iter().any(|arg| arg == "--json") {
+        println!("{}", report.to_json());
+    } else {
+        print!("{}", report.to_text());
+    }
+    if args.iter().any(|arg| arg == "--strict") && report.is_rejected() {
+        return Err(format!("smart-contract capsule review rejected for {file}"));
+    }
+    Ok(())
+}
+
+fn cmd_shell_review(args: &[String]) -> Result<(), String> {
+    let file = required_arg(args, 0, "shell-review <file> [--json] [--strict]")?;
+    let program = read_program(file)?;
+    let report = crate::shell::analyze(file, &program);
+    if args.iter().any(|arg| arg == "--json") {
+        println!("{}", report.to_json());
+    } else {
+        print!("{}", report.to_text());
+    }
+    if args.iter().any(|arg| arg == "--strict") && report.is_rejected() {
+        return Err(format!("shell capsule review rejected for {file}"));
+    }
+    Ok(())
+}
+
+fn cmd_native_review(args: &[String]) -> Result<(), String> {
+    let file = required_arg(args, 0, "native-review <file> [--json] [--strict]")?;
+    let program = read_program(file)?;
+    let report = crate::native_capsule::analyze(file, &program);
+    if args.iter().any(|arg| arg == "--json") {
+        println!("{}", report.to_json());
+    } else {
+        print!("{}", report.to_text());
+    }
+    if args.iter().any(|arg| arg == "--strict") && report.is_rejected() {
+        return Err(format!("native/GPU capsule review rejected for {file}"));
+    }
+    Ok(())
+}
+
+fn cmd_runtimes(args: &[String]) -> Result<(), String> {
+    if args.iter().any(|arg| arg == "--json") {
+        println!("{}", crate::runtime::catalog_json());
+    } else {
+        print!("{}", crate::runtime::catalog_text());
+    }
+    Ok(())
+}
+
+fn cmd_sandbox(args: &[String]) -> Result<(), String> {
+    let file = required_arg(args, 0, "sandbox <file> [--json] [--strict]")?;
+    let program = read_program(file)?;
+    let plan = crate::sandbox::analyze(file, &program);
+    if args.iter().any(|arg| arg == "--json") {
+        println!("{}", plan.to_json());
+    } else {
+        print!("{}", plan.to_text());
+    }
+    if args.iter().any(|arg| arg == "--strict") && plan.is_denied() {
+        return Err(format!("sandbox plan denied for {file}"));
+    }
+    Ok(())
+}
+
+fn cmd_namespace(args: &[String]) -> Result<(), String> {
+    let file = required_arg(args, 0, "namespace <file> [--json] [--strict]")?;
+    let program = read_program(file)?;
+    let report = crate::share::analyze(file, &program);
+    if args.iter().any(|arg| arg == "--json") {
+        println!("{}", report.to_json());
+    } else {
+        print!("{}", report.to_text());
+    }
+    if args.iter().any(|arg| arg == "--strict") && report.is_rejected() {
+        return Err(format!("shared namespace rejected for {file}"));
+    }
+    Ok(())
+}
+
+fn cmd_capsule_run(args: &[String]) -> Result<(), String> {
+    let file = required_arg(
+        args,
+        0,
+        "capsule-run <file> [--capsule <name>] [--input <values>]",
+    )?;
+    let program = read_program(file)?;
+    let name = option_value(args, "--capsule");
+    let json_mode = args.iter().any(|arg| arg == "--json");
+    // Real C-ABI execution (v2.13): compile, link, and run the capsule.
+    if args.iter().any(|arg| arg == "--native") {
+        let out_dir = option_value(args, "--out").unwrap_or("build/ffi");
+        let plan = crate::ffi::run(file, &program, name, Path::new(out_dir))?;
+        if json_mode {
+            println!("{}", plan.to_json());
+        } else {
+            print!("{}", plan.to_text());
+        }
+        return if plan.is_success() {
+            Ok(())
+        } else {
+            Err(format!("ffi run: {}", plan.execution_status))
+        };
+    }
+    // Real CPython execution (v2.17): run the python capsule against its
+    // fixtures on the host interpreter.
+    if args.iter().any(|arg| arg == "--python") {
+        let report = crate::python_run::run(file, &program, name)?;
+        if json_mode {
+            println!("{}", report.to_json());
+        } else {
+            print!("{}", report.to_text());
+        }
+        return if report.is_success() {
+            Ok(())
+        } else {
+            Err(format!("python run: {}", report.status))
+        };
+    }
+    // Real Node JS/TS execution (v2.20): run the web capsule on host node.
+    if args.iter().any(|arg| arg == "--node") {
+        let report = crate::node_run::run(file, &program, name)?;
+        if json_mode {
+            println!("{}", report.to_json());
+        } else {
+            print!("{}", report.to_text());
+        }
+        return if report.is_success() {
+            Ok(())
+        } else {
+            Err(format!("node run: {}", report.status))
+        };
+    }
+    // Real JVM execution (v2.22): compile and run the java capsule on host JDK.
+    if args.iter().any(|arg| arg == "--java") {
+        let report = crate::jvm_run::run(file, &program, name)?;
+        if json_mode {
+            println!("{}", report.to_json());
+        } else {
+            print!("{}", report.to_text());
+        }
+        return if report.is_success() {
+            Ok(())
+        } else {
+            Err(format!("jvm run: {}", report.status))
+        };
+    }
+    // Real .NET execution (v2.23): build and run the csharp capsule on host .NET.
+    if args.iter().any(|arg| arg == "--csharp") {
+        let report = crate::dotnet_run::run(file, &program, name)?;
+        if json_mode {
+            println!("{}", report.to_json());
+        } else {
+            print!("{}", report.to_text());
+        }
+        return if report.is_success() {
+            Ok(())
+        } else {
+            Err(format!("dotnet run: {}", report.status))
+        };
+    }
+    // Real Go execution (v2.24): assemble and run the go capsule on host Go.
+    if args.iter().any(|arg| arg == "--go") {
+        let report = crate::go_run::run(file, &program, name)?;
+        if json_mode {
+            println!("{}", report.to_json());
+        } else {
+            print!("{}", report.to_text());
+        }
+        return if report.is_success() {
+            Ok(())
+        } else {
+            Err(format!("go run: {}", report.status))
+        };
+    }
+    // Sandbox-backed execution (v2.3): gate the mock run on sandbox
+    // approval for the selected capsule(s).
+    if args.iter().any(|arg| arg == "--sandbox") {
+        for capsule in program.capsules() {
+            if name.map(|n| n == capsule.name).unwrap_or(true)
+                && !crate::sandbox::is_approved(capsule)
+            {
+                return Err(format!(
+                    "sandbox denied: capsule '{}' has effects uncovered by its sandbox",
+                    capsule.name
+                ));
+            }
+        }
+    }
+    if let Some(input) = option_value(args, "--input") {
+        let values = crate::parser::parse_capsule_values(input)?;
+        let outputs = crate::capsule::run_input(&program, name, &values)?;
+        if json_mode {
+            println!(
+                "{{\n  \"schema\": \"forgentex.capsule_run.v1\",\n  \"outputs\": [{}]\n}}",
+                outputs
+                    .iter()
+                    .map(|value| format!(
+                        "\"{}\"",
+                        value.replace('\\', "\\\\").replace('"', "\\\"")
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        } else {
+            println!("outputs: [{}]", outputs.join(", "));
+        }
+        return Ok(());
+    }
+    let report = crate::capsule::run(file, &program, name)?;
+    if json_mode {
+        println!("{}", report.to_json());
+    } else {
+        print!("{}", report.to_text());
+    }
+    if args.iter().any(|arg| arg == "--strict") && report.status == "fail" {
+        return Err(format!("capsule run failed for {file}"));
+    }
+    Ok(())
+}
+
+fn cmd_capsule(args: &[String]) -> Result<(), String> {
+    let file = required_arg(args, 0, "capsule <file> [--json]")?;
+    let program = read_program(file)?;
+    let report = crate::capsule::analyze(file, &program);
+    if args.iter().any(|arg| arg == "--json") {
+        println!("{}", report.to_json());
+    } else {
+        print!("{}", report.to_text());
+    }
+    if args.iter().any(|arg| arg == "--strict") && report.is_rejected() {
+        return Err(format!("capsule review rejected for {file}"));
+    }
+    Ok(())
 }
 
 fn cmd_cfg(args: &[String]) -> Result<(), String> {
@@ -1110,6 +1622,28 @@ Commands:\n\
   fgx borrow-report <file> [--json]\n\
   fgx borrow-conformance [--json]\n\
   fgx cfg <file> [--json]\n\
+  fgx capsule <file> [--json] [--strict]\n\
+  fgx capsule-run <file> [--capsule <name>] [--input <values>] [--sandbox] [--json] [--strict]\n\
+  fgx capsule-run <file> --native [--capsule <name>] [--out <dir>] [--json]\n\
+  fgx capsule-lock <file> [--json]\n\
+  fgx capsule-audit <file> [--json] [--strict]\n\
+  fgx namespace <file> [--json] [--strict]\n\
+  fgx sandbox <file> [--json] [--strict]\n\
+  fgx runtimes [--json]\n\
+  fgx native-review <file> [--json] [--strict]\n\
+  fgx shell-review <file> [--json] [--strict]\n\
+  fgx contract-review <file> [--json] [--strict]\n\
+  fgx capsule-context <file> [--capsule <name>] [--json]\n\
+  fgx compress <file> [--emit] [--json]\n\
+  fgx token-report <file> [--json]\n\
+  fgx build <project> --native [--emit obj|shared] [--out <dir>] [--json]\n\
+  fgx edit-bench <file> [--edits <n>] [--json]\n\
+  fgx capsule-tokens <file> [--json]\n\
+  fgx io-run <file> --entry <fn> [--grant fs.read] [--grant fs.write] [--arg <v>]... [--json]\n\
+  fgx net-run <file> --entry <fn> [--allow <host:port>]... [--arg <v>]... [--json]\n\
+  fgx crypto-selftest [--json]\n\
+  fgx polyglot-run <file> [--out <dir>] [--json]\n\
+  fgx trust-session [--capability <cap>] [--payload <p>] [--json]\n\
   fgx asm-check <file> --target <triple> [--json]\n\
   fgx abi <file> --target <triple> [--json]\n\
   fgx header <file> --target <triple>\n\

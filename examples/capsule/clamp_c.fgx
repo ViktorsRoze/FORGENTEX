@@ -1,0 +1,14 @@
+foreign clamp_sample c version "c11" env "x86_64-pc-windows-msvc" effects [cpu.avx2]:
+    input x: f32
+    output y: i16
+    sandbox "fs.none"
+    mock 40000.0 -> 32767
+    mock -40000.0 -> -32768
+    mock 100.0 -> 100
+    code:
+        /* scalar value boundary: no raw memory crosses the ABI */
+        short clamp_sample(float x) {
+            if (x > 32767.0f) return 32767;
+            if (x < -32768.0f) return -32768;
+            return (short)x;
+        }

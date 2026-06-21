@@ -1,0 +1,23 @@
+# Java as a business-language runtime (v2.22): a typed money calculation, run
+# for real on the host JDK.
+#
+#   fgx capsule-run examples/jvm/tax.fgx --java
+#
+# Forgentex parses the class and its public static method, generates a typed
+# driver, compiles both with javac, and runs each fixture with java — checking
+# the output against the expectations.
+
+foreign cents_with_tax java version "21" env "temurin-21" effects [alloc]:
+    input subtotal_cents: i64
+    output total_cents: i64
+    sandbox "fs.none"
+    mock 10000 -> 10825
+    mock 0 -> 0
+    mock 50000 -> 54125
+    code:
+        public final class OrderTotal {
+            public static long centsWithTax(long subtotalCents) {
+                long tax = subtotalCents * 825L / 10000L;
+                return subtotalCents + tax;
+            }
+        }

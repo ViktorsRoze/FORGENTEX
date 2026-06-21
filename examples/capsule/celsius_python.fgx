@@ -1,0 +1,19 @@
+# Real CPython execution of a Python capsule (v2.17), pure stdlib (no deps),
+# so it runs anywhere `python` is present.
+#
+#   fgx capsule-run examples/capsule/celsius_python.fgx --python
+#
+# The mock fixtures become real execution oracles: the host Python runs the
+# body against each input and the output is checked against the expectation.
+# The agent only ever needs the one-line boundary card, never the body.
+
+foreign to_fahrenheit python version "3.13" env "cpython-3.13" effects [alloc]:
+    input celsius: f64
+    output fahrenheit: f64
+    sandbox "fs.none"
+    mock 0.0 -> 32.0
+    mock 100.0 -> 212.0
+    mock -40.0 -> -40.0
+    code:
+        def to_fahrenheit(celsius):
+            return celsius * 9.0 / 5.0 + 32.0

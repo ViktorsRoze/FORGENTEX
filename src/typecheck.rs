@@ -27,6 +27,32 @@ pub fn check(program: &Program) -> Vec<Diagnostic> {
             diagnostics.push(diagnostic);
         }
     }
+    // Foreign capsule contract validation (v2.0): unpinned dependencies,
+    // missing sandbox policy, missing typed boundary, and empty bodies are
+    // rejected at check time.
+    diagnostics.extend(crate::capsule::validate(program));
+    // Shared typed namespace validation (v2.2): unknown bindings, multiple
+    // writers, and default type mismatches.
+    diagnostics.extend(crate::share::validate(program));
+    // Sandbox policy reconciliation (v2.3): declared effects must be
+    // covered by a matching sandbox grant; resource limits must be valid.
+    diagnostics.extend(crate::sandbox::validate(program));
+    // Managed runtime reconciliation (v2.5): a capsule's dependencies must
+    // come from its language's package ecosystem (or a generic source).
+    diagnostics.extend(crate::runtime::validate(program));
+    // Native/GPU capsule review (v2.6): a CUDA capsule must declare a GPU
+    // architecture target.
+    diagnostics.extend(crate::native_capsule::validate(program));
+    // Shell capsule hardening (v2.7): shell capsules must declare an
+    // explicit, non-wildcard command allowlist.
+    diagnostics.extend(crate::shell::validate(program));
+    // Exact-arithmetic opt-in: a function marked @exact must not use float.
+    diagnostics.extend(crate::numeric::validate(program));
+    // Prelude aliases are reserved: a user function may not take one.
+    diagnostics.extend(crate::prelude::validate(program));
+    // Smart-contract capsule review (v2.8): require an ABI hash and deny
+    // secret-key/wallet access.
+    diagnostics.extend(crate::contract::validate(program));
     diagnostics
 }
 
@@ -55,7 +81,7 @@ impl<'a> TypeEnvironment<'a> {
                 Item::Struct(decl) => {
                     structs.insert(decl.name.clone(), decl);
                 }
-                Item::Test(_) => {}
+                Item::Test(_) | Item::Capsule(_) | Item::Share(_) => {}
             }
         }
         Self {

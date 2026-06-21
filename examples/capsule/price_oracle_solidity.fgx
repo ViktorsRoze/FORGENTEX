@@ -1,0 +1,15 @@
+foreign price_oracle solidity version "0.8.24" env "evm-shanghai" effects [chain.read]:
+    input feed: i64
+    output price: i64
+    dep "github:smartcontractkit/chainlink@a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+    sandbox "chain.read mainnet"
+    sandbox "abi.hash sha256:3333333333333333333333333333333333333333333333333333333333333333"
+    sandbox "gas.limit 120000"
+    code:
+        // SPDX-License-Identifier: MIT
+        pragma solidity ^0.8.24;
+        contract Oracle {
+            function price(int64 feed) external pure returns (int64) {
+                return feed;
+            }
+        }

@@ -1,0 +1,12 @@
+CAP backup bash "5.2" env "linux-x86_64" effects [proc.spawn, fs.read, fs.write]
+  IN source_dir str
+  OUT ok bool
+  SBX "proc.spawn"
+  SBX "exec.allow tar"
+  SBX "exec.allow gzip"
+  SBX "fs.read /data/project"
+  SBX "fs.write /backups"
+  CODE 2
+# only tar and gzip are allowlisted; host paths are restricted
+tar -cf - /data/project | gzip > /backups/project.tar.gz
+ENDCAP

@@ -1,0 +1,36 @@
+struct Money:
+    cents: i64
+
+# A realistic, verbose business-language capsule. The agent uses it through
+# the one-line boundary card; the ~20 lines of Java are content-addressed and
+# only pulled when the body itself is edited. Measure with:
+#   fgx capsule-tokens examples/capsule/order_total_java.fgx
+
+foreign order_total java version "21" env "temurin-21-linux-x86_64" effects [cpu]:
+    input subtotal_cents: i64
+    input tax_rate_bp: i64
+    output total_cents: i64
+    dep "maven:com.google.guava:guava:33.0.0-jre#sha256:3333333333333333333333333333333333333333333333333333333333333333"
+    sandbox "fs.none"
+    code:
+        import java.math.BigDecimal;
+        import java.math.RoundingMode;
+
+        public final class OrderTotal {
+            private OrderTotal() {}
+
+            public static long orderTotal(long subtotalCents, long taxRateBp) {
+                if (subtotalCents < 0L) {
+                    throw new IllegalArgumentException("subtotal must be non-negative");
+                }
+                if (taxRateBp < 0L) {
+                    throw new IllegalArgumentException("tax rate must be non-negative");
+                }
+                BigDecimal subtotal = BigDecimal.valueOf(subtotalCents);
+                BigDecimal rate = BigDecimal.valueOf(taxRateBp)
+                    .divide(BigDecimal.valueOf(10000L), 6, RoundingMode.HALF_UP);
+                BigDecimal tax = subtotal.multiply(rate)
+                    .setScale(0, RoundingMode.HALF_UP);
+                return subtotal.add(tax).longValueExact();
+            }
+        }

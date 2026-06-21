@@ -1,0 +1,11 @@
+foreign backup bash version "5.2" env "linux-x86_64" effects [proc.spawn, fs.read, fs.write]:
+    input source_dir: str
+    output ok: bool
+    sandbox "proc.spawn"
+    sandbox "exec.allow tar"
+    sandbox "exec.allow gzip"
+    sandbox "fs.read /data/project"
+    sandbox "fs.write /backups"
+    code:
+        # only tar and gzip are allowlisted; host paths are restricted
+        tar -cf - /data/project | gzip > /backups/project.tar.gz

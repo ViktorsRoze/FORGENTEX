@@ -1,0 +1,12 @@
+foreign stats python version "3.13" env "cpython-3.13-linux-x86_64" effects [alloc]:
+    input sample: f64
+    output mean: f64
+    dep "pypi:numpy==2.2.0#sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    dep "pypi:pandas==2.2.3"
+    sandbox "fs.none"
+    mock 4.0 -> 4.0
+    code:
+        import numpy as np
+
+        def mean(sample):
+            return float(np.mean([sample]))

@@ -341,6 +341,8 @@ fn item_id(item: &Item) -> &str {
         Item::Struct(decl) => &decl.id,
         Item::Function(function) => &function.id,
         Item::Test(test) => &test.id,
+        Item::Capsule(capsule) => &capsule.id,
+        Item::Share(share) => &share.id,
     }
 }
 
@@ -349,6 +351,8 @@ fn item_name(item: &Item) -> &str {
         Item::Struct(decl) => &decl.name,
         Item::Function(function) => &function.name,
         Item::Test(test) => &test.name,
+        Item::Capsule(capsule) => &capsule.name,
+        Item::Share(share) => &share.name,
     }
 }
 
@@ -385,6 +389,12 @@ fn collect_item_type_names(item: &Item, out: &mut BTreeSet<String>) {
             }
             collect_type_name(&function.ret, out);
         }
+        Item::Capsule(capsule) => {
+            for binding in capsule.inputs.iter().chain(&capsule.outputs) {
+                collect_type_name(&binding.ty, out);
+            }
+        }
+        Item::Share(share) => collect_type_name(&share.ty, out),
         Item::Test(_) => {}
     }
 }
@@ -491,6 +501,20 @@ fn symbol_map_lines(project: &Project, module: &ProjectModule, item: &Item) -> V
             test.id,
             test.xfail,
             test.expectations.len()
+        )),
+        Item::Capsule(capsule) => lines.push(format!(
+            "  CAP {} {} lang={} version={} risk={}",
+            capsule.name,
+            capsule.id,
+            capsule.language,
+            capsule.version,
+            capsule.risk_class()
+        )),
+        Item::Share(share) => lines.push(format!(
+            "  SHARE {} {} type={}",
+            share.name,
+            share.id,
+            share.ty.to_agent()
         )),
     }
     lines

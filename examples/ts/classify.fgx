@@ -1,0 +1,20 @@
+# TypeScript as a general-purpose runtime (v2.21): not a web page, just a
+# typed tool — the kind of thing agents and LLM frontends generate constantly.
+#
+#   fgx capsule-run examples/ts/classify.fgx --node
+#
+# The body carries real TypeScript type annotations; Forgentex runs it on host
+# Node via `node --experimental-strip-types`, checking it against the fixtures.
+
+foreign classify typescript version "node-24" effects [alloc]:
+    input score: i32
+    output band: str
+    sandbox "fs.none"
+    mock 95 -> "high"
+    mock 50 -> "mid"
+    mock 10 -> "low"
+    code:
+        export function classify(score: number): string {
+            const band: string = score >= 80 ? "high" : score >= 30 ? "mid" : "low";
+            return band;
+        }

@@ -469,6 +469,30 @@ pub fn generate_project_map_with_options(
                         test.expectations.len()
                     ));
                 }
+                Item::Capsule(capsule) => {
+                    let effects = if capsule.effects.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" effects={}", capsule.effects.join(","))
+                    };
+                    out.push_str(&format!(
+                        "  CAP {} {} lang={} version={} risk={}{}\n",
+                        capsule.name,
+                        capsule.id,
+                        capsule.language,
+                        capsule.version,
+                        capsule.risk_class(),
+                        effects
+                    ));
+                }
+                Item::Share(share) => {
+                    out.push_str(&format!(
+                        "  SHARE {} {} type={}\n",
+                        share.name,
+                        share.id,
+                        share.ty.to_agent()
+                    ));
+                }
             }
         }
     }
@@ -721,6 +745,8 @@ fn duplicate_symbol_diagnostics(project: &Project) -> Vec<Diagnostic> {
                 Item::Function(function) => {
                     ("function", function.name.as_str(), function.id.as_str())
                 }
+                Item::Capsule(capsule) => ("capsule", capsule.name.as_str(), capsule.id.as_str()),
+                Item::Share(share) => ("share", share.name.as_str(), share.id.as_str()),
                 Item::Test(_) => continue,
             };
             let key = format!("{kind}:{name}");

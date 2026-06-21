@@ -1,0 +1,30 @@
+struct Session:
+    user_id: i64
+    visits: i64
+
+share session: Session
+
+foreign backend python version "3.13" env "cpython-3.13-linux-x86_64" effects [network.read]:
+    input request_id: i64
+    output ok: bool
+    dep "pypi:fastapi==0.115.0#sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    sandbox "net.listen 127.0.0.1:8000"
+    sandbox "limit.wall_ms 1000"
+    bind session rw
+    code:
+        # backend updates the shared typed session schema
+        def handle(request_id):
+            session["visits"] += 1
+            return True
+
+foreign frontend typescript version "node-22" effects [network.write]:
+    input session_visits: i64
+    output html: str
+    dep "npm:preact@10.24.0#sha512:2222222222222222222222222222222222222222222222222222222222222222"
+    sandbox "net.connect 127.0.0.1:8000"
+    bind session read
+    code:
+        // frontend renders the same shared typed session schema
+        export function render(session: {user_id: number, visits: number}) {
+            return `<p>user ${session.user_id}: ${session.visits} visits</p>`;
+        }

@@ -83,6 +83,26 @@ pub fn generate_map_with_options(
                         token_cost
                     ));
                 }
+                Item::Capsule(capsule) => {
+                    out.push_str(&format!(
+                        "  CAP {} {} lang={} version={} risk={} tokens~{}\n",
+                        capsule.name,
+                        capsule.id,
+                        capsule.language,
+                        capsule.version,
+                        capsule.risk_class(),
+                        token_cost
+                    ));
+                }
+                Item::Share(share) => {
+                    out.push_str(&format!(
+                        "  SHARE {} {} type={} tokens~{}\n",
+                        share.name,
+                        share.id,
+                        share.ty.to_agent(),
+                        token_cost
+                    ));
+                }
             }
         }
     }
@@ -118,6 +138,16 @@ pub fn get_symbol(root: &Path, target: &str, deps: Option<&str>) -> Result<Strin
                 }
                 Item::Test(test) => {
                     if target == test.id {
+                        found = Some(item);
+                    }
+                }
+                Item::Capsule(capsule) => {
+                    if target == capsule.id {
+                        found = Some(item);
+                    }
+                }
+                Item::Share(share) => {
+                    if target == share.id {
                         found = Some(item);
                     }
                 }

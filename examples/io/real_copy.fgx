@@ -1,0 +1,21 @@
+# Real, effect-gated filesystem I/O (v2.14).
+#
+# These call core.io builtins that perform real disk operations, but only
+# under granted capabilities. Run with `fgx io-run`, which records a
+# deterministic transcript of every operation:
+#
+#   fgx io-run examples/io/real_copy.fgx --entry copy_file \
+#       --grant fs.read --grant fs.write --arg <src> --arg <dst>
+#
+# Without the grants the operations are denied, not silently skipped.
+
+import core.io
+
+fn copy_file(src: str, dst: str) -> usize effects [fs.read, fs.write]:
+    return core_io_copy_file(src, dst)
+
+fn read_file(path: str) -> str effects [fs.read]:
+    return core_io_read_file(path)
+
+fn write_file(path: str, content: str) -> usize effects [fs.write]:
+    return core_io_write_file(path, content)

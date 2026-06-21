@@ -113,6 +113,29 @@ const MODULES: &[StdModule] = &[
         ],
     },
     StdModule {
+        name: "core.io",
+        purpose: "real, effect-gated filesystem I/O executed and transcribed by `fgx io-run`",
+        functions: &[
+            "core_io_read_file",
+            "core_io_write_file",
+            "core_io_copy_file",
+        ],
+    },
+    StdModule {
+        name: "core.hash",
+        purpose: "real, test-vector-verified SHA-256, HMAC-SHA256, and constant-time compare",
+        functions: &[
+            "core_hash_sha256",
+            "core_hash_hmac_sha256",
+            "core_hash_ct_eq",
+        ],
+    },
+    StdModule {
+        name: "core.socket",
+        purpose: "real, effect-gated TCP sockets executed and transcribed by `fgx net-run`",
+        functions: &["core_socket_tcp_request", "core_socket_tcp_send"],
+    },
+    StdModule {
         name: "core.net",
         purpose: "capability-scoped network API names for HTTP, TCP, UDP, and WebSocket demos",
         functions: &[
@@ -279,6 +302,12 @@ pub fn standard_builtin_call_type(name: &str) -> Option<Type> {
         | "core_runtime_fs_scope_read"
         | "core_fs_scope_write"
         | "core_runtime_fs_scope_write" => Some(Type::Bool),
+        "core_io_read_file" => Some(str_ty.clone()),
+        "core_io_write_file" | "core_io_copy_file" => Some(usize_ty.clone()),
+        "core_socket_tcp_request" => Some(str_ty.clone()),
+        "core_socket_tcp_send" => Some(usize_ty.clone()),
+        "core_hash_sha256" | "core_hash_hmac_sha256" => Some(str_ty.clone()),
+        "core_hash_ct_eq" => Some(Type::Bool),
         "core_fs_read_text"
         | "core_runtime_fs_read_text"
         | "core_net_http_get"

@@ -1,0 +1,15 @@
+CAP normalize_py python "3.13" env "cpython-3.13-linux-x86_64" effects [alloc]
+  IN value i32
+  OUT normalized i32
+  DEP "pypi:numpy==2.2.0#sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  SBX "fs.none"
+  MOCK 300 -> 255
+  MOCK -5 -> 0
+  MOCK 42 -> 42
+  CODE 5
+import numpy as np
+
+def normalize(value):
+    # clamp into the unsigned byte range
+    return int(np.clip(value, 0, 255))
+ENDCAP

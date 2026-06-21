@@ -1,0 +1,33 @@
+S Session { user_id i64; visits i64 }
+
+
+SHARE session Session
+
+
+CAP backend python "3.13" env "cpython-3.13-linux-x86_64" effects [network.read]
+  IN request_id i64
+  OUT ok bool
+  DEP "pypi:fastapi==0.115.0#sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  SBX "net.listen 127.0.0.1:8000"
+  SBX "limit.wall_ms 1000"
+  BIND session rw
+  CODE 4
+# backend updates the shared typed session schema
+def handle(request_id):
+    session["visits"] += 1
+    return True
+ENDCAP
+
+
+CAP frontend typescript "node-22" effects [network.write]
+  IN session_visits i64
+  OUT html str
+  DEP "npm:preact@10.24.0#sha512:2222222222222222222222222222222222222222222222222222222222222222"
+  SBX "net.connect 127.0.0.1:8000"
+  BIND session read
+  CODE 4
+// frontend renders the same shared typed session schema
+export function render(session: {user_id: number, visits: number}) {
+    return `<p>user ${session.user_id}: ${session.visits} visits</p>`;
+}
+ENDCAP

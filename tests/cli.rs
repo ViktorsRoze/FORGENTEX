@@ -937,6 +937,238 @@ fn performance_tooling_commands_are_available() {
 }
 
 #[test]
+fn capsule_command_is_available() {
+    let text = assert_success(fgx(&["capsule", "examples/capsule/normalize_python.fgx"]));
+    assert!(text.contains("Forgentex capsule review"));
+    assert!(text.contains("status=pass"));
+    assert!(text.contains("risk=managed"));
+
+    let json = assert_success(fgx(&[
+        "capsule",
+        "examples/capsule/price_oracle_solidity.fgx",
+        "--json",
+    ]));
+    assert!(json.contains("\"schema\": \"forgentex.capsule_review.v1\""));
+    assert!(json.contains("\"risk_class\": \"smart_contract\""));
+    assert!(json.contains("\"status\": \"review_required\""));
+
+    let err = assert_failure(fgx(&["capsule", "examples/nope.fgx"]));
+    assert!(err.contains("failed to read"));
+}
+
+#[test]
+fn capsule_run_command_is_available() {
+    let text = assert_success(fgx(&[
+        "capsule-run",
+        "examples/capsule/normalize_python.fgx",
+    ]));
+    assert!(text.contains("Forgentex capsule run"));
+    assert!(text.contains("status=pass"));
+    assert!(text.contains("passed=3"));
+
+    let hook = assert_success(fgx(&[
+        "capsule-run",
+        "examples/capsule/normalize_python.fgx",
+        "--input",
+        "300",
+    ]));
+    assert!(hook.contains("outputs: [255]"));
+
+    let json = assert_success(fgx(&[
+        "capsule-run",
+        "examples/capsule/normalize_python.fgx",
+        "--json",
+    ]));
+    assert!(json.contains("\"schema\": \"forgentex.capsule_run.v1\""));
+
+    let miss = assert_failure(fgx(&[
+        "capsule-run",
+        "examples/capsule/normalize_python.fgx",
+        "--input",
+        "7",
+    ]));
+    assert!(miss.contains("no_matching_fixture"));
+}
+
+#[test]
+fn capsule_lock_and_audit_commands_are_available() {
+    let lock = assert_success(fgx(&["capsule-lock", "examples/capsule/stats_python.fgx"]));
+    assert!(lock.contains("Forgentex capsule lock"));
+    assert!(lock.contains("dependencies=2"));
+
+    let lock_json = assert_success(fgx(&[
+        "capsule-lock",
+        "examples/capsule/stats_python.fgx",
+        "--json",
+    ]));
+    assert!(lock_json.contains("\"schema\": \"forgentex.capsule_lock.v1\""));
+    assert!(lock_json.contains("\"ecosystem\": \"pypi\""));
+
+    let audit = assert_success(fgx(&[
+        "capsule-audit",
+        "examples/capsule/stats_python.fgx",
+        "--json",
+    ]));
+    assert!(audit.contains("\"schema\": \"forgentex.capsule_audit.v1\""));
+    assert!(audit.contains("\"status\": \"medium\""));
+
+    let err = assert_failure(fgx(&["capsule-lock", "examples/nope.fgx"]));
+    assert!(err.contains("failed to read"));
+}
+
+#[test]
+fn compress_command_is_available() {
+    let text = assert_success(fgx(&["compress", "examples/audio/src/dsp.fgx"]));
+    assert!(text.contains("Forgentex agent-view compression"));
+    assert!(text.contains("roundtrip_ok=true"));
+
+    let json = assert_success(fgx(&["compress", "examples/audio/src/dsp.fgx", "--json"]));
+    assert!(json.contains("\"schema\": \"forgentex.capsule_compress.v1\""));
+    assert!(json.contains("\"roundtrip_ok\": true"));
+
+    let err = assert_failure(fgx(&["compress", "examples/nope.fgx"]));
+    assert!(err.contains("failed to read"));
+}
+
+#[test]
+fn capsule_context_command_is_available() {
+    let inv = assert_success(fgx(&[
+        "capsule-context",
+        "examples/capsule/web_session.fgx",
+    ]));
+    assert!(inv.contains("Forgentex capsule inventory"));
+    assert!(inv.contains("backend"));
+
+    let ctx = assert_success(fgx(&[
+        "capsule-context",
+        "examples/capsule/saxpy_cuda.fgx",
+        "--capsule",
+        "saxpy",
+        "--json",
+    ]));
+    assert!(ctx.contains("\"schema\": \"forgentex.capsule_context.v1\""));
+    assert!(ctx.contains("\"overall_decision\": \"review\""));
+
+    let err = assert_failure(fgx(&[
+        "capsule-context",
+        "examples/capsule/saxpy_cuda.fgx",
+        "--capsule",
+        "missing",
+    ]));
+    assert!(err.contains("no capsule named"));
+}
+
+#[test]
+fn contract_review_command_is_available() {
+    let text = assert_success(fgx(&[
+        "contract-review",
+        "examples/capsule/price_oracle_solidity.fgx",
+    ]));
+    assert!(text.contains("Forgentex smart-contract capsule review"));
+    assert!(text.contains("compiler=0.8.24"));
+    assert!(text.contains("decision=review"));
+
+    let json = assert_success(fgx(&[
+        "contract-review",
+        "examples/capsule/price_oracle_solidity.fgx",
+        "--json",
+    ]));
+    assert!(json.contains("\"schema\": \"forgentex.contract_review.v1\""));
+    assert!(json.contains("\"gas_limit\": \"120000\""));
+
+    let err = assert_failure(fgx(&["contract-review", "examples/nope.fgx"]));
+    assert!(err.contains("failed to read"));
+}
+
+#[test]
+fn shell_review_command_is_available() {
+    let text = assert_success(fgx(&["shell-review", "examples/capsule/backup_bash.fgx"]));
+    assert!(text.contains("Forgentex shell capsule review"));
+    assert!(text.contains("commands=[tar,gzip]"));
+    assert!(text.contains("decision=review"));
+
+    let json = assert_success(fgx(&[
+        "shell-review",
+        "examples/capsule/backup_bash.fgx",
+        "--json",
+    ]));
+    assert!(json.contains("\"schema\": \"forgentex.shell_review.v1\""));
+    assert!(json.contains("\"allowed_commands\": [\"tar\", \"gzip\"]"));
+
+    let err = assert_failure(fgx(&["shell-review", "examples/nope.fgx"]));
+    assert!(err.contains("failed to read"));
+}
+
+#[test]
+fn native_review_command_is_available() {
+    let text = assert_success(fgx(&["native-review", "examples/capsule/saxpy_cuda.fgx"]));
+    assert!(text.contains("Forgentex native/GPU capsule review"));
+    assert!(text.contains("risk=gpu"));
+    assert!(text.contains("gpu_arch=sm_80"));
+
+    let json = assert_success(fgx(&[
+        "native-review",
+        "examples/capsule/clamp_c.fgx",
+        "--json",
+    ]));
+    assert!(json.contains("\"schema\": \"forgentex.native_review.v1\""));
+    assert!(json.contains("\"risk_class\": \"native\""));
+
+    let err = assert_failure(fgx(&["native-review", "examples/nope.fgx"]));
+    assert!(err.contains("failed to read"));
+}
+
+#[test]
+fn runtimes_command_is_available() {
+    let text = assert_success(fgx(&["runtimes"]));
+    assert!(text.contains("Forgentex managed runtime catalog"));
+    assert!(text.contains("typescript"));
+
+    let json = assert_success(fgx(&["runtimes", "--json"]));
+    assert!(json.contains("\"schema\": \"forgentex.runtime_catalog.v1\""));
+    assert!(json.contains("\"language\": \"go\""));
+}
+
+#[test]
+fn sandbox_command_is_available() {
+    let text = assert_success(fgx(&["sandbox", "examples/capsule/web_counter.fgx"]));
+    assert!(text.contains("Forgentex sandbox plan"));
+    assert!(text.contains("status=allow"));
+    assert!(text.contains("limit wall_ms=1000"));
+
+    let json = assert_success(fgx(&[
+        "sandbox",
+        "examples/capsule/web_counter.fgx",
+        "--json",
+    ]));
+    assert!(json.contains("\"schema\": \"forgentex.sandbox_plan.v1\""));
+    assert!(json.contains("\"capability\": \"net.listen\""));
+
+    let err = assert_failure(fgx(&["sandbox", "examples/nope.fgx"]));
+    assert!(err.contains("failed to read"));
+}
+
+#[test]
+fn namespace_command_is_available() {
+    let text = assert_success(fgx(&["namespace", "examples/capsule/web_counter.fgx"]));
+    assert!(text.contains("Forgentex shared namespace"));
+    assert!(text.contains("status=review_required"));
+    assert!(text.contains("visitor_count"));
+
+    let json = assert_success(fgx(&[
+        "namespace",
+        "examples/capsule/web_counter.fgx",
+        "--json",
+    ]));
+    assert!(json.contains("\"schema\": \"forgentex.shared_namespace.v1\""));
+    assert!(json.contains("\"writers\": [\"backend\"]"));
+    assert!(json.contains("\"readers\": [\"frontend\"]"));
+
+    let err = assert_failure(fgx(&["namespace", "examples/nope.fgx"]));
+    assert!(err.contains("failed to read"));
+}
+
+#[test]
 fn cfg_command_is_available() {
     let text = assert_success(fgx(&["cfg", "examples/media/audio_mix.fgx"]));
     assert!(text.contains("@function.mix_samples blocks="));

@@ -348,6 +348,13 @@ fn builtin_effects(name: &str) -> Vec<&'static str> {
         | "core_fs_write_text"
         | "core_runtime_fs_write_text" => vec!["fs.write"],
         "core_fs_copy_text" | "core_runtime_fs_copy_text" => vec!["fs.read", "fs.write"],
+        "core_io_read_file" => vec!["fs.read"],
+        "core_io_write_file" => vec!["fs.write"],
+        "core_io_copy_file" => vec!["fs.read", "fs.write"],
+        "core_socket_tcp_request" => vec!["network.connect", "network.write", "network.read"],
+        "core_socket_tcp_send" => vec!["network.connect", "network.write"],
+        "core_hash_sha256" | "core_hash_hmac_sha256" => vec!["crypto.hash"],
+        "core_hash_ct_eq" => Vec::new(),
         "http_get" | "net_recv" | "network_read" | "tcp_read" => vec!["network.read"],
         "http_post" | "net_send" | "network_write" | "tcp_write" => vec!["network.write"],
         "core_net_http_get" | "core_runtime_net_http_get" => {

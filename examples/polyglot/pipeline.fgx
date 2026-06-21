@@ -1,0 +1,31 @@
+# Unified polyglot ABI (v2.18): one value, declared once, flowing across
+# languages by name; one command runs every backend through one gate.
+#
+#   fgx polyglot-run examples/polyglot/pipeline.fgx
+#
+# `gain` is the shared typed value. A C capsule and a Python capsule both bind
+# it by name — that is the cross-language data plane. polyglot-run dispatches
+# the C capsule through the FFI bridge (host cc) and the Python capsule through
+# the host CPython, reporting both under one schema.
+
+share gain: i32
+
+foreign scale c version "c11" effects [cpu]:
+    input x: i32
+    output y: i32
+    sandbox "fs.none"
+    bind gain read
+    mock 10 -> 20
+    mock -7 -> -14
+    code:
+        int scale(int x) { return x * 2; }
+
+foreign label python version "3.13" env "cpython-3.13" effects [alloc]:
+    input value: i32
+    output text: str
+    sandbox "fs.none"
+    bind gain read
+    mock 20 -> "v=20"
+    code:
+        def label(value):
+            return "v=" + str(value)

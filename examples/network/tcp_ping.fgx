@@ -1,0 +1,18 @@
+# Real, effect-gated TCP networking (v2.15).
+#
+# These open real TCP sockets, but only to endpoints on an allowlist. Run
+# with `fgx net-run`, which supplies the allowlist and records a
+# deterministic transcript of every connection:
+#
+#   fgx net-run examples/network/tcp_ping.fgx --entry ping \
+#       --allow 127.0.0.1:9000 --arg 127.0.0.1:9000 --arg "ping"
+#
+# An endpoint not on the allowlist is denied — the socket is never opened.
+
+import core.socket
+
+fn ping(endpoint: str, payload: str) -> str effects [network.connect, network.write, network.read]:
+    return core_socket_tcp_request(endpoint, payload)
+
+fn fire(endpoint: str, payload: str) -> usize effects [network.connect, network.write]:
+    return core_socket_tcp_send(endpoint, payload)

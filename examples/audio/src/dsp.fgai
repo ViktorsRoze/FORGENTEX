@@ -1,0 +1,124 @@
+F clamp_i16(x f32) -> i16 {
+  IF x > 32767.0 {
+    R 32767
+  }
+  IF x < -32768.0 {
+    R -32768
+  }
+  R i16(x)
+}
+
+
+A exact
+F clamp_i16_from_i32(x i32) -> i16 {
+  IF x > 32767 {
+    R 32767
+  }
+  IF x < -32768 {
+    R -32768
+  }
+  R i16(x)
+}
+
+
+A exact
+F apply_gain_q15(dst &mut[i16], gain_q15 i32) -> void {
+  FOR i 0 dst.len {
+    LET scaled: i32 = i32(dst[i]) * gain_q15 >> 15
+    SET dst[i] = clamp_i16_from_i32(scaled)
+  }
+}
+
+
+A exact
+F mix_q15(dst &mut[i16], a &[i16], b &[i16], gain_q15 i32) -> void {
+  FOR i 0 dst.len {
+    LET scaled: i32 = i32(a[i]) * gain_q15 >> 15
+    SET dst[i] = clamp_i16_from_i32(scaled + i32(b[i]))
+  }
+}
+
+
+F to_f32(x i16) -> f32 {
+  R f32(x) / 32768.0
+}
+
+
+F from_f32(x f32) -> i16 {
+  R clamp_i16(x * 32768.0)
+}
+
+
+F apply_gain(dst &mut[i16], gain f32) -> void {
+  FOR i 0 dst.len {
+    SET dst[i] = clamp_i16(f32(dst[i]) * gain)
+  }
+}
+
+
+F mix_buffers(dst &mut[i16], a &[i16], b &[i16], gain f32) -> void {
+  FOR i 0 dst.len {
+    SET dst[i] = clamp_i16(f32(a[i]) * gain + f32(b[i]))
+  }
+}
+
+
+F interleave_stereo(dst &mut[i16], left &[i16], right &[i16]) -> void {
+  FOR i 0 left.len {
+    SET dst[2 * i] = left[i]
+    SET dst[2 * i + 1] = right[i]
+  }
+}
+
+
+F deinterleave_stereo(left &mut[i16], right &mut[i16], src &[i16]) -> void {
+  FOR i 0 left.len {
+    SET left[i] = src[2 * i]
+    SET right[i] = src[2 * i + 1]
+  }
+}
+
+
+F peak(xs &[i16]) -> i16 {
+  LET m: i16 = 0
+  FOR i 0 xs.len {
+    LET v: i16 = xs[i]
+    IF v < 0 {
+      SET v = i16(0) - v
+    }
+    IF v > m {
+      SET m = v
+    }
+  }
+  R m
+}
+
+
+F energy(xs &[i16]) -> i64 {
+  LET sum: i64 = 0
+  FOR i 0 xs.len {
+    LET v: i64 = i64(xs[i])
+    SET sum = sum + v * v
+  }
+  R sum
+}
+
+
+TEST "clamp saturates and passes through" {
+  EXPECT clamp_i16(40000.0) == 32767
+  EXPECT clamp_i16(-40000.0) == -32768
+  EXPECT clamp_i16(100.0) == 100
+}
+
+
+TEST "round trip conversion stays in range" {
+  EXPECT from_f32(to_f32(16000)) == 16000
+  EXPECT from_f32(1.5) == 32767
+}
+
+
+TEST "q15 gain is exact integer math" {
+  EXPECT clamp_i16_from_i32(i32(20000) * 16384 >> 15) == 10000
+  EXPECT clamp_i16_from_i32(i32(20000) * 32768 >> 15) == 20000
+  EXPECT clamp_i16_from_i32(i32(30000) * 49152 >> 15) == 32767
+}

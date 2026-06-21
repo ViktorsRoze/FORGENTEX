@@ -1,0 +1,20 @@
+# Real, standard cryptographic hashing and authentication (v2.16).
+#
+# SHA-256 and HMAC-SHA256 are implemented to spec and verified against the
+# official NIST / RFC 4231 vectors (`fgx crypto-selftest`). Tag verification
+# uses constant-time comparison, so it never leaks the tag via timing.
+#
+# Asymmetric signatures (Ed25519) and AEAD are deliberately NOT here: those
+# are borrowed from an audited host crypto library over the FFI bridge, never
+# hand-rolled.
+
+import core.hash
+
+fn digest(message: str) -> str effects [crypto.hash]:
+    return core_hash_sha256(message)
+
+fn authenticate(key: str, message: str) -> str effects [crypto.hash]:
+    return core_hash_hmac_sha256(key, message)
+
+fn verify_tag(key: str, message: str, tag: str) -> bool effects [crypto.hash]:
+    return core_hash_ct_eq(core_hash_hmac_sha256(key, message), tag)

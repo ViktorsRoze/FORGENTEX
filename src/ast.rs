@@ -10,6 +10,8 @@ pub enum Item {
     Struct(StructDecl),
     Function(FunctionDecl),
     Test(TestDecl),
+    Capsule(Capsule),
+    Share(ShareDecl),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -154,6 +156,236 @@ pub enum TestExpectation {
     Diagnostic { code: String },
 }
 
+/// A foreign-language code capsule (v2.0). The capsule contract — language,
+/// version, runtime environment, typed boundary, declared effects, pinned
+/// dependencies, and sandbox policy — maps to the AST and is reviewable.
+/// The `code` body is opaque foreign source carried verbatim as a payload
+/// in both `.fgx` and `.fgai` views.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Capsule {
+    pub id: String,
+    pub name: String,
+    pub language: String,
+    pub version: String,
+    pub env: Option<String>,
+    pub effects: Vec<String>,
+    pub inputs: Vec<CapsuleBinding>,
+    pub outputs: Vec<CapsuleBinding>,
+    pub deps: Vec<CapsuleDep>,
+    pub sandbox: Vec<String>,
+    pub bindings: Vec<CapsuleShareBinding>,
+    pub fixtures: Vec<CapsuleFixture>,
+    pub code: Vec<String>,
+    pub attrs: Vec<Attribute>,
+}
+
+/// A Forgentex-owned shared typed value (v2.2). Capsules bind it by name
+/// and see it as a native value under snapshot-in / write-back-out
+/// semantics; Forgentex remains the single source of truth.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShareDecl {
+    pub id: String,
+    pub name: String,
+    pub ty: Type,
+    pub default: Option<CapsuleValue>,
+    pub attrs: Vec<Attribute>,
+}
+
+impl ShareDecl {
+    pub fn new(name: String, ty: Type, default: Option<CapsuleValue>) -> Self {
+        let id = format!("@share.{name}");
+        Self {
+            id,
+            name,
+            ty,
+            default,
+            attrs: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShareMode {
+    Read,
+    Rw,
+}
+
+impl ShareMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ShareMode::Read => "read",
+            ShareMode::Rw => "rw",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "read" => Some(ShareMode::Read),
+            "rw" => Some(ShareMode::Rw),
+            _ => None,
+        }
+    }
+
+    pub fn is_writer(&self) -> bool {
+        matches!(self, ShareMode::Rw)
+    }
+}
+
+/// A capsule's binding of a shared name into its runtime.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CapsuleShareBinding {
+    pub name: String,
+    pub mode: ShareMode,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CapsuleBinding {
+    pub name: String,
+    pub ty: Type,
+}
+
+/// A deterministic mock-execution fixture (v2.1): a tuple of input literal
+/// values mapped to expected output literal values at the typed boundary.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CapsuleFixture {
+    pub inputs: Vec<CapsuleValue>,
+    pub outputs: Vec<CapsuleValue>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum CapsuleValue {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Str(String),
+}
+
+impl CapsuleValue {
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            CapsuleValue::Int(_) => "int",
+            CapsuleValue::Float(_) => "float",
+            CapsuleValue::Bool(_) => "bool",
+            CapsuleValue::Str(_) => "str",
+        }
+    }
+
+    /// A fixture literal is compatible with a boundary type when it is the
+    /// same kind, or an integer literal filling a float-typed binding.
+    pub fn matches_type(&self, ty: &Type) -> bool {
+        match (self, ty) {
+            (CapsuleValue::Bool(_), Type::Bool) => true,
+            // An integer literal may fill an integer or float binding.
+            (CapsuleValue::Int(_), Type::Primitive(name)) => {
+                is_integer_primitive(name) || is_float_primitive(name)
+            }
+            (CapsuleValue::Float(_), Type::Primitive(name)) => is_float_primitive(name),
+            (CapsuleValue::Str(_), Type::Primitive(name)) => name == "str",
+            (CapsuleValue::Str(_), Type::Named(name)) => name == "str",
+            _ => false,
+        }
+    }
+
+    /// The canonical source literal form, chosen so it re-parses to the
+    /// same value (floats always carry a decimal point).
+    pub fn to_literal(&self) -> String {
+        match self {
+            CapsuleValue::Int(value) => value.to_string(),
+            CapsuleValue::Float(value) => {
+                let text = format!("{value}");
+                if text.contains('.') || text.contains('e') || text.contains("inf") {
+                    text
+                } else {
+                    format!("{text}.0")
+                }
+            }
+            CapsuleValue::Bool(value) => value.to_string(),
+            CapsuleValue::Str(value) => {
+                format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+            }
+        }
+    }
+}
+
+pub fn is_integer_primitive(name: &str) -> bool {
+    matches!(
+        name,
+        "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize"
+    )
+}
+
+pub fn is_float_primitive(name: &str) -> bool {
+    matches!(name, "f32" | "f64")
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CapsuleDep {
+    /// The raw dependency reference exactly as authored, for example
+    /// `pypi:numpy==2.2.0#sha256:...` or `github:org/repo@<commit>`.
+    pub source: String,
+}
+
+impl CapsuleDep {
+    /// A dependency is considered pinned when it carries an exact version,
+    /// a commit/revision, or a checksum/artifact hash. Floating references
+    /// (bare names, `latest`, `*`, branch names) are not pinned.
+    pub fn is_pinned(&self) -> bool {
+        let source = &self.source;
+        let has_hash = source.contains("#sha256:")
+            || source.contains("#sha512:")
+            || source.contains("#blake3:");
+        let has_exact_version = source.contains("==");
+        let has_commit = source
+            .rsplit_once('@')
+            .map(|(_, rev)| is_commit_like(rev))
+            .unwrap_or(false);
+        let floating = source.ends_with("latest")
+            || source.ends_with('*')
+            || source.contains("@latest")
+            || source.contains("@main")
+            || source.contains("@master");
+        (has_hash || has_exact_version || has_commit) && !floating
+    }
+}
+
+fn is_commit_like(rev: &str) -> bool {
+    rev.len() >= 7 && rev.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+impl Capsule {
+    pub fn new(name: String, language: String, version: String) -> Self {
+        let id = format!("@capsule.{name}");
+        Self {
+            id,
+            name,
+            language,
+            version,
+            env: None,
+            effects: Vec::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            deps: Vec::new(),
+            sandbox: Vec::new(),
+            bindings: Vec::new(),
+            fixtures: Vec::new(),
+            code: Vec::new(),
+            attrs: Vec::new(),
+        }
+    }
+
+    /// High-risk capsule classes carry stricter review requirements
+    /// (shell, native, GPU, and smart-contract code per the v2 roadmap).
+    pub fn risk_class(&self) -> &'static str {
+        match self.language.as_str() {
+            "bash" | "powershell" | "sh" => "shell",
+            "c" | "cpp" | "c++" => "native",
+            "cuda" => "gpu",
+            "solidity" | "vyper" => "smart_contract",
+            _ => "managed",
+        }
+    }
+}
+
 impl Program {
     pub fn empty() -> Self {
         Self { items: Vec::new() }
@@ -194,6 +426,20 @@ impl Program {
     pub fn tests(&self) -> impl Iterator<Item = &TestDecl> {
         self.items.iter().filter_map(|item| match item {
             Item::Test(test) => Some(test),
+            _ => None,
+        })
+    }
+
+    pub fn capsules(&self) -> impl Iterator<Item = &Capsule> {
+        self.items.iter().filter_map(|item| match item {
+            Item::Capsule(capsule) => Some(capsule),
+            _ => None,
+        })
+    }
+
+    pub fn shares(&self) -> impl Iterator<Item = &ShareDecl> {
+        self.items.iter().filter_map(|item| match item {
+            Item::Share(share) => Some(share),
             _ => None,
         })
     }
@@ -668,6 +914,83 @@ fn item_to_json(item: &Item, indent: usize) -> String {
             out.push_str(&format!("]\n{pad}}}"));
             out
         }
+        Item::Capsule(capsule) => {
+            let bindings = |bindings: &[CapsuleBinding]| {
+                bindings
+                    .iter()
+                    .map(|binding| {
+                        format!(
+                            "{{\"name\":\"{}\",\"type\":\"{}\"}}",
+                            escape(&binding.name),
+                            escape(&binding.ty.to_agent())
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            format!(
+                "{pad}{{\n{pad}  \"kind\": \"capsule\",\n{pad}  \"id\": \"{}\",\n{pad}  \"name\": \"{}\",\n{pad}  \"language\": \"{}\",\n{pad}  \"version\": \"{}\",\n{pad}  \"env\": {},\n{pad}  \"risk_class\": \"{}\",\n{pad}  \"effects\": [{}],\n{pad}  \"inputs\": [{}],\n{pad}  \"outputs\": [{}],\n{pad}  \"deps\": [{}],\n{pad}  \"sandbox\": [{}],\n{pad}  \"bindings\": [{}],\n{pad}  \"fixtures\": {},\n{pad}  \"code_lines\": {}\n{pad}}}",
+                escape(&capsule.id),
+                escape(&capsule.name),
+                escape(&capsule.language),
+                escape(&capsule.version),
+                capsule
+                    .env
+                    .as_ref()
+                    .map(|env| format!("\"{}\"", escape(env)))
+                    .unwrap_or_else(|| "null".to_string()),
+                capsule.risk_class(),
+                capsule
+                    .effects
+                    .iter()
+                    .map(|effect| format!("\"{}\"", escape(effect)))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                bindings(&capsule.inputs),
+                bindings(&capsule.outputs),
+                capsule
+                    .deps
+                    .iter()
+                    .map(|dep| format!(
+                        "{{\"source\":\"{}\",\"pinned\":{}}}",
+                        escape(&dep.source),
+                        dep.is_pinned()
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                capsule
+                    .sandbox
+                    .iter()
+                    .map(|rule| format!("\"{}\"", escape(rule)))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                capsule
+                    .bindings
+                    .iter()
+                    .map(|binding| format!(
+                        "{{\"name\":\"{}\",\"mode\":\"{}\"}}",
+                        escape(&binding.name),
+                        binding.mode.as_str()
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                capsule.fixtures.len(),
+                capsule.code.len()
+            )
+        }
+        Item::Share(share) => {
+            format!(
+                "{pad}{{\n{pad}  \"kind\": \"share\",\n{pad}  \"id\": \"{}\",\n{pad}  \"name\": \"{}\",\n{pad}  \"type\": \"{}\",\n{pad}  \"default\": {}\n{pad}}}",
+                escape(&share.id),
+                escape(&share.name),
+                escape(&share.ty.to_agent()),
+                share
+                    .default
+                    .as_ref()
+                    .map(|value| value.to_literal())
+                    .unwrap_or_else(|| "null".to_string())
+            )
+        }
     }
 }
 
@@ -676,7 +999,165 @@ fn item_to_canonical_json(out: &mut String, item: &Item, indent: usize) {
         Item::Struct(decl) => struct_to_canonical_json(out, decl, indent),
         Item::Function(function) => function_to_canonical_json(out, function, indent),
         Item::Test(test) => test_to_canonical_json(out, test, indent),
+        Item::Capsule(capsule) => capsule_to_canonical_json(out, capsule, indent),
+        Item::Share(share) => share_to_canonical_json(out, share, indent),
     }
+}
+
+fn share_to_canonical_json(out: &mut String, share: &ShareDecl, indent: usize) {
+    push_line(out, indent, "{");
+    push_prop(out, indent + 1, "kind", &quoted("share"), true);
+    push_prop(out, indent + 1, "id", &quoted(&share.id), true);
+    push_prop(out, indent + 1, "name", &quoted(&share.name), true);
+    push_prop(out, indent + 1, "type", &quoted(&share.ty.to_agent()), true);
+    let default = share
+        .default
+        .as_ref()
+        .map(|value| value.to_literal())
+        .unwrap_or_else(|| "null".to_string());
+    push_prop(out, indent + 1, "default", &default, false);
+    push_line(out, indent, "}");
+}
+
+fn capsule_to_canonical_json(out: &mut String, capsule: &Capsule, indent: usize) {
+    push_line(out, indent, "{");
+    push_prop(out, indent + 1, "kind", &quoted("capsule"), true);
+    push_prop(out, indent + 1, "id", &quoted(&capsule.id), true);
+    push_prop(out, indent + 1, "name", &quoted(&capsule.name), true);
+    push_prop(
+        out,
+        indent + 1,
+        "language",
+        &quoted(&capsule.language),
+        true,
+    );
+    push_prop(out, indent + 1, "version", &quoted(&capsule.version), true);
+    push_prop(
+        out,
+        indent + 1,
+        "env",
+        &capsule
+            .env
+            .as_ref()
+            .map(|env| quoted(env))
+            .unwrap_or_else(|| "null".to_string()),
+        true,
+    );
+    push_prop(
+        out,
+        indent + 1,
+        "risk_class",
+        &quoted(capsule.risk_class()),
+        true,
+    );
+    push_string_list(out, indent + 1, "effects", &capsule.effects, true);
+    push_capsule_bindings(out, indent + 1, "inputs", &capsule.inputs, true);
+    push_capsule_bindings(out, indent + 1, "outputs", &capsule.outputs, true);
+    push_array_block_start(out, indent + 1, "deps");
+    for (idx, dep) in capsule.deps.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(",\n");
+        }
+        push_line(out, indent + 2, "{");
+        push_prop(out, indent + 3, "source", &quoted(&dep.source), true);
+        push_prop(
+            out,
+            indent + 3,
+            "pinned",
+            if dep.is_pinned() { "true" } else { "false" },
+            false,
+        );
+        push_indent(out, indent + 2);
+        out.push('}');
+    }
+    if !capsule.deps.is_empty() {
+        out.push('\n');
+    }
+    push_line(out, indent + 1, "],");
+    push_string_list(out, indent + 1, "sandbox", &capsule.sandbox, true);
+    push_indent(out, indent + 1);
+    out.push_str("\"bindings\": [");
+    for (idx, binding) in capsule.bindings.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&format!(
+            "{{\"name\": {}, \"mode\": {}}}",
+            quoted(&binding.name),
+            quoted(binding.mode.as_str())
+        ));
+    }
+    out.push_str("],\n");
+    push_array_block_start(out, indent + 1, "fixtures");
+    for (idx, fixture) in capsule.fixtures.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(",\n");
+        }
+        push_indent(out, indent + 2);
+        out.push_str(&format!(
+            "{{\"inputs\": [{}], \"outputs\": [{}]}}",
+            fixture
+                .inputs
+                .iter()
+                .map(|value| value.to_literal())
+                .collect::<Vec<_>>()
+                .join(", "),
+            fixture
+                .outputs
+                .iter()
+                .map(|value| value.to_literal())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !capsule.fixtures.is_empty() {
+        out.push('\n');
+    }
+    push_line(out, indent + 1, "],");
+    push_string_list(out, indent + 1, "code", &capsule.code, false);
+    push_line(out, indent, "}");
+}
+
+fn push_string_list(out: &mut String, indent: usize, key: &str, values: &[String], trailing: bool) {
+    push_indent(out, indent);
+    out.push_str(&format!("\"{key}\": ["));
+    for (idx, value) in values.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&quoted(value));
+    }
+    out.push(']');
+    if trailing {
+        out.push(',');
+    }
+    out.push('\n');
+}
+
+fn push_capsule_bindings(
+    out: &mut String,
+    indent: usize,
+    key: &str,
+    bindings: &[CapsuleBinding],
+    trailing: bool,
+) {
+    push_indent(out, indent);
+    out.push_str(&format!("\"{key}\": ["));
+    for (idx, binding) in bindings.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&format!(
+            "{{\"name\": {}, \"type\": {}}}",
+            quoted(&binding.name),
+            quoted(&binding.ty.to_agent())
+        ));
+    }
+    out.push(']');
+    if trailing {
+        out.push(',');
+    }
+    out.push('\n');
 }
 
 fn struct_to_canonical_json(out: &mut String, decl: &StructDecl, indent: usize) {

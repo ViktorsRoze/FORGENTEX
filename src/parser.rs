@@ -1,8 +1,9 @@
 use std::path::Path;
 
 use crate::ast::{
-    is_primitive_name, AsmBinding, AsmBlock, Attribute, Expr, Field, FunctionDecl, Item, Param,
-    Program, Stmt, StructDecl, TestDecl, TestExpectation, Type,
+    is_primitive_name, AsmBinding, AsmBlock, Attribute, Capsule, CapsuleBinding, CapsuleDep,
+    CapsuleFixture, CapsuleShareBinding, CapsuleValue, Expr, Field, FunctionDecl, Item, Param,
+    Program, ShareDecl, ShareMode, Stmt, StructDecl, TestDecl, TestExpectation, Type,
 };
 use crate::lexer::{lex, Comment, Token};
 use crate::span::{ParseDiagnostic, SourceMap, SourceSpan};
@@ -135,12 +136,385 @@ pub fn parse_human(source: &str) -> Result<Program, String> {
                 .push(Item::Test(TestDecl::new(name, xfail, expectations)));
             continue;
         }
+        if item_text.starts_with("foreign ") {
+            let mut capsule = parse_capsule_human(item_text, &lines, &mut index)?;
+            capsule.attrs = std::mem::take(&mut pending_attrs);
+            program.items.push(Item::Capsule(capsule));
+            continue;
+        }
+        if let Some(rest) = item_text.strip_prefix("share ") {
+            let mut share = parse_share_decl(rest, false)?;
+            share.attrs = std::mem::take(&mut pending_attrs);
+            program.items.push(Item::Share(share));
+            index += 1;
+            continue;
+        }
         return Err(format!("unknown top-level item: {}", item_text));
     }
     Ok(program)
 }
 
+// ---- Foreign capsule parsing (v2.0) -------------------------------------
+//
+// Capsule contract lines are read from raw source because dependency
+// references carry `#` (for example `#sha256:...`) and foreign code bodies
+// may contain `#` comments, both of which the line comment-stripper would
+// otherwise truncate.
+
+fn parse_capsule_human(
+    header: &str,
+    lines: &[SourceLine],
+    index: &mut usize,
+) -> Result<Capsule, String> {
+    let header = header
+        .trim()
+        .strip_suffix(':')
+        .ok_or_else(|| format!("foreign capsule header must end with ':': {header}"))?;
+    let rest = header
+        .strip_prefix("foreign ")
+        .ok_or_else(|| format!("capsule header must start with 'foreign ': {header}"))?;
+    let mut capsule = parse_capsule_header(rest, true)?;
+    *index += 1;
+    while *index < lines.len() {
+        let line = &lines[*index];
+        if line.raw.trim().is_empty() {
+            *index += 1;
+            continue;
+        }
+        if line.indent == 0 {
+            break;
+        }
+        let content = line.raw.trim();
+        if let Some(binding) = content.strip_prefix("input ") {
+            capsule.inputs.push(parse_capsule_binding(binding, false)?);
+        } else if let Some(binding) = content.strip_prefix("output ") {
+            capsule.outputs.push(parse_capsule_binding(binding, false)?);
+        } else if let Some(dep) = content.strip_prefix("dep ") {
+            let (source, _) = take_quoted(dep.trim())?;
+            capsule.deps.push(CapsuleDep { source });
+        } else if let Some(rule) = content.strip_prefix("sandbox ") {
+            let (rule, _) = take_quoted(rule.trim())?;
+            capsule.sandbox.push(rule);
+        } else if let Some(binding) = content.strip_prefix("bind ") {
+            capsule.bindings.push(parse_capsule_share_binding(binding)?);
+        } else if let Some(fixture) = content.strip_prefix("mock ") {
+            capsule.fixtures.push(parse_capsule_fixture(fixture)?);
+        } else if content == "code:" {
+            *index += 1;
+            let mut code = Vec::new();
+            while *index < lines.len() {
+                let code_line = &lines[*index];
+                if code_line.raw.trim().is_empty() {
+                    code.push(String::new());
+                    *index += 1;
+                    continue;
+                }
+                if code_line.indent < 8 {
+                    break;
+                }
+                code.push(strip_leading_spaces(&code_line.raw, 8));
+                *index += 1;
+            }
+            while code.last().map(|line| line.is_empty()).unwrap_or(false) {
+                code.pop();
+            }
+            capsule.code = code;
+            continue;
+        } else {
+            return Err(format!("unknown capsule line: {content}"));
+        }
+        *index += 1;
+    }
+    Ok(capsule)
+}
+
+/// Pull every `CAP ... ENDCAP` block out of agent source before the normal
+/// line-oriented agent parser runs, replacing each block with a single
+/// `CAPREF <index>` marker so ordering is preserved.
+fn extract_agent_capsules(source: &str) -> Result<(String, Vec<Capsule>), String> {
+    let raw: Vec<&str> = source.lines().collect();
+    let mut out_lines: Vec<String> = Vec::new();
+    let mut capsules: Vec<Capsule> = Vec::new();
+    let mut i = 0;
+    while i < raw.len() {
+        let trimmed = raw[i].trim();
+        let Some(header) = trimmed.strip_prefix("CAP ") else {
+            out_lines.push(raw[i].to_string());
+            i += 1;
+            continue;
+        };
+        let mut capsule = parse_capsule_header(header, false)?;
+        i += 1;
+        let mut saw_code = false;
+        while i < raw.len() {
+            let line = raw[i].trim();
+            if line.is_empty() {
+                i += 1;
+                continue;
+            }
+            if let Some(binding) = line.strip_prefix("IN ") {
+                capsule.inputs.push(parse_capsule_binding(binding, true)?);
+            } else if let Some(binding) = line.strip_prefix("OUT ") {
+                capsule.outputs.push(parse_capsule_binding(binding, true)?);
+            } else if let Some(dep) = line.strip_prefix("DEP ") {
+                let (source, _) = take_quoted(dep.trim())?;
+                capsule.deps.push(CapsuleDep { source });
+            } else if let Some(rule) = line.strip_prefix("SBX ") {
+                let (rule, _) = take_quoted(rule.trim())?;
+                capsule.sandbox.push(rule);
+            } else if let Some(binding) = line.strip_prefix("BIND ") {
+                capsule.bindings.push(parse_capsule_share_binding(binding)?);
+            } else if let Some(fixture) = line.strip_prefix("MOCK ") {
+                capsule.fixtures.push(parse_capsule_fixture(fixture)?);
+            } else if let Some(count) = line.strip_prefix("CODE ") {
+                let count: usize = count
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("invalid CODE line count: {count}"))?;
+                i += 1;
+                let mut code = Vec::new();
+                for _ in 0..count {
+                    if i >= raw.len() {
+                        return Err("capsule CODE block ends before its line count".to_string());
+                    }
+                    code.push(raw[i].to_string());
+                    i += 1;
+                }
+                capsule.code = code;
+                while i < raw.len() && raw[i].trim().is_empty() {
+                    i += 1;
+                }
+                if i >= raw.len() || raw[i].trim() != "ENDCAP" {
+                    return Err("capsule is missing 'ENDCAP'".to_string());
+                }
+                i += 1;
+                saw_code = true;
+                break;
+            } else {
+                return Err(format!("unknown capsule line: {line}"));
+            }
+            i += 1;
+        }
+        if !saw_code {
+            return Err("capsule is missing a 'CODE <n>' block".to_string());
+        }
+        out_lines.push(format!("CAPREF {}", capsules.len()));
+        capsules.push(capsule);
+    }
+    Ok((out_lines.join("\n"), capsules))
+}
+
+fn parse_capsule_header(rest: &str, expect_version_keyword: bool) -> Result<Capsule, String> {
+    let (name, rest) = take_word(rest)?;
+    let (language, rest) = take_word(rest)?;
+    let mut rest = rest.trim_start();
+    if expect_version_keyword {
+        rest = rest
+            .strip_prefix("version ")
+            .ok_or_else(|| "capsule header is missing 'version'".to_string())?
+            .trim_start();
+    }
+    let (version, mut rest) = take_quoted(rest.trim_start())?;
+    let mut capsule = Capsule::new(name, language, version);
+    loop {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            break;
+        }
+        if let Some(after) = rest.strip_prefix("env ") {
+            let (env, after) = take_quoted(after.trim_start())?;
+            capsule.env = Some(env);
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix("effects ") {
+            let (list, after) = take_bracketed(after.trim_start())?;
+            capsule.effects = split_comma_list(&list);
+            rest = after;
+        } else {
+            return Err(format!("unexpected capsule header token near: {rest}"));
+        }
+    }
+    Ok(capsule)
+}
+
+fn parse_capsule_binding(content: &str, agent: bool) -> Result<CapsuleBinding, String> {
+    let content = content.trim();
+    let (name, ty) = if agent {
+        content
+            .split_once(char::is_whitespace)
+            .ok_or_else(|| format!("capsule binding needs a name and type: {content}"))?
+    } else {
+        content
+            .split_once(':')
+            .ok_or_else(|| format!("capsule binding needs 'name: type': {content}"))?
+    };
+    Ok(CapsuleBinding {
+        name: name.trim().to_string(),
+        ty: Type::parse(ty.trim()),
+    })
+}
+
+fn parse_share_decl(rest: &str, agent: bool) -> Result<ShareDecl, String> {
+    let rest = rest.trim();
+    let (decl_part, default_part) = match rest.split_once('=') {
+        Some((decl, value)) => (decl.trim(), Some(value.trim())),
+        None => (rest, None),
+    };
+    let (name, ty_text) = if agent {
+        decl_part
+            .split_once(char::is_whitespace)
+            .ok_or_else(|| format!("share needs a name and type: {decl_part}"))?
+    } else {
+        decl_part
+            .split_once(':')
+            .ok_or_else(|| format!("share needs 'name: type': {decl_part}"))?
+    };
+    let default = match default_part {
+        Some(value) => Some(expr_to_capsule_value(&parse_expr(value)?)?),
+        None => None,
+    };
+    Ok(ShareDecl::new(
+        name.trim().to_string(),
+        Type::parse(ty_text.trim()),
+        default,
+    ))
+}
+
+fn parse_capsule_share_binding(content: &str) -> Result<CapsuleShareBinding, String> {
+    let mut parts = content.split_whitespace();
+    let name = parts
+        .next()
+        .ok_or_else(|| format!("capsule bind needs a name: {content}"))?
+        .to_string();
+    let mode_text = parts
+        .next()
+        .ok_or_else(|| format!("capsule bind needs a mode (read|rw): {content}"))?;
+    let mode = ShareMode::parse(mode_text)
+        .ok_or_else(|| format!("unknown capsule bind mode '{mode_text}'"))?;
+    Ok(CapsuleShareBinding { name, mode })
+}
+
+/// Parse `<in>, <in> -> <out>, <out>` literal lists into a fixture.
+fn parse_capsule_fixture(content: &str) -> Result<CapsuleFixture, String> {
+    let (inputs_text, outputs_text) = content
+        .split_once("->")
+        .ok_or_else(|| format!("capsule mock fixture needs '->': {content}"))?;
+    Ok(CapsuleFixture {
+        inputs: parse_capsule_value_list(inputs_text)?,
+        outputs: parse_capsule_value_list(outputs_text)?,
+    })
+}
+
+/// Parse a comma-separated list of capsule literal values, used by the
+/// `fgx capsule-run --input` execution hook.
+pub fn parse_capsule_values(text: &str) -> Result<Vec<CapsuleValue>, String> {
+    parse_capsule_value_list(text)
+}
+
+fn parse_capsule_value_list(text: &str) -> Result<Vec<CapsuleValue>, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    text.split(',')
+        .map(|item| {
+            let expr = parse_expr(item.trim())?;
+            expr_to_capsule_value(&expr)
+        })
+        .collect()
+}
+
+fn expr_to_capsule_value(expr: &Expr) -> Result<CapsuleValue, String> {
+    match expr {
+        Expr::Int(value) => Ok(CapsuleValue::Int(*value)),
+        Expr::Float(value) => Ok(CapsuleValue::Float(*value)),
+        Expr::Bool(value) => Ok(CapsuleValue::Bool(*value)),
+        Expr::String(value) => Ok(CapsuleValue::Str(value.clone())),
+        Expr::Unary { op, expr } if op == "-" => match expr_to_capsule_value(expr)? {
+            CapsuleValue::Int(value) => Ok(CapsuleValue::Int(-value)),
+            CapsuleValue::Float(value) => Ok(CapsuleValue::Float(-value)),
+            _ => Err("capsule fixture negation requires a numeric literal".to_string()),
+        },
+        _ => Err("capsule fixture values must be literals".to_string()),
+    }
+}
+
+fn take_word(input: &str) -> Result<(String, &str), String> {
+    let input = input.trim_start();
+    let end = input.find(char::is_whitespace).unwrap_or(input.len());
+    if end == 0 {
+        return Err("expected an identifier in capsule header".to_string());
+    }
+    Ok((input[..end].to_string(), &input[end..]))
+}
+
+fn take_quoted(input: &str) -> Result<(String, &str), String> {
+    let input = input.trim_start();
+    let mut chars = input.char_indices();
+    if chars.next().map(|(_, ch)| ch) != Some('"') {
+        return Err(format!("expected a quoted value: {input}"));
+    }
+    let mut value = String::new();
+    let mut escaped = false;
+    for (idx, ch) in chars {
+        if escaped {
+            match ch {
+                'n' => value.push('\n'),
+                'r' => value.push('\r'),
+                't' => value.push('\t'),
+                other => value.push(other),
+            }
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '"' => {
+                let rest = &input[idx + 1..];
+                return Ok((value, rest));
+            }
+            other => value.push(other),
+        }
+    }
+    Err(format!("unterminated quoted value: {input}"))
+}
+
+fn take_bracketed(input: &str) -> Result<(String, &str), String> {
+    let input = input.trim_start();
+    let inner = input
+        .strip_prefix('[')
+        .ok_or_else(|| format!("expected '[': {input}"))?;
+    let end = inner
+        .find(']')
+        .ok_or_else(|| format!("expected ']': {input}"))?;
+    Ok((inner[..end].to_string(), &inner[end + 1..]))
+}
+
+fn split_comma_list(input: &str) -> Vec<String> {
+    input
+        .split(',')
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .collect()
+}
+
+fn strip_leading_spaces(line: &str, count: usize) -> String {
+    let mut removed = 0;
+    let mut chars = line.chars();
+    let mut prefix_len = 0;
+    for ch in chars.by_ref() {
+        if ch == ' ' && removed < count {
+            removed += 1;
+            prefix_len += 1;
+        } else {
+            break;
+        }
+    }
+    line[prefix_len..].to_string()
+}
+
 pub fn parse_agent(source: &str) -> Result<Program, String> {
+    let (clean_source, capsules) = extract_agent_capsules(source)?;
+    let source = clean_source.as_str();
     let lines: Vec<String> = source
         .lines()
         .map(|line| strip_comment(line).trim().to_string())
@@ -185,6 +559,27 @@ pub fn parse_agent(source: &str) -> Result<Program, String> {
             program
                 .items
                 .push(Item::Test(TestDecl::new(name, xfail, expectations)));
+            continue;
+        }
+        if let Some(reference) = line.strip_prefix("CAPREF ") {
+            let capsule_index: usize = reference
+                .trim()
+                .parse()
+                .map_err(|_| format!("invalid capsule reference: {line}"))?;
+            let mut capsule = capsules
+                .get(capsule_index)
+                .cloned()
+                .ok_or_else(|| format!("capsule reference out of range: {line}"))?;
+            capsule.attrs = std::mem::take(&mut pending_attrs);
+            program.items.push(Item::Capsule(capsule));
+            index += 1;
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("SHARE ") {
+            let mut share = parse_share_decl(rest, true)?;
+            share.attrs = std::mem::take(&mut pending_attrs);
+            program.items.push(Item::Share(share));
+            index += 1;
             continue;
         }
         return Err(format!("unknown agent item: {line}"));
@@ -296,6 +691,22 @@ fn map_human_source(file: &str, source: &str, program: &Program, map: &mut Sourc
                         );
                         index = line_idx + 1;
                     }
+                }
+            }
+            Item::Capsule(capsule) => {
+                if let Some(header_idx) = find_line_from(&lines, index, |line| {
+                    line.text.starts_with(&format!("foreign {} ", capsule.name))
+                }) {
+                    index = header_idx + 1;
+                    map.add(&capsule.id, line_span(file, &lines[header_idx]));
+                }
+            }
+            Item::Share(share) => {
+                if let Some(line_idx) = find_line_from(&lines, index, |line| {
+                    line.text.starts_with(&format!("share {}:", share.name))
+                }) {
+                    index = line_idx + 1;
+                    map.add(&share.id, line_span(file, &lines[line_idx]));
                 }
             }
         }
@@ -460,6 +871,22 @@ fn map_agent_source(file: &str, source: &str, program: &Program, map: &mut Sourc
                         );
                         index = expect_idx + 1;
                     }
+                }
+            }
+            Item::Capsule(capsule) => {
+                if let Some(line_idx) = find_line_from(&lines, index, |line| {
+                    line.text.starts_with(&format!("CAP {} ", capsule.name))
+                }) {
+                    index = line_idx + 1;
+                    map.add(&capsule.id, line_span(file, &lines[line_idx]));
+                }
+            }
+            Item::Share(share) => {
+                if let Some(line_idx) = find_line_from(&lines, index, |line| {
+                    line.text.starts_with(&format!("SHARE {} ", share.name))
+                }) {
+                    index = line_idx + 1;
+                    map.add(&share.id, line_span(file, &lines[line_idx]));
                 }
             }
         }
@@ -1576,7 +2003,12 @@ impl ExprParser {
                         expr: Box::new(args.into_iter().next().unwrap()),
                     }
                 } else {
-                    Expr::Call { name: token, args }
+                    // Expand a two-letter prelude alias to its canonical
+                    // builtin name; the AST always stores the canonical.
+                    let name = crate::prelude::alias_to_canonical(&token)
+                        .map(str::to_string)
+                        .unwrap_or(token);
+                    Expr::Call { name, args }
                 }
             } else {
                 Expr::Var(token)

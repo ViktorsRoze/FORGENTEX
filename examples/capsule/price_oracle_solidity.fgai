@@ -1,0 +1,16 @@
+CAP price_oracle solidity "0.8.24" env "evm-shanghai" effects [chain.read]
+  IN feed i64
+  OUT price i64
+  DEP "github:smartcontractkit/chainlink@a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+  SBX "chain.read mainnet"
+  SBX "abi.hash sha256:3333333333333333333333333333333333333333333333333333333333333333"
+  SBX "gas.limit 120000"
+  CODE 7
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+contract Oracle {
+    function price(int64 feed) external pure returns (int64) {
+        return feed;
+    }
+}
+ENDCAP

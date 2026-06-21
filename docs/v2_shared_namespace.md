@@ -7,6 +7,58 @@ capsule contract in `docs/v2_roadmap.md` and must not weaken any rule
 there: foreign code stays external, typed, effect-declared, pinned,
 sandboxed, and reviewable.
 
+> **Status: implemented in v2.2.** `share <name>: <type> [= default]`
+> declarations and capsule `bind <name> read|rw` clauses parse in both
+> `.fgx` and `.fgai`, roundtrip through one canonical AST, validate at
+> `fgx check` (unknown binding, multiple writers, default type), and report
+> through `fgx namespace` (`forgentex.shared_namespace.v1`). The
+> `examples/capsule/web_counter.fgx` demo shares one counter between a
+> Python backend (rw) and a JavaScript frontend (read). Snapshot-in /
+> write-back-out *execution* remains deferred to a sandbox-backed
+> milestone; v2.2 owns the declaration, binding, and review contract.
+
+## Implemented syntax (v2.2)
+
+```fgx
+share visitor_count: i64 = 0
+
+foreign backend python version "3.13" effects [network.read]:
+    output count: i64
+    sandbox "net.listen 127.0.0.1:8000"
+    bind visitor_count rw
+    code:
+        def handle(): ...
+
+foreign frontend javascript version "node-22" effects [network.write]:
+    output html: str
+    sandbox "net.connect 127.0.0.1:8000"
+    bind visitor_count read
+    code:
+        export function render(count) { ... }
+```
+
+Agent form uses `SHARE <name> <type> [= default]` and `BIND <name> read|rw`.
+
+## Validation (blocking at `fgx check`)
+
+| Diagnostic | Rule |
+| --- | --- |
+| `share_unknown_binding` | a capsule binds a name with no `share` declaration |
+| `shared_multiple_writers` | a shared name has more than one `rw` binding |
+| `share_default_type` | a share default literal must match its declared type |
+
+The single-writer rule is the v2.2 stand-in for a real concurrency model:
+until concurrent capsule execution is defined, at most one capsule may hold
+an `rw` binding of a given shared name.
+
+## Namespace report
+
+`fgx namespace <file> --json` emits `forgentex.shared_namespace.v1` with one
+entry per shared value: type, default, readers, writers, and any
+diagnostics. Status is `rejected` on any diagnostic, `review_required` when
+any shared value has a writer (mutable shared state always warrants review),
+otherwise `pass`.
+
 ## Goal
 
 ```text

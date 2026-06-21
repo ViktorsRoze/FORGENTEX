@@ -29,7 +29,11 @@ pub struct RunResult {
 }
 
 pub fn run_demo(program: &Program) -> Result<String, String> {
-    let interpreter = Interpreter { program };
+    let interpreter = Interpreter {
+        program,
+        io: None,
+        net: None,
+    };
     if program.find_function("mix_samples").is_some() {
         let dst = Value::Array(vec![
             Value::Int(1000),
@@ -80,7 +84,11 @@ pub fn run_demo(program: &Program) -> Result<String, String> {
 
 pub fn run_entry_json(program: &Program, entry: &str, input: &str) -> Result<String, String> {
     let input = RunInput::parse(input)?;
-    let interpreter = Interpreter { program };
+    let interpreter = Interpreter {
+        program,
+        io: None,
+        net: None,
+    };
     let function = program
         .find_function(entry)
         .ok_or_else(|| trap("unknown_entry", format!("unknown function '{entry}'")))?;
@@ -96,17 +104,284 @@ pub fn run_entry_json(program: &Program, entry: &str, input: &str) -> Result<Str
     Ok(run_result_to_json(&result))
 }
 
+/// Run an entry function under a gated I/O context (v2.14). Returns the
+/// entry's value, the recorded I/O transcript, and any execution error
+/// (the transcript still captures the denied/failed op).
+pub fn run_entry_with_io(
+    program: &Program,
+    entry: &str,
+    args: Vec<Value>,
+    grants: Vec<String>,
+) -> (Option<Value>, Vec<IoOp>, Option<String>) {
+    let interpreter = Interpreter {
+        program,
+        io: Some(IoContext::new(grants)),
+        net: None,
+    };
+    let result = interpreter.execute_named(entry, args);
+    let ops = interpreter
+        .io
+        .as_ref()
+        .map(IoContext::ops)
+        .unwrap_or_default();
+    match result {
+        Ok((value, _)) => (Some(value), ops, None),
+        Err(err) => (None, ops, Some(err)),
+    }
+}
+
+/// Run an entry function under a gated network host (v2.15). Returns the
+/// entry's value, the recorded network transcript, and any execution error.
+pub fn run_entry_with_net(
+    program: &Program,
+    entry: &str,
+    args: Vec<Value>,
+    allow: Vec<String>,
+) -> (Option<Value>, Vec<NetOp>, Option<String>) {
+    let interpreter = Interpreter {
+        program,
+        io: None,
+        net: Some(NetContext::new(allow)),
+    };
+    let result = interpreter.execute_named(entry, args);
+    let ops = interpreter
+        .net
+        .as_ref()
+        .map(NetContext::ops)
+        .unwrap_or_default();
+    match result {
+        Ok((value, _)) => (Some(value), ops, None),
+        Err(err) => (None, ops, Some(err)),
+    }
+}
+
 pub fn eval_expr_for_test(program: &Program, expr: &Expr) -> Result<Value, String> {
-    let interpreter = Interpreter { program };
+    let interpreter = Interpreter {
+        program,
+        io: None,
+        net: None,
+    };
     let mut env = HashMap::new();
     interpreter.eval_expr(expr, &mut env)
 }
 
 struct Interpreter<'a> {
     program: &'a Program,
+    io: Option<IoContext>,
+    net: Option<NetContext>,
+}
+
+/// A single real filesystem operation, recorded for the run transcript.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IoOp {
+    pub op: String,
+    pub path: String,
+    pub bytes: usize,
+    pub decision: String,
+}
+
+/// Runtime I/O host for `core_io_*` builtins: enforces granted capabilities
+/// and records a deterministic transcript of every operation (v2.14).
+pub struct IoContext {
+    grants: std::collections::BTreeSet<String>,
+    ops: std::cell::RefCell<Vec<IoOp>>,
+}
+
+impl IoContext {
+    pub fn new<I: IntoIterator<Item = String>>(grants: I) -> Self {
+        Self {
+            grants: grants.into_iter().collect(),
+            ops: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    pub fn ops(&self) -> Vec<IoOp> {
+        self.ops.borrow().clone()
+    }
+
+    fn record(&self, op: &str, path: &str, bytes: usize, decision: &str) {
+        self.ops.borrow_mut().push(IoOp {
+            op: op.to_string(),
+            path: path.to_string(),
+            bytes,
+            decision: decision.to_string(),
+        });
+    }
+
+    fn read_file(&self, path: &str) -> Result<String, String> {
+        if !self.grants.contains("fs.read") {
+            self.record("read", path, 0, "deny");
+            return Err(trap("io_denied", format!("fs.read not granted for {path}")));
+        }
+        match std::fs::read_to_string(path) {
+            Ok(contents) => {
+                self.record("read", path, contents.len(), "allow");
+                Ok(contents)
+            }
+            Err(err) => {
+                self.record("read", path, 0, "error");
+                Err(trap("io_error", format!("read {path}: {err}")))
+            }
+        }
+    }
+
+    fn write_file(&self, path: &str, contents: &str) -> Result<usize, String> {
+        if !self.grants.contains("fs.write") {
+            self.record("write", path, 0, "deny");
+            return Err(trap(
+                "io_denied",
+                format!("fs.write not granted for {path}"),
+            ));
+        }
+        match std::fs::write(path, contents) {
+            Ok(()) => {
+                self.record("write", path, contents.len(), "allow");
+                Ok(contents.len())
+            }
+            Err(err) => {
+                self.record("write", path, 0, "error");
+                Err(trap("io_error", format!("write {path}: {err}")))
+            }
+        }
+    }
+
+    fn copy_file(&self, src: &str, dst: &str) -> Result<usize, String> {
+        let path = format!("{src} -> {dst}");
+        if !self.grants.contains("fs.read") || !self.grants.contains("fs.write") {
+            self.record("copy", &path, 0, "deny");
+            return Err(trap(
+                "io_denied",
+                format!("copy {path} requires fs.read and fs.write"),
+            ));
+        }
+        match std::fs::copy(src, dst) {
+            Ok(bytes) => {
+                self.record("copy", &path, bytes as usize, "allow");
+                Ok(bytes as usize)
+            }
+            Err(err) => {
+                self.record("copy", &path, 0, "error");
+                Err(trap("io_error", format!("copy {path}: {err}")))
+            }
+        }
+    }
+}
+
+/// A single network operation, recorded for the run transcript.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NetOp {
+    pub op: String,
+    pub endpoint: String,
+    pub bytes_out: usize,
+    pub bytes_in: usize,
+    pub decision: String,
+}
+
+/// Runtime network host for `core_socket_*` builtins: enforces a host:port
+/// allowlist and records a deterministic transcript of every operation
+/// (v2.15). Uses real TCP sockets; the allowlist is the gate.
+pub struct NetContext {
+    allow: std::collections::BTreeSet<String>,
+    ops: std::cell::RefCell<Vec<NetOp>>,
+}
+
+impl NetContext {
+    pub fn new<I: IntoIterator<Item = String>>(allow: I) -> Self {
+        Self {
+            allow: allow.into_iter().collect(),
+            ops: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    pub fn ops(&self) -> Vec<NetOp> {
+        self.ops.borrow().clone()
+    }
+
+    fn record(&self, op: &str, endpoint: &str, bytes_out: usize, bytes_in: usize, decision: &str) {
+        self.ops.borrow_mut().push(NetOp {
+            op: op.to_string(),
+            endpoint: endpoint.to_string(),
+            bytes_out,
+            bytes_in,
+            decision: decision.to_string(),
+        });
+    }
+
+    fn allowed(&self, endpoint: &str) -> bool {
+        self.allow.contains(endpoint)
+    }
+
+    fn connect(&self, op: &str, endpoint: &str) -> Result<std::net::TcpStream, String> {
+        use std::time::Duration;
+        if !self.allowed(endpoint) {
+            self.record(op, endpoint, 0, 0, "deny");
+            return Err(trap(
+                "net_denied",
+                format!("connect to {endpoint} is not in the allowlist"),
+            ));
+        }
+        match std::net::TcpStream::connect(endpoint) {
+            Ok(stream) => {
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+                Ok(stream)
+            }
+            Err(err) => {
+                self.record(op, endpoint, 0, 0, "error");
+                Err(trap("net_error", format!("connect {endpoint}: {err}")))
+            }
+        }
+    }
+
+    /// Connect, send the payload, then read the response to completion.
+    fn tcp_request(&self, endpoint: &str, payload: &str) -> Result<String, String> {
+        use std::io::{Read, Write};
+        use std::net::Shutdown;
+        let mut stream = self.connect("request", endpoint)?;
+        if let Err(err) = stream.write_all(payload.as_bytes()) {
+            self.record("request", endpoint, 0, 0, "error");
+            return Err(trap("net_error", format!("write {endpoint}: {err}")));
+        }
+        let _ = stream.shutdown(Shutdown::Write);
+        let mut buf = Vec::new();
+        if let Err(err) = stream.read_to_end(&mut buf) {
+            self.record("request", endpoint, payload.len(), 0, "error");
+            return Err(trap("net_error", format!("read {endpoint}: {err}")));
+        }
+        let response = String::from_utf8_lossy(&buf).to_string();
+        self.record("request", endpoint, payload.len(), response.len(), "allow");
+        Ok(response)
+    }
+
+    /// Connect and send the payload (fire-and-forget).
+    fn tcp_send(&self, endpoint: &str, payload: &str) -> Result<usize, String> {
+        use std::io::Write;
+        let mut stream = self.connect("send", endpoint)?;
+        if let Err(err) = stream.write_all(payload.as_bytes()) {
+            self.record("send", endpoint, 0, 0, "error");
+            return Err(trap("net_error", format!("write {endpoint}: {err}")));
+        }
+        self.record("send", endpoint, payload.len(), 0, "allow");
+        Ok(payload.len())
+    }
 }
 
 impl<'a> Interpreter<'a> {
+    fn require_io(&self) -> Result<&IoContext, String> {
+        self.io
+            .as_ref()
+            .ok_or_else(|| trap("io_unavailable", "core_io builtins require `fgx io-run`"))
+    }
+
+    fn require_net(&self) -> Result<&NetContext, String> {
+        self.net.as_ref().ok_or_else(|| {
+            trap(
+                "net_unavailable",
+                "core_socket builtins require `fgx net-run`",
+            )
+        })
+    }
+
     fn execute_named(
         &self,
         name: &str,
@@ -585,6 +860,65 @@ impl<'a> Interpreter<'a> {
                 let value = self.eval_expr(&args[0], env)?.as_i64()? as u32;
                 let amount = self.eval_expr(&args[1], env)?.as_i64()? as u32;
                 Ok(Some(Value::Int(i64::from(value.rotate_left(amount)))))
+            }
+            "core_io_read_file" => {
+                expect_arity(name, args, 1)?;
+                let path = self.eval_expr(&args[0], env)?.as_str_value()?;
+                let io = self.require_io()?;
+                Ok(Some(Value::String(io.read_file(&path)?)))
+            }
+            "core_io_write_file" => {
+                expect_arity(name, args, 2)?;
+                let path = self.eval_expr(&args[0], env)?.as_str_value()?;
+                let contents = self.eval_expr(&args[1], env)?.as_str_value()?;
+                let io = self.require_io()?;
+                Ok(Some(Value::Int(io.write_file(&path, &contents)? as i64)))
+            }
+            "core_io_copy_file" => {
+                expect_arity(name, args, 2)?;
+                let src = self.eval_expr(&args[0], env)?.as_str_value()?;
+                let dst = self.eval_expr(&args[1], env)?.as_str_value()?;
+                let io = self.require_io()?;
+                Ok(Some(Value::Int(io.copy_file(&src, &dst)? as i64)))
+            }
+            "core_hash_sha256" => {
+                expect_arity(name, args, 1)?;
+                let data = self.eval_expr(&args[0], env)?.as_str_value()?;
+                Ok(Some(Value::String(crate::crypto::sha256_hex(
+                    data.as_bytes(),
+                ))))
+            }
+            "core_hash_hmac_sha256" => {
+                expect_arity(name, args, 2)?;
+                let key = self.eval_expr(&args[0], env)?.as_str_value()?;
+                let msg = self.eval_expr(&args[1], env)?.as_str_value()?;
+                Ok(Some(Value::String(crate::crypto::hmac_sha256_hex(
+                    key.as_bytes(),
+                    msg.as_bytes(),
+                ))))
+            }
+            "core_hash_ct_eq" => {
+                expect_arity(name, args, 2)?;
+                let a = self.eval_expr(&args[0], env)?.as_str_value()?;
+                let b = self.eval_expr(&args[1], env)?.as_str_value()?;
+                Ok(Some(Value::Bool(crate::crypto::constant_time_eq(
+                    a.as_bytes(),
+                    b.as_bytes(),
+                ))))
+            }
+            "core_socket_tcp_request" => {
+                expect_arity(name, args, 2)?;
+                let endpoint = self.eval_expr(&args[0], env)?.as_str_value()?;
+                let payload = self.eval_expr(&args[1], env)?.as_str_value()?;
+                let net = self.require_net()?;
+                Ok(Some(Value::String(net.tcp_request(&endpoint, &payload)?)))
+            }
+            "core_socket_tcp_send" => {
+                expect_arity(name, args, 2)?;
+                let endpoint = self.eval_expr(&args[0], env)?.as_str_value()?;
+                let payload = self.eval_expr(&args[1], env)?.as_str_value()?;
+                let net = self.require_net()?;
+                Ok(Some(Value::Int(net.tcp_send(&endpoint, &payload)? as i64)))
             }
             "core_fs_scope_read"
             | "core_runtime_fs_scope_read"

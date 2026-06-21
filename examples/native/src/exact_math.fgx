@@ -1,0 +1,28 @@
+# Native build demo: pure, self-contained integer DSP.
+#
+# Every function here lowers cleanly to C and compiles to a real native
+# object file via the host C compiler (`fgx build --native examples/native`).
+# The functions are `export`ed so they keep external linkage in the object
+# (visible symbols, ready for the v2.13 FFI bridge to link against). The
+# @exact functions carry the checked exact-arithmetic contract, so the
+# native object is bit-exact and deterministic; gain_fast keeps the
+# fast-by-default float path.
+
+@exact
+export fn clamp_i32(x: i32, lo: i32, hi: i32) -> i32:
+    if x < lo:
+        return lo
+    if x > hi:
+        return hi
+    return x
+
+@exact
+export fn mix_avg_i32(a: i32, b: i32) -> i32:
+    return (a + b) / 2
+
+@exact
+export fn scale_q15(sample: i32, gain_q15: i32) -> i32:
+    return (sample * gain_q15) / 32768
+
+export fn gain_fast(x: f32, g: f32) -> f32:
+    return x * g

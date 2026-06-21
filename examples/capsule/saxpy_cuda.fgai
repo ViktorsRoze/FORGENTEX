@@ -1,0 +1,14 @@
+CAP saxpy cuda "cuda-12.4" env "cuda-12.4-sm_80" effects [gpu.compute, alloc]
+  IN x &[f32]
+  IN y &mut[f32]
+  OUT ok bool
+  DEP "github:org/saxpy@a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+  SBX "gpu.compute device:0"
+  SBX "limit.mem_mb 512"
+  CODE 5
+// y = a*x + y on the GPU; raw device buffers cross the C ABI
+__global__ void saxpy(int n, float a, const float* x, float* y) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) y[i] = a * x[i] + y[i];
+}
+ENDCAP

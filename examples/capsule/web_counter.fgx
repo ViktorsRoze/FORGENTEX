@@ -1,0 +1,28 @@
+share visitor_count: i64 = 0
+
+foreign backend python version "3.13" env "cpython-3.13-linux-x86_64" effects [network.read]:
+    input request_id: i64
+    output count: i64
+    dep "pypi:fastapi==0.115.0#sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    sandbox "net.listen 127.0.0.1:8000"
+    sandbox "limit.wall_ms 1000"
+    sandbox "limit.mem_mb 256"
+    bind visitor_count rw
+    code:
+        # backend increments the shared counter on each request
+        def handle(request_id):
+            global visitor_count
+            visitor_count += 1
+            return visitor_count
+
+foreign frontend javascript version "node-22" effects [network.write]:
+    input count: i64
+    output html: str
+    dep "npm:preact@10.24.0#sha512:2222222222222222222222222222222222222222222222222222222222222222"
+    sandbox "net.connect 127.0.0.1:8000"
+    bind visitor_count read
+    code:
+        // frontend renders the same shared counter by name
+        export function render(count) {
+            return `<h1>visitors: ${visitor_count}</h1>`;
+        }
