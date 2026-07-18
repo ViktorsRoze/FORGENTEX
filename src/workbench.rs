@@ -339,6 +339,9 @@ fn node_matches(target: &str, id: &str) -> bool {
 fn item_id(item: &Item) -> &str {
     match item {
         Item::Struct(decl) => &decl.id,
+        Item::Enum(decl) => &decl.id,
+        Item::Trait(decl) => &decl.id,
+        Item::TraitImpl(decl) => &decl.id,
         Item::Function(function) => &function.id,
         Item::Test(test) => &test.id,
         Item::Capsule(capsule) => &capsule.id,
@@ -349,6 +352,9 @@ fn item_id(item: &Item) -> &str {
 fn item_name(item: &Item) -> &str {
     match item {
         Item::Struct(decl) => &decl.name,
+        Item::Enum(decl) => &decl.name,
+        Item::Trait(decl) => &decl.name,
+        Item::TraitImpl(decl) => &decl.trait_name,
         Item::Function(function) => &function.name,
         Item::Test(test) => &test.name,
         Item::Capsule(capsule) => &capsule.name,
@@ -383,6 +389,9 @@ fn collect_item_type_names(item: &Item, out: &mut BTreeSet<String>) {
                 collect_type_name(&field.ty, out);
             }
         }
+        Item::Enum(_) => {}
+        Item::Trait(_) => {}
+        Item::TraitImpl(decl) => collect_type_name(&decl.for_type, out),
         Item::Function(function) => {
             for param in &function.params {
                 collect_type_name(&param.ty, out);
@@ -469,6 +478,19 @@ fn symbol_map_lines(project: &Project, module: &ProjectModule, item: &Item) -> V
             decl.name,
             decl.id,
             decl.fields.len()
+        )),
+        Item::Enum(decl) => lines.push(format!(
+            "  E {} {} variants={}",
+            decl.name,
+            decl.id,
+            decl.variants.len()
+        )),
+        Item::Trait(decl) => lines.push(format!("  TR {} {}", decl.name, decl.id)),
+        Item::TraitImpl(decl) => lines.push(format!(
+            "  IMPL {} for {} {}",
+            decl.trait_name,
+            decl.for_type.to_agent(),
+            decl.id
         )),
         Item::Function(function) => {
             let safety = if function.unsafe_fn { " unsafe" } else { "" };

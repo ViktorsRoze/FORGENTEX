@@ -1,0 +1,13 @@
+# Deterministic reference-mode tasks and a bounded FIFO channel.
+
+fn double(value: i32) -> i32:
+    return value * 2
+
+fn task_and_queue() -> i32 effects [concurrency.task, concurrency.channel]:
+    let task: Task[i32] = task_spawn(double, 21)
+    let channel: Channel[i32] = channel_new(1)
+    let value: i32 = task_await(task)
+    let sent: bool = channel_send(channel, value)
+    if !sent:
+        return -1
+    return unwrap_or(channel_recv(channel), 0)

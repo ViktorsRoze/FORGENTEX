@@ -1,0 +1,38 @@
+# Native-call v1.23: Rust transfers an owned UTF-8 string explicitly.
+
+foreign make_greeting_rust rust version "2021" effects [alloc]:
+    output greeting: str
+    sandbox "fs.none"
+    code:
+        #[repr(C)]
+        pub struct FgxOwnedStr {
+            pub ptr: *mut u8,
+            pub len: usize,
+            pub capacity: usize,
+        }
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn make_greeting_rust() -> FgxOwnedStr {
+            let mut text = b"Forgentex,\n\xe2\x9c\x93".to_vec();
+            let result = FgxOwnedStr {
+                ptr: text.as_mut_ptr(),
+                len: text.len(),
+                capacity: text.capacity(),
+            };
+            std::mem::forget(text);
+            result
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn make_greeting_rust_free(
+            ptr: *mut u8,
+            len: usize,
+            capacity: usize,
+        ) {
+            if capacity > 0 {
+                drop(unsafe { Vec::from_raw_parts(ptr, len, capacity) });
+            }
+        }
+
+fn greeting_from_rust() -> str effects [alloc]:
+    return make_greeting_rust()

@@ -1,0 +1,41 @@
+# Deterministic composition slice for the 3D text/music visualizer.
+# `pipeline-run` owns the shared values and executes these two stages serially:
+# fixed music energy -> SceneMetrics -> preview score.
+
+share music_energy: i32 = 4
+@repr(C)
+struct SceneMetrics:
+    glyph_count: i32
+    frame_count: i32
+    exposure: f32
+
+share scene_metrics: SceneMetrics
+share preview_score: i32 = 0
+
+foreign analyze_music c version "c11" effects [cpu]:
+    input energy: i32
+    output metrics: SceneMetrics
+    sandbox "fs.none"
+    bind music_energy read
+    bind scene_metrics rw
+    code:
+        #include "types.h"
+        SceneMetrics analyze_music(int energy) {
+            SceneMetrics metrics;
+            metrics.glyph_count = energy * 3;
+            metrics.frame_count = energy * 45;
+            metrics.exposure = 2.5f;
+            return metrics;
+        }
+
+foreign render_preview c version "c11" effects [cpu]:
+    input scene: SceneMetrics
+    output preview: i32
+    sandbox "fs.none"
+    bind scene_metrics read
+    bind preview_score rw
+    code:
+        #include "types.h"
+        int render_preview(SceneMetrics scene) {
+            return scene.glyph_count + scene.frame_count + (int)scene.exposure;
+        }

@@ -556,16 +556,165 @@ fn borrow_escape_hatch_check(gates: &[ReleaseGate]) -> ReleaseHardeningCheck {
     if !has_conformance {
         gaps.push("ownership gate does not cite borrow conformance evidence".to_string());
     }
+    let conformance = crate::borrow_conformance::run_borrow_conformance();
+    if !conformance.is_success() {
+        gaps.push(format!(
+            "borrow conformance has {} failing case(s)",
+            conformance.failed
+        ));
+    }
+    if conformance.reference_model.move_generated < 510 {
+        gaps.push(format!(
+            "independent move reference generated only {} cases; require at least 510",
+            conformance.reference_model.move_generated
+        ));
+    }
+    if conformance.reference_model.alias_generated < 277 {
+        gaps.push(format!(
+            "independent alias reference generated only {} cases; require at least 277",
+            conformance.reference_model.alias_generated
+        ));
+    }
+    if conformance.reference_model.lifetime_generated < 132 {
+        gaps.push(format!(
+            "independent lifetime reference generated only {} cases; require at least 132",
+            conformance.reference_model.lifetime_generated
+        ));
+    }
+    if conformance.reference_model.property_generated < 256 {
+        gaps.push(format!(
+            "independent safety property generator produced only {} cases; require at least 256",
+            conformance.reference_model.property_generated
+        ));
+    }
+    if conformance.reference_model.persisted_regression_generated < 4 {
+        gaps.push(format!(
+            "persisted borrow regression corpus contains only {} cases; require at least 4",
+            conformance.reference_model.persisted_regression_generated
+        ));
+    }
+    if conformance.reference_model.campaign_generated < 128 {
+        gaps.push(format!(
+            "runtime-seeded safety campaign produced only {} cases; require at least 128",
+            conformance.reference_model.campaign_generated
+        ));
+    }
+    if conformance.reference_model.move_mismatched != 0 {
+        gaps.push(format!(
+            "independent move reference disagrees with the checker in {} case(s)",
+            conformance.reference_model.move_mismatched
+        ));
+    }
+    if conformance.reference_model.alias_mismatched != 0 {
+        gaps.push(format!(
+            "independent alias reference disagrees with the checker in {} case(s)",
+            conformance.reference_model.alias_mismatched
+        ));
+    }
+    if conformance.reference_model.lifetime_mismatched != 0 {
+        gaps.push(format!(
+            "independent lifetime reference disagrees with the checker in {} case(s)",
+            conformance.reference_model.lifetime_mismatched
+        ));
+    }
+    if conformance.reference_model.property_mismatched != 0 {
+        gaps.push(format!(
+            "independent safety properties disagree with the checker in {} case(s)",
+            conformance.reference_model.property_mismatched
+        ));
+    }
+    if conformance.reference_model.persisted_regression_mismatched != 0 {
+        gaps.push(format!(
+            "persisted borrow regression corpus disagrees with the checker in {} case(s)",
+            conformance.reference_model.persisted_regression_mismatched
+        ));
+    }
+    if conformance.reference_model.campaign_mismatched != 0 {
+        gaps.push(format!(
+            "runtime-seeded safety campaign disagrees with the checker in {} case(s)",
+            conformance.reference_model.campaign_mismatched
+        ));
+    }
+    if !conformance
+        .reference_model
+        .campaign_failure_artifacts
+        .is_empty()
+    {
+        gaps.push(format!(
+            "runtime-seeded safety campaign emitted {} minimized replay artifact(s)",
+            conformance.reference_model.campaign_failure_artifacts.len()
+        ));
+    }
     let status = if gaps.is_empty() { "pass" } else { "fail" };
     ReleaseHardeningCheck {
         id: "borrow_escape_hatch_conformance".to_string(),
         title: "Borrow Escape-Hatch Conformance".to_string(),
         status: status.to_string(),
         requirement:
-            "Borrow RC cases cover raw pointer parameters, conditional lifetime escape, index projections, reborrows, loop-carried liveness, conditional borrow-state joins, and contract summaries."
+            "Borrow RC cases cover raw pointer parameters, conditional lifetime escape, index projections, reborrows, loop-carried liveness, conditional borrow-state joins, and contract summaries; persisted minimized regressions plus independent generated move-state, alias place/liveness, lifetime-provenance, fixed property, and runtime-seeded shrinkable campaign models must agree with the production checker."
                 .to_string(),
         evidence: vec![
             "fgx borrow-conformance --json".to_string(),
+            conformance.reference_model.schema.clone(),
+            format!(
+                "reference_move_cases={}",
+                conformance.reference_model.move_generated
+            ),
+            format!(
+                "reference_alias_cases={}",
+                conformance.reference_model.alias_generated
+            ),
+            format!(
+                "reference_lifetime_cases={}",
+                conformance.reference_model.lifetime_generated
+            ),
+            format!(
+                "reference_property_cases={}",
+                conformance.reference_model.property_generated
+            ),
+            format!(
+                "persisted_regression_cases={}",
+                conformance.reference_model.persisted_regression_generated
+            ),
+            format!(
+                "reference_campaign_seed={}",
+                conformance.reference_model.campaign_seed
+            ),
+            format!(
+                "reference_campaign_cases={}",
+                conformance.reference_model.campaign_generated
+            ),
+            format!(
+                "reference_move_mismatches={}",
+                conformance.reference_model.move_mismatched
+            ),
+            format!(
+                "reference_alias_mismatches={}",
+                conformance.reference_model.alias_mismatched
+            ),
+            format!(
+                "reference_lifetime_mismatches={}",
+                conformance.reference_model.lifetime_mismatched
+            ),
+            format!(
+                "reference_property_mismatches={}",
+                conformance.reference_model.property_mismatched
+            ),
+            format!(
+                "persisted_regression_mismatches={}",
+                conformance.reference_model.persisted_regression_mismatched
+            ),
+            format!(
+                "reference_campaign_mismatches={}",
+                conformance.reference_model.campaign_mismatched
+            ),
+            format!(
+                "reference_campaign_failure_artifacts={}",
+                conformance
+                    .reference_model
+                    .campaign_failure_artifacts
+                    .len()
+            ),
             "raw.raw_pointer_param_safe_fn_rejected".to_string(),
             "lifetimes.unproven_conditional_arg_rejected".to_string(),
             "projections.constant_indices_disjoint_ok".to_string(),

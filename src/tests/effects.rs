@@ -62,6 +62,21 @@ fn builtin_effects_require_explicit_capabilities() {
 }
 
 #[test]
+fn vec_growth_requires_the_alloc_effect() {
+    let missing = diagnostics(
+        "fn bad() -> usize:\n    let values: Vec[i32] = vec_new()\n    push(values, 1)\n    return values.len\n",
+    );
+    let json = diagnostics_to_json(&missing);
+    assert!(json.contains("\"error\": \"undeclared_effect\""));
+    assert!(json.contains("\"expected\": \"alloc\""));
+
+    let declared = diagnostics(
+        "fn ok() -> usize effects [alloc]:\n    let values: Vec[i32] = vec_new()\n    push(values, 1)\n    return values.len\n",
+    );
+    assert_eq!(declared, Vec::new());
+}
+
+#[test]
 fn safe_functions_cannot_claim_raw_memory_or_assembly_effects() {
     let diagnostics = diagnostics("fn bad() -> void effects [memory.raw]:\n    return\n");
     let json = diagnostics_to_json(&diagnostics);

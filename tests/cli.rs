@@ -201,6 +201,8 @@ fn borrow_conformance_command_is_available() {
     assert!(json.contains("\"schema\": \"forgentex.borrow_conformance.v1\""));
     assert!(json.contains("\"status\": \"pass\""));
     assert!(json.contains("\"failed\": 0"));
+    assert!(json.contains("\"persisted_regression_generated\": 4"));
+    assert!(json.contains("\"persisted_regression_mismatched\": 0"));
     assert!(json.contains("\"id\": \"moves.use_after_move\""));
     assert!(json.contains("\"id\": \"loops.loop_carried_alias_rejected\""));
     assert!(json.contains("\"id\": \"branches.conditional_alias_reassign_rejected\""));
@@ -211,6 +213,37 @@ fn borrow_conformance_command_is_available() {
     let text = assert_success(fgx(&["borrow-conformance"]));
     assert!(text.contains("Forgentex borrow conformance suite"));
     assert!(text.contains("status=pass"));
+
+    let custom = assert_success(fgx(&[
+        "borrow-conformance",
+        "--campaign-seed",
+        "0x7",
+        "--campaign-cases",
+        "1",
+        "--json",
+    ]));
+    assert!(custom.contains("\"campaign_seed\": \"0x0000000000000007\""));
+    assert!(custom.contains("\"campaign_generated\": 4"));
+    assert!(custom.contains("reference.campaign.v1.0000000000000007.moves.0000"));
+
+    let failure_dir = temp_file("borrow_campaign_failures");
+    if failure_dir.exists() {
+        fs::remove_dir_all(&failure_dir).unwrap();
+    }
+    let persisted = assert_success(fgx(&[
+        "borrow-conformance",
+        "--campaign-seed",
+        "11",
+        "--campaign-cases",
+        "1",
+        "--failure-dir",
+        failure_dir.to_str().unwrap(),
+    ]));
+    assert!(persisted.contains("status=pass"));
+    assert!(!failure_dir.exists());
+
+    let invalid = assert_failure(fgx(&["borrow-conformance", "--campaign-cases", "0"]));
+    assert!(invalid.contains("expected 1..256"));
 }
 
 #[test]
@@ -375,15 +408,21 @@ fn build_c_backend_success_and_failure() {
     ]));
     assert!(out.contains("forgentex_demo_media.h"));
     assert!(out.contains("forgentex_demo_media.c"));
+    assert!(out.contains("forgentex.fgir.json"));
+    assert!(out.contains("forgentex.backend_build.json"));
     let header = fs::read_to_string(out_dir.join("forgentex_demo_media.h")).unwrap();
     assert!(header.contains("void mix_samples(fgx_slice_i16 dst"));
+    let receipt = fs::read_to_string(out_dir.join("forgentex.backend_build.json")).unwrap();
+    assert!(receipt.contains("\"backend\": \"c\""));
+    assert!(receipt.contains("\"fir_schema\": \"forgentex.backend_ir.v1\""));
     let _ = fs::remove_dir_all(out_dir);
 
     let err = assert_failure(fgx(&["build", ".", "--backend", "wat"]));
     assert!(err.contains("unknown backend"));
 
     let planned = assert_failure(fgx(&["build", ".", "--backend", "llvm"]));
-    assert!(planned.contains("backend 'llvm' is planned for Stage 15"));
+    assert!(planned.contains("backend 'llvm' is planned for v3.0"));
+    assert!(planned.contains("feature=backend-llvm"));
 }
 
 #[test]
@@ -399,9 +438,12 @@ fn build_zig_backend_success() {
         &out_dir_text,
     ]));
     assert!(out.contains("forgentex_demo_media.zig"));
+    assert!(out.contains("forgentex.fgir.json"));
     let source = fs::read_to_string(out_dir.join("forgentex_demo_media.zig")).unwrap();
     assert!(source.contains("pub fn mix_samples(dst: []i16"));
     assert!(source.contains("fgx_bounds_index(i, dst.len)"));
+    let receipt = fs::read_to_string(out_dir.join("forgentex.backend_build.json")).unwrap();
+    assert!(receipt.contains("\"backend\": \"zig\""));
     let _ = fs::remove_dir_all(out_dir);
 }
 
@@ -439,6 +481,8 @@ fn package_manager_and_build_system_commands_are_available() {
     ]));
     assert!(build.contains("\"schema\": \"forgentex.package_build.v1\""));
     assert!(build.contains("\"triple\": \"aarch64-unknown-linux-gnu\""));
+    assert!(build.contains("\"metadata_files\": ["));
+    assert!(build.contains("forgentex.backend_build.json"));
     assert!(out_dir
         .join("dev")
         .join("aarch64-unknown-linux-gnu")
@@ -520,28 +564,46 @@ fn lock_command_can_write_lockfile() {
 #[test]
 fn backend_catalog_and_ir_commands_are_available() {
     let catalog = assert_success(fgx(&["backends"]));
+    assert!(catalog.contains("forgentex.backend_info.v1"));
     assert!(catalog.contains("forgentex.backend_ir.v1"));
+    assert!(catalog.contains("interp status=available interface=run"));
     assert!(catalog.contains("c status=available"));
     assert!(catalog.contains("zig status=available"));
+    assert!(catalog.contains("feature=jit-cranelift"));
     assert!(catalog.contains("llvm status=planned"));
 
     let json = assert_success(fgx(&["backends", "--json"]));
-    assert!(json.contains("\"schema\": \"forgentex.backends.v1\""));
+    assert!(json.contains("\"schema\": \"forgentex.backend_info.v1\""));
+    assert!(json.contains("\"default_zero_dependency\": true"));
     assert!(json.contains("\"name\": \"zig\""));
     assert!(json.contains("\"name\": \"mlir\""));
+    assert!(json.contains("\"feature\": \"backend-mlir\""));
 
     let ir = assert_success(fgx(&["ir", "."]));
     assert!(ir.contains("FGIR schema=forgentex.backend_ir.v1"));
     assert!(ir.contains("F mix_samples @function.mix_samples visibility=public"));
     assert!(ir.contains("assign dst[i] core_math_clamp_i16(x)"));
 
+    let file_ir = assert_success(fgx(&["ir", "examples/hello.fgx"]));
+    assert!(file_ir.contains("package=single-file"));
+    assert!(file_ir.contains("M hello path=examples/hello.fgx"));
+    assert!(file_ir.contains("F area @function.area"));
+
     let ir_json = assert_success(fgx(&["ir", ".", "--json"]));
     assert!(ir_json.contains("\"schema\": \"forgentex.backend_ir.v1\""));
     assert!(ir_json.contains("\"op\": \"assign\""));
 
+    let file_ir_json = assert_success(fgx(&["ir", "examples/hello.fgx", "--json"]));
+    assert!(file_ir_json.contains("\"package\": \"single-file\""));
+    assert!(file_ir_json.contains("\"name\": \"Point\""));
+
     let contract = assert_success(fgx(&["ir", ".", "--contract-json"]));
     assert!(contract.contains("\"schema\": \"forgentex.frontend_contract.v1\""));
     assert!(contract.contains("\"type_diagnostics\": ["));
+
+    let file_contract = assert_success(fgx(&["ir", "examples/hello.fgx", "--contract-json"]));
+    assert!(file_contract.contains("\"package\": \"single-file\""));
+    assert!(file_contract.contains("\"schema\": \"forgentex.frontend_contract.v1\""));
 }
 
 #[test]
@@ -659,8 +721,125 @@ fn run_success_and_failure() {
     assert!(json.contains("\"status\": \"pass\""));
     assert!(json.contains("\"dst\": [5500, 0, -12000, 17000]"));
 
+    let backend_json = assert_success(fgx(&[
+        "run",
+        "examples/media/audio_mix.fgx",
+        "--entry",
+        "mix_samples",
+        "--json-input",
+        "examples/run/audio_mix.json",
+        "--backend",
+        "interp",
+    ]));
+    assert!(backend_json.contains("\"entry\": \"mix_samples\""));
+    assert!(backend_json.contains("\"status\": \"pass\""));
+
+    let source_backend = assert_failure(fgx(&[
+        "run",
+        "examples/media/audio_mix.fgx",
+        "--entry",
+        "mix_samples",
+        "--json-input",
+        "examples/run/audio_mix.json",
+        "--backend",
+        "c",
+    ]));
+    assert!(source_backend.contains("does not run entries in-process"));
+
+    let blocked_path = temp_file("interp_fir_gate_cli.fgx");
+    fs::write(
+        &blocked_path,
+        "unsafe fn blocked() -> i32:\n    return 1\n\nfn safe_entry() -> i32:\n    return 42\n",
+    )
+    .unwrap();
+    let blocked_path_text = blocked_path.to_string_lossy().to_string();
+    let blocked = assert_failure(fgx(&[
+        "run",
+        &blocked_path_text,
+        "--entry",
+        "blocked",
+        "--backend",
+        "interp",
+    ]));
+    assert!(blocked.contains("FIR contract blocks backend 'interp'"));
+    assert!(blocked.contains("runtime::blocked blockers=[unsafe_function]"));
+    let _ = fs::remove_file(blocked_path);
+
+    let hosted_data = temp_file("hosted_live_data.txt");
+    let hosted_input = temp_file("hosted_live_input.json");
+    fs::write(&hosted_data, "payload").unwrap();
+    let hosted_path = hosted_data
+        .display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    fs::write(
+        &hosted_input,
+        format!(
+            r#"{{ "args": {{ "path": "{hosted_path}" }}, "expect": {{ "return": "payload" }} }}"#
+        ),
+    )
+    .unwrap();
+    let hosted_input_text = hosted_input.to_string_lossy().to_string();
+    let live = assert_success(fgx(&[
+        "run",
+        "examples/io/real_copy.fgx",
+        "--entry",
+        "read_file",
+        "--json-input",
+        &hosted_input_text,
+        "--live",
+        "--grant-fs",
+        "fs.read",
+    ]));
+    assert!(live.contains("\"status\": \"pass\""));
+    assert!(live.contains("\"capsule_calls\": []"));
+    assert!(live.contains("\"io_ops\": ["));
+    assert!(live.contains("\"op\": \"read\""));
+    assert!(live.contains("\"decision\": \"allow\""));
+    assert!(live.contains("\"net_ops\": []"));
+    let _ = fs::remove_file(hosted_data);
+    let _ = fs::remove_file(hosted_input);
+
     let err = assert_failure(fgx(&["run", "examples/media/popcount_x86.fgx"]));
     assert!(err.contains("no runnable demo entrypoint"));
+}
+
+#[test]
+fn io_and_net_run_commands_use_fir_backed_helpers() {
+    let io_data = temp_file("cli_io_run_data.txt");
+    fs::write(&io_data, "payload").unwrap();
+    let io_data_text = io_data.to_string_lossy().to_string();
+    let io = assert_success(fgx(&[
+        "io-run",
+        "examples/io/real_copy.fgx",
+        "--entry",
+        "read_file",
+        "--grant",
+        "fs.read",
+        "--arg",
+        &io_data_text,
+        "--json",
+    ]));
+    assert!(io.contains("\"schema\": \"forgentex.io_run.v1\""));
+    assert!(io.contains("\"status\": \"ok\""));
+    assert!(io.contains("\"return_value\": \"payload\""));
+    let _ = fs::remove_file(io_data);
+
+    let net = assert_failure(fgx(&[
+        "net-run",
+        "examples/network/tcp_ping.fgx",
+        "--entry",
+        "ping",
+        "--arg",
+        "127.0.0.1:9",
+        "--arg",
+        "x",
+        "--json",
+    ]));
+    assert!(net.contains("\"schema\": \"forgentex.net_run.v1\""));
+    assert!(net.contains("\"status\": \"denied\""));
+    assert!(net.contains("\"decision\": \"deny\""));
 }
 
 #[test]
@@ -1225,7 +1404,7 @@ fn help_and_unknown_command_are_covered() {
     assert!(out.contains("fgx header"));
     assert!(out.contains("fgx simd-review"));
     assert!(out.contains("fgx backends"));
-    assert!(out.contains("fgx ir <project>"));
+    assert!(out.contains("fgx ir <project|file>"));
     assert!(out.contains("fgx stdlib"));
     assert!(out.contains("fgx build <project> --backend c"));
     assert!(out.contains("fgx new <path>"));

@@ -59,6 +59,8 @@ crypto.nonce
 ledger.mock
 agent.payment
 agent.patch
+gpu.render
+media.encode
 memory.raw
 cpu.simd
 cpu.asm
@@ -105,6 +107,27 @@ Adding the declaration makes the capability boundary explicit:
 fn ok() -> u8 effects [io.read]:
     return io_read()
 ```
+
+First-class function values carry the same boundary in their type. A bare
+`Fn[P…, R]` accepts only pure callables; an effectful value uses a final
+`effects[...]` marker:
+
+```forgentex
+fn apply_read(f: Fn[i32, i32, effects[io.read]], value: i32) -> i32 effects [io.read]:
+    return f(value)
+```
+
+Named functions contribute their declared effects and closures contribute the
+effects inferred from their bodies. Assigning a callable is allowed when its
+effect set is a subset of the annotated contract, so a wider contract remains
+conservative. Calling through the value infers the entire annotated set at the
+call site; indirect calls therefore cannot hide capabilities. Unknown,
+duplicate, and misplaced `effects[...]` markers are type errors.
+
+Generic callable contracts place `forall[...]` first and keep `effects[...]`
+last, for example `Fn[forall[T], T, T, effects[io.read]]`. Every indirect call
+gets a fresh type substitution while still contributing the complete annotated
+effect set.
 
 ## Unsafe Effects
 

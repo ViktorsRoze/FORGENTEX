@@ -1,0 +1,8 @@
+{
+  "args": {
+    "samples": [10, 20, -30]
+  },
+  "expect": {
+    "return": 15
+  }
+}

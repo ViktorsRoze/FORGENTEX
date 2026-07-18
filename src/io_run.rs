@@ -8,7 +8,8 @@
 //! effects/sandbox model from review-time to runtime enforcement for I/O.
 
 use crate::ast::Program;
-use crate::interp::{run_entry_with_io, IoOp, Value};
+use crate::backend::BackendIr;
+use crate::interp::{run_entry_with_io, run_entry_with_io_with_ir, IoOp, Value};
 use crate::json;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -52,8 +53,33 @@ pub fn run(
     args: Vec<String>,
     grants: Vec<String>,
 ) -> IoRunReport {
+    run_impl(file, program, None, entry, args, grants)
+}
+
+pub fn run_with_ir(
+    file: &str,
+    program: &Program,
+    ir: &BackendIr,
+    entry: &str,
+    args: Vec<String>,
+    grants: Vec<String>,
+) -> IoRunReport {
+    run_impl(file, program, Some(ir), entry, args, grants)
+}
+
+fn run_impl(
+    file: &str,
+    program: &Program,
+    ir: Option<&BackendIr>,
+    entry: &str,
+    args: Vec<String>,
+    grants: Vec<String>,
+) -> IoRunReport {
     let values = args.into_iter().map(Value::String).collect();
-    let (value, ops, error) = run_entry_with_io(program, entry, values, grants.clone());
+    let (value, ops, error) = match ir {
+        Some(ir) => run_entry_with_io_with_ir(program, ir, entry, values, grants.clone()),
+        None => run_entry_with_io(program, entry, values, grants.clone()),
+    };
 
     let bytes_total = ops
         .iter()

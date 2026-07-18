@@ -1,0 +1,8 @@
+struct Slots:
+    items: [&mut [u8]; 2]
+
+fn fill(left: &mut [u8], right: &mut [u8]) -> void:
+    return
+
+fn bad(slots: Slots, i: usize) -> void:
+    fill(slots.items[i], slots.items[i])

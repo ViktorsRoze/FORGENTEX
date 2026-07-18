@@ -1,0 +1,6 @@
+{
+  "args": {},
+  "expect": {
+    "return": "Forgentex,\n✓"
+  }
+}

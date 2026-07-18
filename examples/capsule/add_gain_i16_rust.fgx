@@ -1,0 +1,20 @@
+# Rust mutable slice: fixed-length copy-in/copy-back through a temporary pointer.
+
+foreign add_gain_i16_rust rust version "2021" effects [cpu.avx2]:
+    input samples: &mut [i16]
+    input gain: i16
+    output changed: i32
+    sandbox "fs.none"
+    code:
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn add_gain_i16_rust(samples: *mut i16, samples_len: usize, gain: i16) -> i32 {
+            let samples = unsafe { std::slice::from_raw_parts_mut(samples, samples_len) };
+            for sample in samples {
+                *sample = sample.saturating_add(gain);
+            }
+            samples_len as i32
+        }
+
+fn boost_rust_then_first(samples: &mut [i16]) -> i16 effects [cpu.avx2]:
+    let changed: i32 = add_gain_i16_rust(samples, 5)
+    return samples[0]

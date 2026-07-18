@@ -103,8 +103,10 @@ gates. v0.24 requires:
   code, canonical code, family, rule, summary, safety, patch suggestions,
   review gates, and target consequences.
 - `borrow_escape_hatch_conformance`: borrow conformance covers the RC cases for
-  raw pointer parameters, conditional lifetime escape, projection aliasing, and
-  loop-carried borrow liveness, and conditional borrow-state joins.
+  raw pointer parameters, conditional lifetime escape, projection aliasing,
+  loop-carried borrow liveness, and conditional borrow-state joins. It also
+  executes at least 510 independently modeled root/field move programs and
+  requires zero production-checker mismatches.
 - `target_decision_consistency`: the release decision is derived from the
   requested target and current gate statuses.
 

@@ -429,6 +429,25 @@ pub fn generate_project_map_with_options(
                         decl.fields.len()
                     ));
                 }
+                Item::Enum(decl) => {
+                    out.push_str(&format!(
+                        "  E {} {} variants={}\n",
+                        decl.name,
+                        decl.id,
+                        decl.variants.len()
+                    ));
+                }
+                Item::Trait(decl) => {
+                    out.push_str(&format!("  TR {} {}\n", decl.name, decl.id));
+                }
+                Item::TraitImpl(decl) => {
+                    out.push_str(&format!(
+                        "  IMPL {} for {} {}\n",
+                        decl.trait_name,
+                        decl.for_type.to_agent(),
+                        decl.id
+                    ));
+                }
                 Item::Function(function) => {
                     let visibility = visibility_for(&module.public_symbols, "fn", &function.name);
                     let safety = if function.unsafe_fn { " unsafe" } else { "" };
@@ -742,6 +761,9 @@ fn duplicate_symbol_diagnostics(project: &Project) -> Vec<Diagnostic> {
         for item in &module.program.items {
             let (kind, name, node) = match item {
                 Item::Struct(decl) => ("struct", decl.name.as_str(), decl.id.as_str()),
+                Item::Enum(decl) => ("enum", decl.name.as_str(), decl.id.as_str()),
+                Item::Trait(decl) => ("trait", decl.name.as_str(), decl.id.as_str()),
+                Item::TraitImpl(_) => continue,
                 Item::Function(function) => {
                     ("function", function.name.as_str(), function.id.as_str())
                 }
@@ -825,6 +847,20 @@ fn public_symbols(source: &str, program: &Program) -> Vec<PublicSymbol> {
     let mut symbols = Vec::new();
     for item in &program.items {
         match item {
+            Item::Enum(decl) if exported.contains(&format!("enum:{}", decl.name)) => {
+                let variants = decl
+                    .variants
+                    .iter()
+                    .map(crate::ast::variant_repr)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                symbols.push(PublicSymbol {
+                    kind: "enum".to_string(),
+                    name: decl.name.clone(),
+                    id: decl.id.clone(),
+                    signature: format!("variants=[{variants}]"),
+                });
+            }
             Item::Struct(decl) if exported.contains(&format!("struct:{}", decl.name)) => {
                 let fields = decl
                     .fields
@@ -892,6 +928,10 @@ fn exported_names(source: &str) -> BTreeSet<String> {
             if let Some(name) = rest.split([':', ' ']).find(|part| !part.is_empty()) {
                 exported.insert(format!("struct:{name}"));
             }
+        } else if let Some(rest) = public.strip_prefix("enum ") {
+            if let Some(name) = rest.split([':', ' ']).find(|part| !part.is_empty()) {
+                exported.insert(format!("enum:{name}"));
+            }
         } else if let Some(rest) = public.strip_prefix("fn ") {
             if let Some((name, _)) = rest.split_once('(') {
                 exported.insert(format!("fn:{}", name.trim()));
@@ -903,6 +943,10 @@ fn exported_names(source: &str) -> BTreeSet<String> {
         } else if let Some(rest) = public.strip_prefix("S ") {
             if let Some((name, _)) = rest.split_once('{') {
                 exported.insert(format!("struct:{}", name.trim()));
+            }
+        } else if let Some(rest) = public.strip_prefix("EN ") {
+            if let Some((name, _)) = rest.split_once('{') {
+                exported.insert(format!("enum:{}", name.trim()));
             }
         } else if let Some(rest) = public
             .strip_prefix("F ")

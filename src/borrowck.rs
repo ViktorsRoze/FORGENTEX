@@ -59,7 +59,12 @@ impl<'a> ProgramContext<'a> {
                 Item::Struct(decl) => {
                     structs.insert(decl.name.clone(), decl);
                 }
-                Item::Test(_) | Item::Capsule(_) | Item::Share(_) => {}
+                Item::Enum(_)
+                | Item::Trait(_)
+                | Item::TraitImpl(_)
+                | Item::Test(_)
+                | Item::Capsule(_)
+                | Item::Share(_) => {}
             }
         }
         let mut mutating_params = HashMap::new();
@@ -699,7 +704,14 @@ fn collect_body_types(body: &[Stmt], context: &ProgramContext, types: &mut HashM
                     types.insert(name.clone(), resolved);
                 }
             }
-            Stmt::If { then_body, .. } => collect_body_types(then_body, context, types),
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_body_types(then_body, context, types);
+                collect_body_types(else_body, context, types);
+            }
             Stmt::For { var, body, .. } => {
                 types.insert(var.clone(), Type::Primitive("usize".to_string()));
                 collect_body_types(body, context, types);

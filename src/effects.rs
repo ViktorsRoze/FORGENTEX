@@ -82,6 +82,10 @@ pub fn is_known_effect(effect: &str) -> bool {
             | "ledger.mock"
             | "agent.payment"
             | "agent.patch"
+            | "concurrency.task"
+            | "concurrency.channel"
+            | "gpu.render"
+            | "media.encode"
             | "memory.raw"
             | "cpu.simd"
             | "cpu.asm"
@@ -91,6 +95,24 @@ pub fn is_known_effect(effect: &str) -> bool {
 
 pub fn effect_requires_unsafe(effect: &str) -> bool {
     matches!(effect, "memory.raw" | "cpu.asm")
+}
+
+pub fn infer_expression_effects(
+    program: &Program,
+    expr: &Expr,
+    bindings: &HashMap<String, Type>,
+) -> Vec<String> {
+    let functions = program
+        .functions()
+        .map(|function| (function.name.clone(), function))
+        .collect::<HashMap<_, _>>();
+    let structs = program
+        .structs()
+        .map(|decl| (decl.name.clone(), decl))
+        .collect::<HashMap<_, _>>();
+    let mut effects = BTreeSet::new();
+    collect_expr_effects(expr, bindings, &functions, &structs, &mut effects);
+    effects.into_iter().collect()
 }
 
 fn analyze_function(
@@ -161,11 +183,17 @@ fn collect_body_effects(
             Stmt::Return(Some(expr)) | Stmt::Require(expr) | Stmt::Expr(expr) => {
                 collect_expr_effects(expr, env, functions, structs, effects);
             }
-            Stmt::Return(None) => {}
-            Stmt::If { cond, then_body } => {
+            Stmt::Return(None) | Stmt::Break | Stmt::Continue => {}
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
                 collect_expr_effects(cond, env, functions, structs, effects);
-                let mut branch_env = env.clone();
-                collect_body_effects(then_body, &mut branch_env, functions, structs, effects);
+                let mut then_env = env.clone();
+                collect_body_effects(then_body, &mut then_env, functions, structs, effects);
+                let mut else_env = env.clone();
+                collect_body_effects(else_body, &mut else_env, functions, structs, effects);
             }
             Stmt::For {
                 var,
@@ -178,6 +206,18 @@ fn collect_body_effects(
                 let mut loop_env = env.clone();
                 loop_env.insert(var.clone(), Type::Primitive("usize".to_string()));
                 collect_body_effects(body, &mut loop_env, functions, structs, effects);
+            }
+            Stmt::While { cond, body } => {
+                collect_expr_effects(cond, env, functions, structs, effects);
+                let mut loop_env = env.clone();
+                collect_body_effects(body, &mut loop_env, functions, structs, effects);
+            }
+            Stmt::Match { scrutinee, arms } => {
+                collect_expr_effects(scrutinee, env, functions, structs, effects);
+                for arm in arms {
+                    let mut arm_env = env.clone();
+                    collect_body_effects(&arm.body, &mut arm_env, functions, structs, effects);
+                }
             }
             Stmt::Assign { target, expr } => {
                 collect_expr_effects(target, env, functions, structs, effects);
@@ -203,7 +243,16 @@ fn collect_expr_effects(
     effects: &mut BTreeSet<String>,
 ) {
     match expr {
-        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::String(_) | Expr::Var(_) => {}
+        // Constructing a closure does not execute its body. The type checker
+        // records body effects in the closure's Fn contract; an indirect call
+        // below then materializes them at the actual execution site.
+        Expr::Lambda { .. } => {}
+        Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::String(_)
+        | Expr::Var(_)
+        | Expr::TraitConst { .. } => {}
         Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Field { base: expr, .. } => {
             collect_expr_effects(expr, env, functions, structs, effects);
         }
@@ -215,7 +264,35 @@ fn collect_expr_effects(
             for effect in builtin_effects(name) {
                 effects.insert(effect.to_string());
             }
-            if let Some(function) = functions.get(name) {
+            if matches!(name.as_str(), "task_spawn" | "task_group_spawn") {
+                let callable = if name == "task_group_spawn" {
+                    args.get(1)
+                } else {
+                    args.first()
+                };
+                match callable {
+                    Some(Expr::Var(target)) => {
+                        if let Some(callable) = env.get(target) {
+                            if let Some(callable_effects) = callable.function_effect_names() {
+                                effects.extend(callable_effects);
+                            }
+                        } else if let Some(function) = functions.get(target) {
+                            for effect in &function.effects {
+                                effects.insert(effect.clone());
+                            }
+                        }
+                    }
+                    Some(Expr::Lambda { body, .. }) => {
+                        collect_expr_effects(body, env, functions, structs, effects);
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(callable) = env.get(name) {
+                if let Some(callable_effects) = callable.function_effect_names() {
+                    effects.extend(callable_effects);
+                }
+            } else if let Some(function) = functions.get(name) {
                 for effect in &function.effects {
                     effects.insert(effect.clone());
                 }
@@ -242,11 +319,17 @@ fn expr_type(
     structs: &HashMap<String, &StructDecl>,
 ) -> Type {
     match expr {
+        Expr::Lambda { .. } => Type::Unknown,
         Expr::Int(_) => Type::Primitive("$int".to_string()),
         Expr::Float(_) => Type::Primitive("$float".to_string()),
         Expr::Bool(_) => Type::Bool,
         Expr::String(_) => Type::Primitive("str".to_string()),
-        Expr::Var(name) => env.get(name).cloned().unwrap_or(Type::Unknown),
+        Expr::TraitConst { .. } => Type::Unknown,
+        Expr::Var(name) => env
+            .get(name)
+            .cloned()
+            .or_else(|| functions.get(name).map(|function| fn_value_type(function)))
+            .unwrap_or(Type::Unknown),
         Expr::Unary { op, expr } => {
             if op == "!" {
                 Type::Bool
@@ -274,6 +357,8 @@ fn expr_type(
                     .map(|arg| expr_type(arg, env, functions, structs))
                     .collect::<Vec<_>>();
                 check_intrinsic_call(name, &arg_types, "@effects").0
+            } else if let Some((_, ret, _)) = env.get(name).and_then(Type::function_parts) {
+                ret.clone()
             } else if structs.contains_key(name) {
                 Type::Named(name.clone())
             } else {
@@ -308,6 +393,20 @@ fn expr_type(
     }
 }
 
+fn fn_value_type(function: &FunctionDecl) -> Type {
+    Type::generic_function_type(
+        &function.type_params,
+        &function.type_bounds,
+        function
+            .params
+            .iter()
+            .map(|param| param.ty.clone())
+            .collect(),
+        function.ret.clone(),
+        &function.effects,
+    )
+}
+
 fn collect_type_effects(ty: &Type, effects: &mut BTreeSet<String>) {
     match ty {
         Type::Pointer { elem, .. } => {
@@ -336,7 +435,17 @@ fn builtin_effects(name: &str) -> Vec<&'static str> {
         return vec!["cpu.simd"];
     }
     match name {
-        "alloc" | "alloc_buffer" | "realloc" | "free" => vec!["alloc"],
+        "task_spawn"
+        | "task_await"
+        | "task_cancel"
+        | "task_group_new"
+        | "task_group_spawn"
+        | "task_group_await_all"
+        | "task_group_cancel" => vec!["concurrency.task"],
+        "channel_new" | "channel_send" | "channel_recv" | "channel_close" => {
+            vec!["concurrency.channel"]
+        }
+        "alloc" | "alloc_buffer" | "realloc" | "free" | "push" => vec!["alloc"],
         "read_file" | "file_read" | "io_read" => vec!["io.read"],
         "write_file" | "file_write" | "io_write" => vec!["io.write"],
         "core_fs_scope_read"

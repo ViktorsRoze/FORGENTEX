@@ -1,0 +1,12 @@
+{
+  "args": {
+    "samples": [100, -4]
+  },
+  "expect": {
+    "return": 107,
+    "bindings": {
+      "changed": 2,
+      "samples": [107, 3]
+    }
+  }
+}

@@ -62,6 +62,21 @@ fn map_skeleton(program: &Program) -> String {
             Item::Struct(s) => {
                 out.push_str(&format!("{} {} fields={}\n", s.id, s.name, s.fields.len()));
             }
+            Item::Enum(e) => {
+                out.push_str(&format!(
+                    "{} {} variants={}\n",
+                    e.id,
+                    e.name,
+                    e.variants.len()
+                ));
+            }
+            Item::Trait(t) => out.push_str(&format!("{} {}\n", t.id, t.name)),
+            Item::TraitImpl(i) => out.push_str(&format!(
+                "{} {} {}\n",
+                i.id,
+                i.trait_name,
+                i.for_type.to_agent()
+            )),
             Item::Capsule(c) => {
                 out.push_str(&format!("{} {} {}\n", c.id, c.name, c.language));
             }

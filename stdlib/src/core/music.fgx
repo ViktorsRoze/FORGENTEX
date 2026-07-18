@@ -1,0 +1,129 @@
+module core.music
+
+# Deterministic musical time for authored timelines. Bars and beats are
+# one-based; tick is the zero-based offset within a beat.
+export struct MusicalTime:
+    bar: u32
+    beat: u32
+    tick: u32
+
+# The first bounded tempo map has one explicit change, producing two constant
+# tempo segments without requiring interpreter-only dynamic collections.
+export struct TempoMap:
+    change_tick: u32
+    initial_bpm: u32
+    next_bpm: u32
+
+# Version-one authored cue. action_id refers to an approved scene-action table;
+# it never carries source code or an unchecked renderer command.
+export struct MusicCue:
+    version: u32
+    cue_id: u32
+    action_id: u32
+    track: u32
+    start_tick: u32
+    duration_ticks: u32
+    priority: u32
+
+# Version-one approved scene-action entry. kind is one of the documented
+# reveal/emit/camera/material codes; parameter_q16 has action-specific meaning.
+export struct SceneAction:
+    version: u32
+    action_id: u32
+    kind: u32
+    target_id: u32
+    parameter_q16: i32
+    seed: u32
+    max_instances: u32
+
+export fn core_music_position_valid(position: MusicalTime, beats_per_bar: u32, ticks_per_beat: u32) -> bool:
+    return position.bar > 0 && position.beat > 0 && position.beat <= beats_per_bar && position.tick < ticks_per_beat && beats_per_bar > 0 && ticks_per_beat > 0
+
+export fn core_music_to_tick(position: MusicalTime, beats_per_bar: u32, ticks_per_beat: u32) -> u32:
+    return ((position.bar - 1) * beats_per_bar + (position.beat - 1)) * ticks_per_beat + position.tick
+
+export fn core_music_bar_start_tick(bar: u32, beats_per_bar: u32, ticks_per_beat: u32) -> u32:
+    return (bar - 1) * beats_per_bar * ticks_per_beat
+
+# Integer milliseconds are rounded down, making results stable on every host.
+export fn core_music_tick_to_millis(tick: u32, bpm: u32, ticks_per_beat: u32) -> u32:
+    return u32((u64(tick) * 60000) / (u64(bpm) * u64(ticks_per_beat)))
+
+# Quantize to the nearest grid line. An exact half-grid tie moves forward.
+export fn core_music_quantize_tick(tick: u32, grid_ticks: u32) -> u32:
+    return ((tick + grid_ticks / 2) / grid_ticks) * grid_ticks
+
+export fn core_music_make_cue(cue_id: u32, action_id: u32, track: u32, position: MusicalTime, duration_ticks: u32, priority: u32, beats_per_bar: u32, ticks_per_beat: u32, grid_ticks: u32) -> MusicCue:
+    let raw_tick: u32 = core_music_to_tick(position, beats_per_bar, ticks_per_beat)
+    let start_tick: u32 = core_music_quantize_tick(raw_tick, grid_ticks)
+    return MusicCue(1, cue_id, action_id, track, start_tick, duration_ticks, priority)
+
+export fn core_music_make_action(action_id: u32, kind: u32, target_id: u32, parameter_q16: i32, seed: u32, max_instances: u32) -> SceneAction:
+    return SceneAction(1, action_id, kind, target_id, parameter_q16, seed, max_instances)
+
+# Kinds: 1 reveal, 2 emit, 3 camera key, 4 material key. Emitters require an
+# explicit nonzero deterministic seed; other actions affect exactly one target.
+export fn core_music_action_valid(action: SceneAction, instance_limit: u32) -> bool:
+    let kind_valid: bool = action.kind >= 1 && action.kind <= 4
+    let instances_valid: bool = action.max_instances > 0 && action.max_instances <= instance_limit && instance_limit > 0
+    if action.kind == 2:
+        return action.version == 1 && action.action_id > 0 && action.target_id > 0 && kind_valid && instances_valid && action.seed > 0
+    return action.version == 1 && action.action_id > 0 && action.target_id > 0 && kind_valid && instances_valid && action.max_instances == 1
+
+# A cue must name an approved action, occupy a real track interval, and fit
+# wholly inside the declared timeline. The widened end check cannot wrap.
+export fn core_music_cue_valid(cue: MusicCue, track_count: u32, timeline_ticks: u32) -> bool:
+    let end_tick: u64 = u64(cue.start_tick) + u64(cue.duration_ticks)
+    return cue.version == 1 && cue.cue_id > 0 && cue.action_id > 0 && cue.track < track_count && cue.duration_ticks > 0 && end_tick <= u64(timeline_ticks) && track_count > 0 && timeline_ticks > 0
+
+# Validate each owned value once after copying only the scalar link identity.
+export fn core_music_cue_action_valid(cue: MusicCue, action: SceneAction, track_count: u32, timeline_ticks: u32, instance_limit: u32) -> bool:
+    let linked: bool = cue.action_id == action.action_id
+    return linked && core_music_cue_valid(cue, track_count, timeline_ticks) && core_music_action_valid(action, instance_limit)
+
+# Cue intervals are half-open. Touching at one cue's end is not an overlap.
+export fn core_music_cues_overlap(left: MusicCue, right: MusicCue) -> bool:
+    let left_end: u64 = u64(left.start_tick) + u64(left.duration_ticks)
+    let right_end: u64 = u64(right.start_tick) + u64(right.duration_ticks)
+    return left.version == 1 && right.version == 1 && left.duration_ticks > 0 && right.duration_ticks > 0 && u64(left.start_tick) < right_end && u64(right.start_tick) < left_end
+
+export fn core_music_cues_conflict(left: MusicCue, right: MusicCue) -> bool:
+    return left.track == right.track && core_music_cues_overlap(left, right)
+
+# Conflict winner: higher priority first, then lower cue_id as a stable tie.
+export fn core_music_cue_wins(left: MusicCue, right: MusicCue) -> bool:
+    if left.version != 1 || right.version != 1 || left.cue_id == 0 || right.cue_id == 0:
+        return false
+    if left.priority > right.priority:
+        return true
+    if left.priority < right.priority:
+        return false
+    return left.cue_id < right.cue_id
+
+# Return the winning cue id for a real same-track conflict, or zero when the
+# intervals do not conflict. This consumes each owned cue exactly once.
+export fn core_music_conflict_winner_id(left: MusicCue, right: MusicCue) -> u32:
+    let left_end: u64 = u64(left.start_tick) + u64(left.duration_ticks)
+    let right_end: u64 = u64(right.start_tick) + u64(right.duration_ticks)
+    let overlap: bool = u64(left.start_tick) < right_end && u64(right.start_tick) < left_end
+    if left.version != 1 || right.version != 1 || left.cue_id == 0 || right.cue_id == 0 || left.duration_ticks == 0 || right.duration_ticks == 0 || left.track != right.track || !overlap:
+        return 0
+    if left.priority > right.priority:
+        return left.cue_id
+    if left.priority < right.priority:
+        return right.cue_id
+    if left.cue_id < right.cue_id:
+        return left.cue_id
+    return right.cue_id
+
+export fn core_music_tempo_map_valid(tempo_map: TempoMap, ticks_per_beat: u32) -> bool:
+    return tempo_map.change_tick > 0 && tempo_map.initial_bpm > 0 && tempo_map.next_bpm > 0 && ticks_per_beat > 0
+
+# Convert through the bounded two-segment map. Callers validate first; zero
+# tempo/tick rates still trap deterministically through integer division.
+export fn core_music_tempo_map_millis(tempo_map: TempoMap, tick: u32, ticks_per_beat: u32) -> u32:
+    if tick <= tempo_map.change_tick:
+        return u32((u64(tick) * 60000) / (u64(tempo_map.initial_bpm) * u64(ticks_per_beat)))
+    let before: u64 = (u64(tempo_map.change_tick) * 60000) / (u64(tempo_map.initial_bpm) * u64(ticks_per_beat))
+    let after: u64 = (u64(tick - tempo_map.change_tick) * 60000) / (u64(tempo_map.next_bpm) * u64(ticks_per_beat))
+    return u32(before + after)

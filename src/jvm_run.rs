@@ -47,14 +47,14 @@ pub struct JvmRun {
     pub message: Option<String>,
 }
 
-struct Jdk {
+pub struct Jdk {
     java: String,
     javac: String,
     version: String,
 }
 
 /// Detect a host JDK: `$JAVA_HOME/bin` first, then `java`/`javac` on PATH.
-fn detect_jdk() -> Option<Jdk> {
+pub fn detect_jdk() -> Option<Jdk> {
     let (java, javac) = match std::env::var("JAVA_HOME") {
         Ok(home) if !home.trim().is_empty() => {
             let home = home.trim();
@@ -126,6 +126,95 @@ fn java_parse(ty: &str, idx: usize) -> String {
         "bool" => format!("Boolean.parseBoolean(args[{idx}])"),
         _ => format!("args[{idx}]"),
     }
+}
+
+/// Invoke a JVM capsule's entry with live, plain-string positional arguments,
+/// returning the entry's result in JSON form on stdout. Java has no stdlib JSON
+/// codec, so this is the type-directed path: each argument is parsed into its
+/// declared type (`java_parse`), and the result is printed as JSON (numbers and
+/// booleans as-is, strings quoted) so the interpreter parses it uniformly.
+/// Gated by the capsule's sandbox approval (the live capsule runtime, rt.1).
+pub fn invoke_live(capsule: &Capsule, args: &[String]) -> Result<String, String> {
+    if !crate::sandbox::is_approved(capsule) {
+        return Err("capsule effects are not covered by its sandbox".to_string());
+    }
+    let body = dedent(&capsule.code);
+    let class = find_class(&body).ok_or_else(|| "no class found in capsule body".to_string())?;
+    let method = find_method(&body)
+        .ok_or_else(|| "no public static method found in capsule body".to_string())?;
+    let jdk = detect_jdk()
+        .ok_or_else(|| "no host JDK found (looked for $JAVA_HOME, java/javac)".to_string())?;
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LIVE_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = LIVE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir =
+        std::env::temp_dir().join(format!("forgentex_{}_{}_jvmlive", std::process::id(), seq));
+    std::fs::create_dir_all(&dir).map_err(|err| format!("failed to create scratch dir: {err}"))?;
+
+    let arg_exprs = capsule
+        .inputs
+        .iter()
+        .enumerate()
+        .map(|(i, b)| java_parse(&b.ty.to_agent(), i))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let call = format!("{class}.{method}({arg_exprs})");
+    // Emit the result as JSON: a string output is quoted (with quote/backslash
+    // escaped); numbers and booleans already print as valid JSON.
+    let is_str_out = capsule
+        .outputs
+        .first()
+        .map(|o| o.ty.to_agent() == "str")
+        .unwrap_or(false);
+    let print = if is_str_out {
+        format!(
+            "String _r = {call};\n        System.out.println(\"\\\"\" + _r.replace(\"\\\\\", \"\\\\\\\\\").replace(\"\\\"\", \"\\\\\\\"\") + \"\\\"\");"
+        )
+    } else {
+        format!("System.out.println({call});")
+    };
+    let driver = format!(
+        "public class ForgentexDriver {{\n    public static void main(String[] args) {{\n        {print}\n    }}\n}}\n"
+    );
+    let class_path = dir.join(format!("{class}.java"));
+    let driver_path = dir.join("ForgentexDriver.java");
+    std::fs::write(&class_path, &body).map_err(|err| format!("failed to write class: {err}"))?;
+    std::fs::write(&driver_path, driver).map_err(|err| format!("failed to write driver: {err}"))?;
+
+    let compile = Command::new(&jdk.javac)
+        .arg("-d")
+        .arg(&dir)
+        .arg(&class_path)
+        .arg(&driver_path)
+        .output()
+        .map_err(|err| format!("failed to launch javac: {err}"))?;
+    if !compile.status.success() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(format!(
+            "javac failed for capsule '{}': {}",
+            capsule.name,
+            String::from_utf8_lossy(&compile.stderr).trim()
+        ));
+    }
+
+    let mut command = Command::new(&jdk.java);
+    command.arg("-cp").arg(&dir).arg("ForgentexDriver");
+    for arg in args {
+        command.arg(arg);
+    }
+    let output = command
+        .output()
+        .map_err(|err| format!("failed to spawn java: {err}"))?;
+    let _ = std::fs::remove_dir_all(&dir);
+    if !output.status.success() {
+        return Err(format!(
+            "jvm capsule '{}' raised: {}",
+            capsule.name,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn arg_value(value: &CapsuleValue) -> String {

@@ -1,0 +1,27 @@
+# Native data boundary v1.5: a restricted @repr(C) scalar-field record returns
+# by value from C. No pointers, nested records, strings, arrays, or ownership
+# transfer are permitted at this boundary.
+
+@repr(C)
+struct SceneMetrics:
+    glyph_count: i32
+    frame_count: i32
+    exposure: f32
+
+foreign measure_scene c version "c11" effects [cpu.avx2]:
+    output metrics: SceneMetrics
+    sandbox "fs.none"
+    code:
+        #include "types.h"
+        #include <stdint.h>
+
+        SceneMetrics measure_scene(void) {
+            SceneMetrics metrics;
+            metrics.glyph_count = 24;
+            metrics.frame_count = 180;
+            metrics.exposure = 2.5f;
+            return metrics;
+        }
+
+fn make_scene_metrics() -> SceneMetrics effects [cpu.avx2]:
+    return measure_scene()

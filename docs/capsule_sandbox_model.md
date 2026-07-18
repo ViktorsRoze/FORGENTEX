@@ -6,13 +6,14 @@ the sandbox capability model, reconciles declared effects against granted
 capabilities, parses resource limits, produces an enforcement plan, and
 gates mock execution on sandbox approval.
 
-Real OS-level process isolation and live execution remain deferred. v2.3
-owns the *policy contract and enforcement plan* a future sandbox executor
-will apply.
+Live native execution now applies process-tree containment plus wall, CPU, and
+memory limits as described below. Filesystem/network syscall isolation and
+byte accounting remain deferred. v2.3 continues to own the policy contract
+used by those runtime slices.
 
 ## Sandbox rules
 
-A capsule's `sandbox` rules carry three kinds of entry:
+A capsule's `sandbox` rules carry four kinds of entry:
 
 ```fgx
 foreign backend python version "3.13" effects [network.read]:
@@ -20,6 +21,7 @@ foreign backend python version "3.13" effects [network.read]:
     sandbox "limit.wall_ms 1000"          # resource limit
     sandbox "limit.mem_mb 256"
     sandbox "fs.none"                      # explicit denial
+    sandbox "audit.redact token"           # transcript policy for one input
 ```
 
 ### Capability grants
@@ -40,9 +42,28 @@ grants nothing.
 
 ### Resource limits
 
-`limit.<key> <integer>` declares a limit a future executor will enforce.
+`limit.<key> <integer>` declares a resource limit. The live native C/C++
+bridge enforces `limit.wall_ms` for the complete native process tree. Windows
+Job Objects and Unix process groups also prevent descendants from surviving a
+normally completed native call. `limit.cpu_ms` and `limit.mem_mb` are also
+installed before native execution: Windows applies aggregate Job Object
+budgets, while Unix processes inherit whole-second `RLIMIT_CPU` and per-process
+`RLIMIT_AS`. Filesystem/network byte limits remain executor-plan data for
+future enforcement.
 Valid keys: `cpu_ms`, `mem_mb`, `wall_ms`, `fs_bytes`, `net_bytes`. An
 unknown key or non-integer value is `sandbox_invalid_limit`.
+
+### Audit redaction
+
+`audit.redact <input-name>` marks one declared capsule input as sensitive in
+runtime audit data. It is policy, not a capability grant, and does not change
+the value sent to the foreign runtime. `CapsuleCall.inputs` replaces the value
+with `{"redacted":true}` and records the binding name in `redacted_inputs`.
+Pipeline stage reports apply the same marker to the stage input and matching
+shared source value. If foreign stderr accompanies a failed redacted call, the
+audit and caller receive the stable failure kind plus a redaction notice, not
+the raw diagnostic. Unknown or missing input names are blocking
+`sandbox_invalid_redaction` diagnostics.
 
 ## Effect reconciliation
 
@@ -68,7 +89,7 @@ over-broad sandbox is a review signal.
 
 Per capsule:
 
-- `deny` — any uncovered effect or invalid limit.
+- `deny` — any uncovered effect, invalid limit, or invalid redaction.
 - `review` — high-risk class (shell/native/gpu/smart_contract) or any
   unused grant.
 - `allow` — otherwise.
@@ -104,6 +125,7 @@ covered by its sandbox — the v2.3 link between execution and policy. Without
       "decision": "allow",
       "grants": [{"capability": "net.listen", "scope": "127.0.0.1:8000"}],
       "limits": [{"key": "wall_ms", "value": "1000"}],
+      "redacted_inputs": ["token"],
       "effects": ["network.read"],
       "uncovered_effects": [],
       "unused_grants": []
@@ -118,6 +140,8 @@ covered by its sandbox — the v2.3 link between execution and policy. Without
   only `fs.none` it is `deny` and `fgx check` reports
   `sandbox_effect_uncovered`.
 - Resource limits parse into the plan; invalid limits are rejected.
+- Audit redactions name declared inputs, grant no capability, and unknown names
+  are rejected.
 - High-risk capsules and over-broad sandboxes require `review`.
 - `fgx capsule-run --sandbox` refuses denied capsules; the plain mock run
   is unchanged.

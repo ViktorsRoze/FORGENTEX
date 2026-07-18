@@ -152,18 +152,29 @@ fn analyze_body(
             Stmt::Let { name, .. } => {
                 env.insert(name.clone());
             }
-            Stmt::Return(_) | Stmt::Require(_) | Stmt::Assign { .. } | Stmt::Expr(_) => {}
-            Stmt::If { then_body, .. } => {
-                let mut branch_env = env.clone();
-                analyze_body(
-                    then_body,
-                    &format!("{stmt_id}.then"),
-                    function,
-                    target,
-                    &mut branch_env,
-                    diagnostics,
-                    summaries,
-                );
+            Stmt::Return(_)
+            | Stmt::Require(_)
+            | Stmt::Assign { .. }
+            | Stmt::Expr(_)
+            | Stmt::Break
+            | Stmt::Continue => {}
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                for (label, branch) in [("then", then_body), ("else", else_body)] {
+                    let mut branch_env = env.clone();
+                    analyze_body(
+                        branch,
+                        &format!("{stmt_id}.{label}"),
+                        function,
+                        target,
+                        &mut branch_env,
+                        diagnostics,
+                        summaries,
+                    );
+                }
             }
             Stmt::For { var, body, .. } => {
                 let mut loop_env = env.clone();
@@ -177,6 +188,32 @@ fn analyze_body(
                     diagnostics,
                     summaries,
                 );
+            }
+            Stmt::While { body, .. } => {
+                let mut loop_env = env.clone();
+                analyze_body(
+                    body,
+                    &format!("{stmt_id}.body"),
+                    function,
+                    target,
+                    &mut loop_env,
+                    diagnostics,
+                    summaries,
+                );
+            }
+            Stmt::Match { arms, .. } => {
+                for (arm_idx, arm) in arms.iter().enumerate() {
+                    let mut arm_env = env.clone();
+                    analyze_body(
+                        &arm.body,
+                        &format!("{stmt_id}.arm{arm_idx}"),
+                        function,
+                        target,
+                        &mut arm_env,
+                        diagnostics,
+                        summaries,
+                    );
+                }
             }
             Stmt::Asm(asm) => {
                 analyze_asm_block(

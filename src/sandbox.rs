@@ -3,7 +3,7 @@
 //! v2.3 makes the constrained environment explicit and checkable without
 //! invoking a foreign runtime. A capsule's `sandbox` rules are classified
 //! into capability grants (filesystem, network, process, environment,
-//! chain, gpu), resource limits (`limit.*`), and explicit `.none`
+//! chain, gpu), resource limits (`limit.*`), audit redaction policy, and explicit `.none`
 //! denials. Each declared effect must be covered by a matching grant, so a
 //! capsule cannot claim `network.read` while sandboxed to `net.none`.
 //!
@@ -63,10 +63,12 @@ pub struct CapsuleSandbox {
     pub risk_class: String,
     pub grants: Vec<(String, String)>,
     pub limits: Vec<(String, String)>,
+    pub redacted_inputs: Vec<String>,
     pub effects: Vec<String>,
     pub uncovered_effects: Vec<String>,
     pub unused_grants: Vec<String>,
     pub invalid_limits: Vec<String>,
+    pub invalid_redactions: Vec<String>,
     pub decision: String,
 }
 
@@ -74,6 +76,8 @@ pub fn analyze_capsule(capsule: &Capsule) -> CapsuleSandbox {
     let mut grants = Vec::new();
     let mut limits = Vec::new();
     let mut invalid_limits = Vec::new();
+    let mut redacted_inputs = Vec::new();
+    let mut invalid_redactions = Vec::new();
     let mut grant_categories: Vec<String> = Vec::new();
     for rule in &capsule.sandbox {
         let (capability, scope) = split_rule(rule);
@@ -82,6 +86,14 @@ pub fn analyze_capsule(capsule: &Capsule) -> CapsuleSandbox {
                 limits.push((key.to_string(), scope));
             } else {
                 invalid_limits.push(rule.clone());
+            }
+            continue;
+        }
+        if capability == "audit.redact" {
+            if scope.is_empty() || !capsule.inputs.iter().any(|binding| binding.name == scope) {
+                invalid_redactions.push(rule.clone());
+            } else if !redacted_inputs.contains(&scope) {
+                redacted_inputs.push(scope);
             }
             continue;
         }
@@ -118,7 +130,10 @@ pub fn analyze_capsule(capsule: &Capsule) -> CapsuleSandbox {
         .collect::<Vec<_>>();
 
     let high_risk = capsule.risk_class() != "managed";
-    let decision = if !uncovered_effects.is_empty() || !invalid_limits.is_empty() {
+    let decision = if !uncovered_effects.is_empty()
+        || !invalid_limits.is_empty()
+        || !invalid_redactions.is_empty()
+    {
         "deny"
     } else if high_risk || !unused_grants.is_empty() {
         "review"
@@ -132,10 +147,12 @@ pub fn analyze_capsule(capsule: &Capsule) -> CapsuleSandbox {
         risk_class: capsule.risk_class().to_string(),
         grants,
         limits,
+        redacted_inputs,
         effects: capsule.effects.clone(),
         uncovered_effects,
         unused_grants,
         invalid_limits,
+        invalid_redactions,
         decision: decision.to_string(),
     }
 }
@@ -171,6 +188,19 @@ pub fn validate(program: &Program) -> Vec<Diagnostic> {
                     ),
                 )
                 .suggest("use limit.<cpu_ms|mem_mb|wall_ms|fs_bytes|net_bytes> <integer>"),
+            );
+        }
+        for rule in &plan.invalid_redactions {
+            diagnostics.push(
+                Diagnostic::new(
+                    "sandbox_invalid_redaction",
+                    &capsule.id,
+                    format!(
+                        "capsule '{}' has invalid audit redaction rule '{}'",
+                        capsule.name, rule
+                    ),
+                )
+                .suggest("use audit.redact <input-name> for a declared capsule input"),
             );
         }
     }
@@ -237,6 +267,12 @@ impl SandboxPlan {
             for (key, value) in &capsule.limits {
                 out.push_str(&format!("      limit {key}={value}\n"));
             }
+            if !capsule.redacted_inputs.is_empty() {
+                out.push_str(&format!(
+                    "      redacted_inputs=[{}]\n",
+                    capsule.redacted_inputs.join(",")
+                ));
+            }
             if !capsule.uncovered_effects.is_empty() {
                 out.push_str(&format!(
                     "      uncovered_effects=[{}]\n",
@@ -290,6 +326,10 @@ impl SandboxPlan {
                 ));
             }
             out.push_str("],\n");
+            out.push_str(&format!(
+                "      \"redacted_inputs\": {},\n",
+                json::string_array(&capsule.redacted_inputs)
+            ));
             out.push_str("      \"limits\": [");
             for (limit_idx, (key, value)) in capsule.limits.iter().enumerate() {
                 if limit_idx > 0 {
@@ -311,8 +351,12 @@ impl SandboxPlan {
                 json::string_array(&capsule.uncovered_effects)
             ));
             out.push_str(&format!(
-                "      \"unused_grants\": {}\n",
+                "      \"unused_grants\": {},\n",
                 json::string_array(&capsule.unused_grants)
+            ));
+            out.push_str(&format!(
+                "      \"invalid_redactions\": {}\n",
+                json::string_array(&capsule.invalid_redactions)
             ));
             out.push_str("    }");
         }

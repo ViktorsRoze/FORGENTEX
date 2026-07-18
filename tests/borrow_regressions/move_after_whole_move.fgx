@@ -1,0 +1,6 @@
+struct Packet:
+    value: u8
+
+fn bad(packet: Packet) -> u8:
+    let moved: Packet = packet
+    return packet.value

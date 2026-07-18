@@ -68,17 +68,26 @@ fn stmt_has_float(stmt: &Stmt) -> bool {
         }
         Stmt::Return(Some(expr)) | Stmt::Require(expr) | Stmt::Expr(expr) => expr_has_float(expr),
         Stmt::Return(None) => false,
-        Stmt::If { cond, then_body } => expr_has_float(cond) || body_has_float(then_body),
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => expr_has_float(cond) || body_has_float(then_body) || body_has_float(else_body),
         Stmt::For {
             start, end, body, ..
         } => expr_has_float(start) || expr_has_float(end) || body_has_float(body),
+        Stmt::While { cond, body } => expr_has_float(cond) || body_has_float(body),
+        Stmt::Match { scrutinee, arms } => {
+            expr_has_float(scrutinee) || arms.iter().any(|arm| body_has_float(&arm.body))
+        }
         Stmt::Assign { target, expr } => expr_has_float(target) || expr_has_float(expr),
-        Stmt::Asm(_) => false,
+        Stmt::Asm(_) | Stmt::Break | Stmt::Continue => false,
     }
 }
 
 fn expr_has_float(expr: &Expr) -> bool {
     match expr {
+        Expr::Lambda { body, .. } => expr_has_float(body),
         Expr::Float(_) => true,
         Expr::Cast { ty, expr } => type_has_float(ty) || expr_has_float(expr),
         Expr::Unary { expr, .. } => expr_has_float(expr),
@@ -86,6 +95,8 @@ fn expr_has_float(expr: &Expr) -> bool {
         Expr::Call { args, .. } => args.iter().any(expr_has_float),
         Expr::Field { base, .. } => expr_has_float(base),
         Expr::Index { base, index } => expr_has_float(base) || expr_has_float(index),
-        Expr::Int(_) | Expr::Bool(_) | Expr::String(_) | Expr::Var(_) => false,
+        Expr::Int(_) | Expr::Bool(_) | Expr::String(_) | Expr::Var(_) | Expr::TraitConst { .. } => {
+            false
+        }
     }
 }

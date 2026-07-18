@@ -1,6 +1,7 @@
 use crate::ast::{
-    AsmBlock, Attribute, Capsule, CapsuleBinding, CapsuleFixture, Expr, FunctionDecl, Item,
-    Program, ShareDecl, Stmt, StructDecl, TestDecl, TestExpectation,
+    AsmBlock, Attribute, Capsule, CapsuleBinding, CapsuleFixture, EnumDecl, Expr, FunctionDecl,
+    Item, Program, ShareDecl, Stmt, StructDecl, TestDecl, TestExpectation, TraitDecl,
+    TraitImplDecl,
 };
 
 pub fn format_human(program: &Program) -> String {
@@ -11,6 +12,9 @@ pub fn format_human(program: &Program) -> String {
         }
         match item {
             Item::Struct(decl) => format_struct_human(&mut out, decl),
+            Item::Enum(decl) => format_enum_human(&mut out, decl),
+            Item::Trait(decl) => format_trait_human(&mut out, decl),
+            Item::TraitImpl(decl) => format_trait_impl_human(&mut out, decl),
             Item::Function(function) => format_function_human(&mut out, function),
             Item::Test(test) => format_test_human(&mut out, test),
             Item::Capsule(capsule) => format_capsule_human(&mut out, capsule),
@@ -28,6 +32,9 @@ pub fn format_agent(program: &Program) -> String {
         }
         match item {
             Item::Struct(decl) => format_struct_agent(&mut out, decl),
+            Item::Enum(decl) => format_enum_agent(&mut out, decl),
+            Item::Trait(decl) => format_trait_agent(&mut out, decl),
+            Item::TraitImpl(decl) => format_trait_impl_agent(&mut out, decl),
             Item::Function(function) => format_function_agent(&mut out, function),
             Item::Test(test) => format_test_agent(&mut out, test),
             Item::Capsule(capsule) => format_capsule_agent(&mut out, capsule),
@@ -51,6 +58,183 @@ fn format_struct_human(out: &mut String, decl: &StructDecl) {
     }
 }
 
+fn format_enum_human(out: &mut String, decl: &EnumDecl) {
+    format_attrs_human(out, &decl.attrs, 0);
+    out.push_str(&format!("enum {}:\n", decl.name));
+    for variant in &decl.variants {
+        match &variant.payload {
+            Some(ty) => out.push_str(&format!("    {}({})\n", variant.name, ty.to_human())),
+            None => out.push_str(&format!("    {}\n", variant.name)),
+        }
+    }
+}
+
+fn format_enum_agent(out: &mut String, decl: &EnumDecl) {
+    // Dense agent keyword: EN = enum; variants on one line, ';'-separated.
+    // `variant_repr` renders the optional payload as `Name(Type)`.
+    let variants = decl
+        .variants
+        .iter()
+        .map(crate::ast::variant_repr)
+        .collect::<Vec<_>>()
+        .join("; ");
+    out.push_str(&format!("EN {} {{ {} }}\n", decl.name, variants));
+}
+
+fn format_trait_human(out: &mut String, decl: &TraitDecl) {
+    format_attrs_human(out, &decl.attrs, 0);
+    out.push_str(&format!("trait {}:\n", decl.name));
+    for associated_type in &decl.associated_types {
+        out.push_str(&format!("    requires type {}\n", associated_type.name));
+    }
+    for method in &decl.methods {
+        let params = method
+            .params
+            .iter()
+            .map(|p| format!("{}: {}", p.name, p.ty.to_human()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "    requires {}({}) -> {}{}\n",
+            method.name,
+            params,
+            method.ret.to_human(),
+            method
+                .default_function
+                .as_ref()
+                .map_or(String::new(), |function| format!(" default {function}"))
+        ));
+    }
+    for constant in &decl.constants {
+        out.push_str(&format!(
+            "    requires const {}: {}\n",
+            constant.name,
+            constant.ty.to_human()
+        ));
+    }
+}
+
+fn format_trait_impl_human(out: &mut String, decl: &TraitImplDecl) {
+    format_attrs_human(out, &decl.attrs, 0);
+    out.push_str(&format!(
+        "impl{} {} for {}:\n",
+        format_decl_type_params(&decl.type_params, &decl.type_bounds),
+        decl.trait_name,
+        decl.for_type.to_human()
+    ));
+    for associated_type in &decl.associated_types {
+        out.push_str(&format!(
+            "    type {} = {}\n",
+            associated_type.name,
+            associated_type.ty.to_human()
+        ));
+    }
+    for method in &decl.methods {
+        out.push_str(&format!("    {} = {}\n", method.method, method.function));
+    }
+    for constant in &decl.constants {
+        out.push_str(&format!(
+            "    const {} = {}\n",
+            constant.name,
+            format_expr(&constant.value)
+        ));
+    }
+}
+
+fn format_trait_agent(out: &mut String, decl: &TraitDecl) {
+    format_attrs_agent(out, &decl.attrs);
+    out.push_str(&format!("TR {} {{\n", decl.name));
+    for associated_type in &decl.associated_types {
+        out.push_str(&format!("  TYPE {}\n", associated_type.name));
+    }
+    for method in &decl.methods {
+        let params = method
+            .params
+            .iter()
+            .map(|p| format!("{} {}", p.name, p.ty.to_agent()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "  REQ {}({}) -> {}{}\n",
+            method.name,
+            params,
+            method.ret.to_agent(),
+            method
+                .default_function
+                .as_ref()
+                .map_or(String::new(), |function| format!(" DEFAULT {function}"))
+        ));
+    }
+    for constant in &decl.constants {
+        out.push_str(&format!(
+            "  CONST {} {}\n",
+            constant.name,
+            constant.ty.to_agent()
+        ));
+    }
+    out.push_str("}\n");
+}
+
+fn format_trait_impl_agent(out: &mut String, decl: &TraitImplDecl) {
+    format_attrs_agent(out, &decl.attrs);
+    out.push_str(&format!(
+        "IM{} {} {} {{\n",
+        format_decl_type_params(&decl.type_params, &decl.type_bounds),
+        decl.trait_name,
+        decl.for_type.to_agent()
+    ));
+    for associated_type in &decl.associated_types {
+        out.push_str(&format!(
+            "  TYPE {} = {}\n",
+            associated_type.name,
+            associated_type.ty.to_agent()
+        ));
+    }
+    for method in &decl.methods {
+        out.push_str(&format!("  BIND {} {}\n", method.method, method.function));
+    }
+    for constant in &decl.constants {
+        out.push_str(&format!(
+            "  CONST {} = {}\n",
+            constant.name,
+            format_expr(&constant.value)
+        ));
+    }
+    out.push_str("}\n");
+}
+
+/// `[T, U]` when a function is generic (lang.4); empty otherwise. Identical on
+/// both syntax surfaces (brackets are already the dense form).
+fn format_decl_type_params(
+    type_params: &[String],
+    type_bounds: &[crate::ast::TypeParamBound],
+) -> String {
+    if type_params.is_empty() {
+        String::new()
+    } else {
+        let params = type_params
+            .iter()
+            .map(|param| {
+                let bounds = type_bounds
+                    .iter()
+                    .find(|bound| bound.type_param == *param)
+                    .map_or(&[][..], |bound| bound.traits.as_slice());
+                if bounds.is_empty() {
+                    param.clone()
+                } else {
+                    format!("{param}: {}", bounds.join(" + "))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("[{params}]")
+    }
+}
+
+fn format_type_params(function: &FunctionDecl) -> String {
+    format_decl_type_params(&function.type_params, &function.type_bounds)
+}
+
 fn format_function_human(out: &mut String, function: &FunctionDecl) {
     format_attrs_human(out, &function.attrs, 0);
     let params = function
@@ -63,8 +247,9 @@ fn format_function_human(out: &mut String, function: &FunctionDecl) {
         out.push_str("unsafe ");
     }
     out.push_str(&format!(
-        "fn {}({}) -> {}{}:\n",
+        "fn {}{}({}) -> {}{}:\n",
         function.name,
+        format_type_params(function),
         params,
         function.ret.to_human(),
         format_effects_human(&function.effects)
@@ -128,12 +313,39 @@ fn format_stmts_human(out: &mut String, body: &[Stmt], level: usize) {
             Stmt::Return(None) => {
                 out.push_str(&format!("{pad}return\n"));
             }
+            Stmt::Break => out.push_str(&format!("{pad}break\n")),
+            Stmt::Continue => out.push_str(&format!("{pad}continue\n")),
             Stmt::Require(expr) => {
                 out.push_str(&format!("{pad}require {}\n", format_expr(expr)));
             }
-            Stmt::If { cond, then_body } => {
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
                 out.push_str(&format!("{pad}if {}:\n", format_expr(cond)));
                 format_stmts_human(out, then_body, level + 1);
+                // Flatten an `else { if … }` chain into `else if …:`.
+                let mut chain: &[Stmt] = else_body;
+                loop {
+                    if chain.is_empty() {
+                        break;
+                    }
+                    if let [Stmt::If {
+                        cond,
+                        then_body,
+                        else_body,
+                    }] = chain
+                    {
+                        out.push_str(&format!("{pad}else if {}:\n", format_expr(cond)));
+                        format_stmts_human(out, then_body, level + 1);
+                        chain = else_body;
+                        continue;
+                    }
+                    out.push_str(&format!("{pad}else:\n"));
+                    format_stmts_human(out, chain, level + 1);
+                    break;
+                }
             }
             Stmt::For {
                 var,
@@ -147,6 +359,21 @@ fn format_stmts_human(out: &mut String, body: &[Stmt], level: usize) {
                     format_expr(end)
                 ));
                 format_stmts_human(out, body, level + 1);
+            }
+            Stmt::While { cond, body } => {
+                out.push_str(&format!("{pad}while {}:\n", format_expr(cond)));
+                format_stmts_human(out, body, level + 1);
+            }
+            Stmt::Match { scrutinee, arms } => {
+                out.push_str(&format!("{pad}match {}:\n", format_expr(scrutinee)));
+                let arm_pad = "    ".repeat(level + 1);
+                for arm in arms {
+                    out.push_str(&format!(
+                        "{arm_pad}case {}:\n",
+                        crate::ast::pattern_to_string(&arm.pattern)
+                    ));
+                    format_stmts_human(out, &arm.body, level + 2);
+                }
             }
             Stmt::Assign { target, expr } => {
                 out.push_str(&format!(
@@ -226,8 +453,9 @@ fn format_function_agent(out: &mut String, function: &FunctionDecl) {
         out.push_str("F ");
     }
     out.push_str(&format!(
-        "{}({}) -> {}{} {{\n",
+        "{}{}({}) -> {}{} {{\n",
         function.name,
+        format_type_params(function),
         params,
         function.ret.to_agent(),
         format_effects_agent(&function.effects)
@@ -431,11 +659,40 @@ fn format_stmts_agent(out: &mut String, body: &[Stmt], level: usize) {
             }
             Stmt::Return(Some(expr)) => out.push_str(&format!("{pad}R {}\n", format_expr(expr))),
             Stmt::Return(None) => out.push_str(&format!("{pad}R\n")),
+            Stmt::Break => out.push_str(&format!("{pad}BR\n")),
+            Stmt::Continue => out.push_str(&format!("{pad}CN\n")),
             Stmt::Require(expr) => out.push_str(&format!("{pad}REQ {}\n", format_expr(expr))),
-            Stmt::If { cond, then_body } => {
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
                 out.push_str(&format!("{pad}IF {} {{\n", format_expr(cond)));
                 format_stmts_agent(out, then_body, level + 1);
                 out.push_str(&format!("{pad}}}\n"));
+                // Dense agent keywords: EL = else, EI = else if.
+                let mut chain: &[Stmt] = else_body;
+                loop {
+                    if chain.is_empty() {
+                        break;
+                    }
+                    if let [Stmt::If {
+                        cond,
+                        then_body,
+                        else_body,
+                    }] = chain
+                    {
+                        out.push_str(&format!("{pad}EI {} {{\n", format_expr(cond)));
+                        format_stmts_agent(out, then_body, level + 1);
+                        out.push_str(&format!("{pad}}}\n"));
+                        chain = else_body;
+                        continue;
+                    }
+                    out.push_str(&format!("{pad}EL {{\n"));
+                    format_stmts_agent(out, chain, level + 1);
+                    out.push_str(&format!("{pad}}}\n"));
+                    break;
+                }
             }
             Stmt::For {
                 var,
@@ -449,6 +706,26 @@ fn format_stmts_agent(out: &mut String, body: &[Stmt], level: usize) {
                     format_expr(end)
                 ));
                 format_stmts_agent(out, body, level + 1);
+                out.push_str(&format!("{pad}}}\n"));
+            }
+            Stmt::While { cond, body } => {
+                // Dense agent keyword: WH = while.
+                out.push_str(&format!("{pad}WH {} {{\n", format_expr(cond)));
+                format_stmts_agent(out, body, level + 1);
+                out.push_str(&format!("{pad}}}\n"));
+            }
+            Stmt::Match { scrutinee, arms } => {
+                // Dense agent keyword: MT = match; each arm is `<pat> => { … }`.
+                out.push_str(&format!("{pad}MT {} {{\n", format_expr(scrutinee)));
+                let arm_pad = "  ".repeat(level + 1);
+                for arm in arms {
+                    out.push_str(&format!(
+                        "{arm_pad}{} => {{\n",
+                        crate::ast::pattern_to_string(&arm.pattern)
+                    ));
+                    format_stmts_agent(out, &arm.body, level + 2);
+                    out.push_str(&format!("{arm_pad}}}\n"));
+                }
                 out.push_str(&format!("{pad}}}\n"));
             }
             Stmt::Assign { target, expr } => {
@@ -503,6 +780,22 @@ fn format_expr_prec(expr: &Expr, parent_prec: u8) -> String {
         Expr::Bool(value) => value.to_string(),
         Expr::String(value) => quoted_string(value),
         Expr::Var(name) => name.clone(),
+        Expr::TraitConst {
+            trait_name,
+            name,
+            for_type,
+        } => format!("{trait_name}::{name}[{}]", for_type.to_agent()),
+        // A closure (lang.4). One rendering on both syntax surfaces: brackets
+        // and the pipe form are already dense, and parse_expr is shared.
+        Expr::Lambda { params, body } => format!(
+            "|{}| {}",
+            params
+                .iter()
+                .map(|param| format!("{}: {}", param.name, param.ty.to_human()))
+                .collect::<Vec<_>>()
+                .join(", "),
+            format_expr_prec(body, 0)
+        ),
         Expr::Unary { op, expr } => format!("{}{}", op, format_expr_prec(expr, 10)),
         Expr::Binary { op, left, right } => {
             let prec = expr_precedence(expr);

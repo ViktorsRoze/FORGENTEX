@@ -97,6 +97,49 @@ foreign t python version \"3.13\":
 }
 
 #[test]
+fn audit_redaction_names_declared_inputs_without_granting_a_capability() {
+    let source = "\
+foreign authenticate python version \"3.13\":
+    input token: i64
+    output result: i64
+    sandbox \"audit.redact token\"
+    code:
+        def authenticate(token): return token
+";
+    let program = human(source);
+    let plan = analyze_capsule(program.capsules().next().unwrap());
+    assert_eq!(plan.redacted_inputs, vec!["token".to_string()]);
+    assert!(plan.grants.is_empty(), "audit policy is not a capability");
+    assert!(plan.invalid_redactions.is_empty());
+    assert!(validate(&program).is_empty());
+    assert!(analyze("redacted.fgx", &program)
+        .to_json()
+        .contains("\"redacted_inputs\": [\"token\"]"));
+}
+
+#[test]
+fn audit_redaction_rejects_unknown_input_names() {
+    let source = "\
+foreign authenticate python version \"3.13\":
+    input token: i64
+    output result: i64
+    sandbox \"audit.redact password\"
+    code:
+        def authenticate(token): return token
+";
+    let program = human(source);
+    let plan = analyze_capsule(program.capsules().next().unwrap());
+    assert_eq!(plan.decision, "deny");
+    assert_eq!(
+        plan.invalid_redactions,
+        vec!["audit.redact password".to_string()]
+    );
+    assert!(validate(&program)
+        .iter()
+        .any(|diagnostic| diagnostic.code == "sandbox_invalid_redaction"));
+}
+
+#[test]
 fn smart_contract_capsule_needs_review() {
     let program = parse_fixture("examples/capsule/price_oracle_solidity.fgx");
     let capsule = program.capsules().next().unwrap();

@@ -1,0 +1,33 @@
+# native-call v1.7: a reviewed scalar-field record crosses Rust by value in
+# both directions. The Forgentex and Rust declarations must use C layout and
+# identical public fields in declaration order.
+
+@repr(C)
+struct RenderParams:
+    width: i32
+    height: i32
+    exposure: f32
+
+foreign adjust_render_params_rust rust version "2021" effects [cpu.avx2]:
+    input params: RenderParams
+    output adjusted: RenderParams
+    sandbox "fs.none"
+    code:
+        #[repr(C)]
+        pub struct RenderParams {
+            pub width: i32,
+            pub height: i32,
+            pub exposure: f32,
+        }
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn adjust_render_params_rust(params: RenderParams) -> RenderParams {
+            RenderParams {
+                width: params.width + 16,
+                height: params.height + 9,
+                exposure: params.exposure * 2.0,
+            }
+        }
+
+fn adjust_render_params(params: RenderParams) -> RenderParams effects [cpu.avx2]:
+    return adjust_render_params_rust(params)

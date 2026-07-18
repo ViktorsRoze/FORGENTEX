@@ -42,6 +42,8 @@ The v0 C backend lowers safe functions only:
 - `let`, `return`, `require`, `if`, `for`, assignments, expression statements
 - arithmetic, comparisons, casts, calls, indexing, field access
 - `.len` on slices and arrays
+- fresh annotated function-local `Vec[i32]` with explicit `effects [alloc]`,
+  bounded push, discarded pop, checked index/len/write, and return-safe cleanup
 
 The backend rejects:
 
@@ -49,8 +51,9 @@ The backend rejects:
 - structured `asm`
 - interpreter-only `Option` / `Result` intrinsics
 - generic types that do not have a v0 C representation
-- effectful runtime APIs such as filesystem, networking, serialization,
-  streaming, or allocation
+- effectful runtime APIs such as filesystem, networking, serialization, or
+  streaming; allocation is admitted only for the validated local-`Vec[i32]`
+  subset, while direct allocator calls remain FIR-blocked
 
 ## Type Mapping
 
@@ -61,9 +64,14 @@ Primitive types map to fixed-width C types:
 - `usize` -> `size_t`
 - `isize` -> `ptrdiff_t`
 - `f32`, `f64` -> `float`, `double`
-- `str` -> `const char *` for parser/AST completeness; runtime string APIs are
-  still rejected when they carry runtime-only effects
+- borrowed `str` -> `const char *`; `str_len`, `.len`, `str_contains`, and
+  content `==` / `!=` lower through a null-checked, allocation-free C11 helper
+  surface bounded below 16 MiB. Owned/allocating operations (`str_concat`,
+  `int_to_str`, `str_slice`) plus Option/Vec-returning search/split remain FIR
+  blockers until ownership and deallocation are explicit
 - `bool` -> `bool`
+- eligible local `Vec[i32]` -> `{ int32_t *data, size_t len, size_t capacity }`;
+  growth is capped at 1,048,576 elements and every live return path frees it
 - named structs -> `typedef struct Name { ... } Name`
 
 Slices become generated C structs:

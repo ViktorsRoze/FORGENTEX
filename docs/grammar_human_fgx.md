@@ -15,7 +15,7 @@ Notation:
 
 ```text
 file        ::= blank_line* item (blank_line+ item)* blank_line*
-item        ::= attribute* (struct_decl | function_decl)
+item        ::= attribute* (struct_decl | trait_decl | trait_impl | function_decl)
 blank_line  ::= newline
 ```
 
@@ -29,8 +29,22 @@ attr_arg    ::= ident | int_literal | string_literal
 struct_decl ::= "struct" ident ":" newline indent field+ dedent
 field       ::= attribute* ident ":" type newline
 
-function_decl ::= unsafe_marker? "fn" ident "(" params? ")" return_type? effects? ":" newline block
+trait_decl  ::= "trait" ident ":" newline (indent trait_item+ dedent)?
+trait_item  ::= trait_requirement | trait_const_requirement | trait_type_requirement
+trait_requirement ::= "requires" ident "(" params? ")" return_type ("default" ident)? newline
+trait_const_requirement ::= "requires" "const" ident ":" type newline
+trait_type_requirement ::= "requires" "type" ident newline
+trait_impl  ::= "impl" type_params? ident "for" type ":" newline (indent impl_item+ dedent)?
+impl_item   ::= method_binding | const_binding | type_binding
+method_binding ::= ident "=" ident newline
+const_binding ::= "const" ident "=" const_expr newline
+type_binding ::= "type" ident "=" type newline
+
+function_decl ::= unsafe_marker? "fn" ident type_params? "(" params? ")" return_type? effects? ":" newline block
 unsafe_marker ::= "unsafe"
+type_params ::= "[" type_param ("," type_param)* "]"
+type_param  ::= ident (":" trait_bound ("+" trait_bound)*)?
+trait_bound ::= ident
 params      ::= param ("," param)*
 param       ::= ident ":" type
 return_type ::= "->" type
@@ -85,6 +99,8 @@ Assembly blocks are only valid inside `unsafe fn` in v1.
 ```text
 type        ::= primitive_type
              | named_type
+             | associated_type
+             | projected_type
              | generic_type
              | array_type
              | slice_type
@@ -98,11 +114,18 @@ primitive_type ::= "bool"
                  | "void"
 
 named_type  ::= ident
+associated_type ::= "Self" "::" ident
+projected_type ::= ident "::" ident "[" type "]"
 generic_type ::= ident "[" type ("," type)* "]"
+fn_binder   ::= ident [":" ident ("+" ident)*]
 array_type  ::= "[" type ";" int_literal "]"
 slice_type  ::= "&[" type "]" | "&mut" "[" type "]"
 pointer_type ::= "*const" type | "*mut" type
 ```
+
+The `Fn` generic reserves an optional leading `forall[fn_binder, …]` marker
+and an optional final `effects[...]` marker. For example,
+`Fn[forall[T: Eq], T, T, bool]` is a generic equality-shaped callable.
 
 Stage 14 attributes include `@repr(C)`, `@packed`, `@aligned(N)`,
 `@endian(little|big|native)`, and `@extern(C)`.
@@ -119,12 +142,14 @@ unary_expr  ::= unary_op unary_expr | postfix_expr
 postfix_expr ::= primary_expr postfix*
 postfix     ::= "." ident | "[" expr "]"
 primary_expr ::= literal
-              | ident
-              | call_expr
-              | cast_expr
+               | ident
+               | call_expr
+               | trait_const_expr
+               | cast_expr
               | "(" expr ")"
 
 call_expr   ::= ident "(" args? ")"
+trait_const_expr ::= ident "::" ident "[" type "]"
 cast_expr   ::= primitive_type "(" expr ")"
 args        ::= expr ("," expr)*
 
@@ -133,6 +158,7 @@ binary_op   ::= "||" | "&&" | "==" | "!=" | "<" | ">" | "<=" | ">="
 unary_op    ::= "-" | "!"
 literal     ::= int_literal | float_literal | bool_literal | string_literal
 bool_literal ::= "true" | "false"
+const_expr  ::= literal | unary_op const_expr | primitive_type "(" const_expr ")"
 ```
 
 ## Comments and Annotations

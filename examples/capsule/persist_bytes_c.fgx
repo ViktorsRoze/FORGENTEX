@@ -1,0 +1,33 @@
+# Artifact persistence v1: Forgentex publishes validated owned bytes inside a
+# declared fs.write scope; the C capsule never receives the destination path.
+
+foreign persist_bytes_c c version "c11" effects [alloc, fs.write]:
+    input count: i32
+    output bytes: Vec[u8]
+    sandbox "fs.write build/artifacts"
+    sandbox "artifact.media_type application/octet-stream"
+    sandbox "artifact.max_bytes 1048576"
+    sandbox "artifact.path build/artifacts/persisted_bytes.bin"
+    code:
+        #include "types.h"
+        #include <stdlib.h>
+
+        FgxOwnedU8 persist_bytes_c(int32_t count) {
+            FgxOwnedU8 result = { NULL, 0, 0 };
+            if (count <= 0) return result;
+            result.ptr = (uint8_t *)malloc((size_t)count);
+            if (result.ptr == NULL) return result;
+            result.len = (size_t)count;
+            result.capacity = (size_t)count;
+            for (size_t i = 0; i < result.len; ++i) result.ptr[i] = (uint8_t)(i + 1);
+            return result;
+        }
+
+        void persist_bytes_c_free(uint8_t *ptr, size_t len, size_t capacity) {
+            (void)len;
+            (void)capacity;
+            free(ptr);
+        }
+
+fn persist_bytes(count: i32) -> Vec[u8] effects [alloc, fs.write]:
+    return persist_bytes_c(count)

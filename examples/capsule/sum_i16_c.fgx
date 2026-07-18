@@ -1,0 +1,19 @@
+# native-call v1.1: a live read-only audio-style buffer boundary.
+# Forgentex &[i16] lowers to `const int16_t *samples, size_t samples_len`.
+
+foreign sum_i16 c version "c11" effects [cpu.avx2]:
+    input samples: &[i16]
+    output total: i32
+    sandbox "fs.none"
+    code:
+        #include <stdint.h>
+        #include <stddef.h>
+
+        int32_t sum_i16(const int16_t *samples, size_t samples_len) {
+            int32_t total = 0;
+            for (size_t i = 0; i < samples_len; ++i) total += samples[i];
+            return total;
+        }
+
+fn sum_live(samples: &[i16]) -> i32 effects [cpu.avx2]:
+    return sum_i16(samples)

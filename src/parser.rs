@@ -2,13 +2,87 @@ use std::path::Path;
 
 use crate::ast::{
     is_primitive_name, AsmBinding, AsmBlock, Attribute, Capsule, CapsuleBinding, CapsuleDep,
-    CapsuleFixture, CapsuleShareBinding, CapsuleValue, Expr, Field, FunctionDecl, Item, Param,
-    Program, ShareDecl, ShareMode, Stmt, StructDecl, TestDecl, TestExpectation, Type,
+    CapsuleFixture, CapsuleShareBinding, CapsuleValue, EnumDecl, EnumVariant, Expr, Field,
+    FunctionDecl, Item, MatchArm, Param, Pattern, Program, ShareDecl, ShareMode, Stmt, StructDecl,
+    TestDecl, TestExpectation, TraitConstDecl, TraitConstImpl, TraitDecl, TraitImplDecl,
+    TraitMethodDecl, TraitMethodImpl, TraitTypeDecl, TraitTypeImpl, Type, TypeParamBound,
 };
 use crate::lexer::{lex, Comment, Token};
 use crate::span::{ParseDiagnostic, SourceMap, SourceSpan};
 
-type FunctionHeader = (String, bool, Vec<Param>, Type, Vec<String>);
+// (name, type_params, type_bounds, unsafe, params, return type, effects)
+type FunctionHeader = (
+    String,
+    Vec<String>,
+    Vec<TypeParamBound>,
+    bool,
+    Vec<Param>,
+    Type,
+    Vec<String>,
+);
+
+/// Split `name[T, U]` into the name and its generic type parameters (lang.4).
+/// A plain `name` yields no parameters.
+fn split_fn_type_params(raw: &str) -> Result<(String, Vec<String>, Vec<TypeParamBound>), String> {
+    let raw = raw.trim();
+    let Some(open) = raw.find('[') else {
+        return Ok((raw.to_string(), Vec::new(), Vec::new()));
+    };
+    let inner = raw[open + 1..]
+        .strip_suffix(']')
+        .ok_or_else(|| format!("type parameter list must close with ']': {raw}"))?;
+    let mut params = Vec::new();
+    let mut bounds = Vec::new();
+    for raw_param in inner.split(',') {
+        let raw_param = raw_param.trim();
+        if raw_param.is_empty() {
+            continue;
+        }
+        let (name, trait_text) = raw_param
+            .split_once(':')
+            .map_or((raw_param, None), |(name, traits)| {
+                (name.trim(), Some(traits))
+            });
+        if name.is_empty() {
+            return Err(format!("type parameter name must not be empty: {raw}"));
+        }
+        params.push(name.to_string());
+        if let Some(trait_text) = trait_text {
+            let traits = trait_text
+                .split('+')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            if traits.is_empty() {
+                return Err(format!(
+                    "type parameter bound must not be empty: {raw_param}"
+                ));
+            }
+            bounds.push(TypeParamBound {
+                type_param: name.to_string(),
+                traits,
+            });
+        }
+    }
+    if params.is_empty() {
+        return Err(format!("type parameter list must not be empty: {raw}"));
+    }
+    Ok((raw[..open].trim().to_string(), params, bounds))
+}
+
+fn split_impl_type_params(raw: &str) -> Result<(&str, Vec<String>, Vec<TypeParamBound>), String> {
+    let raw = raw.trim();
+    if !raw.starts_with('[') {
+        return Ok((raw, Vec::new(), Vec::new()));
+    }
+    let close = raw
+        .find(']')
+        .ok_or_else(|| format!("type parameter list must close with ']': {raw}"))?;
+    let parameter_text = format!("impl{}", &raw[..=close]);
+    let (_, type_params, type_bounds) = split_fn_type_params(&parameter_text)?;
+    Ok((raw[close + 1..].trim(), type_params, type_bounds))
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParseOutput {
@@ -80,6 +154,101 @@ pub fn parse_human(source: &str) -> Result<Program, String> {
         }
         let item_text = strip_visibility_marker(&line.text);
         if let Some(name) = item_text
+            .strip_prefix("trait ")
+            .and_then(|text| text.strip_suffix(':'))
+        {
+            let name = name.trim().to_string();
+            index += 1;
+            let mut methods = Vec::new();
+            let mut constants = Vec::new();
+            let mut associated_types = Vec::new();
+            while index < lines.len() && lines[index].indent > 0 {
+                let item = lines[index].text.trim();
+                if item.starts_with("requires const ") {
+                    constants.push(parse_human_trait_const(item)?);
+                } else if let Some(name) = item.strip_prefix("requires type ") {
+                    associated_types.push(TraitTypeDecl {
+                        name: name.trim().to_string(),
+                    });
+                } else {
+                    methods.push(parse_human_trait_method(item)?);
+                }
+                index += 1;
+            }
+            program.items.push(Item::Trait(TraitDecl {
+                id: format!("@trait.{name}"),
+                name,
+                attrs: std::mem::take(&mut pending_attrs),
+                methods,
+                constants,
+                associated_types,
+            }));
+            continue;
+        }
+        if let Some(spec) = item_text
+            .strip_prefix("impl")
+            .and_then(|text| text.strip_suffix(':'))
+        {
+            let (spec, type_params, type_bounds) = split_impl_type_params(spec)?;
+            let (trait_name, for_type) = spec.split_once(" for ").ok_or_else(|| {
+                format!("trait impl must use 'impl[T] Trait for Type:': {item_text}")
+            })?;
+            let trait_name = trait_name.trim().to_string();
+            let for_type = Type::parse(for_type);
+            index += 1;
+            let mut methods = Vec::new();
+            let mut constants = Vec::new();
+            let mut associated_types = Vec::new();
+            while index < lines.len() && lines[index].indent > 0 {
+                if let Some(binding) = lines[index].text.trim().strip_prefix("type ") {
+                    let (name, ty) = binding.split_once('=').ok_or_else(|| {
+                        format!("trait type impl must use 'type name = Type': {binding}")
+                    })?;
+                    associated_types.push(TraitTypeImpl {
+                        name: name.trim().to_string(),
+                        ty: Type::parse(ty),
+                    });
+                    index += 1;
+                    continue;
+                }
+                if let Some(binding) = lines[index].text.trim().strip_prefix("const ") {
+                    let (name, value) = binding.split_once('=').ok_or_else(|| {
+                        format!("trait constant impl must use 'const name = value': {binding}")
+                    })?;
+                    constants.push(TraitConstImpl {
+                        name: name.trim().to_string(),
+                        value: parse_expr(value.trim())?,
+                    });
+                    index += 1;
+                    continue;
+                }
+                let (method, function) =
+                    lines[index].text.trim().split_once('=').ok_or_else(|| {
+                        format!(
+                            "trait method impl must use 'method = function': {}",
+                            lines[index].text
+                        )
+                    })?;
+                methods.push(TraitMethodImpl {
+                    method: method.trim().to_string(),
+                    function: function.trim().to_string(),
+                });
+                index += 1;
+            }
+            program.items.push(Item::TraitImpl(TraitImplDecl {
+                id: format!("@impl.{}.{}", trait_name, for_type.to_agent()),
+                trait_name,
+                for_type,
+                type_params,
+                type_bounds,
+                attrs: std::mem::take(&mut pending_attrs),
+                methods,
+                constants,
+                associated_types,
+            }));
+            continue;
+        }
+        if let Some(name) = item_text
             .strip_prefix("struct ")
             .and_then(|s| s.strip_suffix(':'))
         {
@@ -110,6 +279,33 @@ pub fn parse_human(source: &str) -> Result<Program, String> {
             )));
             continue;
         }
+        if let Some(name) = item_text
+            .strip_prefix("enum ")
+            .and_then(|s| s.strip_suffix(':'))
+        {
+            index += 1;
+            let mut variants = Vec::new();
+            while index < lines.len() && lines[index].indent > 0 {
+                let variant = lines[index].text.trim();
+                if !variant.is_empty() {
+                    variants.push(parse_enum_variant(variant)?);
+                }
+                index += 1;
+            }
+            let name = name.trim().to_string();
+            program.items.push(Item::Enum(EnumDecl {
+                id: format!("@enum.{name}"),
+                name,
+                attrs: std::mem::take(&mut pending_attrs),
+                variants,
+            }));
+            continue;
+        }
+        if item_text.starts_with("enum ") {
+            return Err(format!(
+                "enum declaration must end with ':' and contain indented variants: {item_text}"
+            ));
+        }
         if item_text.starts_with("struct ") {
             return Err(format!(
                 "struct declaration must end with ':' and contain indented fields: {}",
@@ -117,10 +313,13 @@ pub fn parse_human(source: &str) -> Result<Program, String> {
             ));
         }
         if item_text.starts_with("fn ") || item_text.starts_with("unsafe fn ") {
-            let (name, unsafe_fn, params, ret, effects) = parse_human_function_header(item_text)?;
+            let (name, type_params, type_bounds, unsafe_fn, params, ret, effects) =
+                parse_human_function_header(item_text)?;
             index += 1;
             let body = parse_human_block(&lines, &mut index, 4)?;
             let mut function = FunctionDecl::new(name, unsafe_fn, params, ret, body);
+            function.type_params = type_params;
+            function.type_bounds = type_bounds;
             function.effects = effects;
             function.attrs = std::mem::take(&mut pending_attrs);
             program.items.push(Item::Function(function));
@@ -534,6 +733,105 @@ pub fn parse_agent(source: &str) -> Result<Program, String> {
             index += 1;
             continue;
         }
+        if let Some(name) = line.strip_prefix("TR ") {
+            let name = name.trim_end_matches('{').trim().to_string();
+            index += 1;
+            let mut methods = Vec::new();
+            let mut constants = Vec::new();
+            let mut associated_types = Vec::new();
+            while index < lines.len() && lines[index] != "}" {
+                let item = lines[index].trim();
+                if item.starts_with("CONST ") {
+                    constants.push(parse_agent_trait_const(item)?);
+                } else if let Some(name) = item.strip_prefix("TYPE ") {
+                    associated_types.push(TraitTypeDecl {
+                        name: name.trim().to_string(),
+                    });
+                } else {
+                    methods.push(parse_agent_trait_method(item)?);
+                }
+                index += 1;
+            }
+            if index >= lines.len() {
+                return Err(format!("unterminated trait {name}"));
+            }
+            program.items.push(Item::Trait(TraitDecl {
+                id: format!("@trait.{name}"),
+                name,
+                attrs: std::mem::take(&mut pending_attrs),
+                methods,
+                constants,
+                associated_types,
+            }));
+            index += 1;
+            continue;
+        }
+        if let Some(spec) = line.strip_prefix("IM") {
+            let spec = spec.trim_end_matches('{').trim();
+            let (spec, type_params, type_bounds) = split_impl_type_params(spec)?;
+            let (trait_name, for_type) = spec
+                .split_once(' ')
+                .ok_or_else(|| format!("invalid agent trait impl: {line}"))?;
+            let trait_name = trait_name.trim().to_string();
+            let for_type = Type::parse(for_type);
+            index += 1;
+            let mut methods = Vec::new();
+            let mut constants = Vec::new();
+            let mut associated_types = Vec::new();
+            while index < lines.len() && lines[index] != "}" {
+                if let Some(binding) = lines[index].strip_prefix("TYPE ") {
+                    let (name, ty) = binding
+                        .split_once('=')
+                        .ok_or_else(|| format!("invalid trait type binding: {}", lines[index]))?;
+                    associated_types.push(TraitTypeImpl {
+                        name: name.trim().to_string(),
+                        ty: Type::parse(ty),
+                    });
+                    index += 1;
+                    continue;
+                }
+                if let Some(binding) = lines[index].strip_prefix("CONST ") {
+                    let (name, value) = binding.split_once('=').ok_or_else(|| {
+                        format!("invalid trait constant binding: {}", lines[index])
+                    })?;
+                    constants.push(TraitConstImpl {
+                        name: name.trim().to_string(),
+                        value: parse_expr(value.trim())?,
+                    });
+                    index += 1;
+                    continue;
+                }
+                let parts = lines[index]
+                    .strip_prefix("BIND ")
+                    .ok_or_else(|| format!("invalid trait method binding: {}", lines[index]))?
+                    .split_whitespace()
+                    .collect::<Vec<_>>();
+                if parts.len() != 2 {
+                    return Err(format!("invalid trait method binding: {}", lines[index]));
+                }
+                methods.push(TraitMethodImpl {
+                    method: parts[0].to_string(),
+                    function: parts[1].to_string(),
+                });
+                index += 1;
+            }
+            if index >= lines.len() {
+                return Err(format!("unterminated trait impl {trait_name}"));
+            }
+            program.items.push(Item::TraitImpl(TraitImplDecl {
+                id: format!("@impl.{}.{}", trait_name, for_type.to_agent()),
+                trait_name,
+                for_type,
+                type_params,
+                type_bounds,
+                attrs: std::mem::take(&mut pending_attrs),
+                methods,
+                constants,
+                associated_types,
+            }));
+            index += 1;
+            continue;
+        }
         if line.starts_with("S ") {
             let mut decl = parse_agent_struct(line)?;
             decl.attrs = std::mem::take(&mut pending_attrs);
@@ -541,11 +839,35 @@ pub fn parse_agent(source: &str) -> Result<Program, String> {
             index += 1;
             continue;
         }
+        if let Some(rest) = line.strip_prefix("EN ") {
+            let (name, body) = rest
+                .split_once('{')
+                .ok_or_else(|| format!("invalid agent enum: {line}"))?;
+            let body = body.trim_end().trim_end_matches('}');
+            let variants = body
+                .split(';')
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(parse_enum_variant)
+                .collect::<Result<Vec<_>, _>>()?;
+            let name = name.trim().to_string();
+            program.items.push(Item::Enum(EnumDecl {
+                id: format!("@enum.{name}"),
+                name,
+                attrs: std::mem::take(&mut pending_attrs),
+                variants,
+            }));
+            index += 1;
+            continue;
+        }
         if line.starts_with("F ") || line.starts_with("UF ") || line.starts_with("unsafe F ") {
-            let (name, unsafe_fn, params, ret, effects) = parse_agent_function_header(line)?;
+            let (name, type_params, type_bounds, unsafe_fn, params, ret, effects) =
+                parse_agent_function_header(line)?;
             index += 1;
             let body = parse_agent_block(&lines, &mut index)?;
             let mut function = FunctionDecl::new(name, unsafe_fn, params, ret, body);
+            function.type_params = type_params;
+            function.type_bounds = type_bounds;
             function.effects = effects;
             function.attrs = std::mem::take(&mut pending_attrs);
             program.items.push(Item::Function(function));
@@ -640,6 +962,24 @@ fn map_human_source(file: &str, source: &str, program: &Program, map: &mut Sourc
                         );
                         index = field_idx + 1;
                     }
+                }
+            }
+            Item::Enum(_) => {}
+            Item::Trait(decl) => {
+                if let Some(line_idx) = find_line_from(&lines, index, |line| {
+                    strip_visibility_marker(&line.text) == format!("trait {}:", decl.name)
+                }) {
+                    map.add(&decl.id, line_span(file, &lines[line_idx]));
+                    index = line_idx + 1;
+                }
+            }
+            Item::TraitImpl(decl) => {
+                if let Some(line_idx) = find_line_from(&lines, index, |line| {
+                    strip_visibility_marker(&line.text)
+                        == format!("impl {} for {}:", decl.trait_name, decl.for_type.to_human())
+                }) {
+                    map.add(&decl.id, line_span(file, &lines[line_idx]));
+                    index = line_idx + 1;
                 }
             }
             Item::Function(function) => {
@@ -829,6 +1169,28 @@ fn map_agent_source(file: &str, source: &str, program: &Program, map: &mut Sourc
                     map.add(format!("{}.field.{}", decl.id, field.name), span.clone());
                 }
             }
+            Item::Enum(_) => {}
+            Item::Trait(decl) => {
+                if let Some(line_idx) = find_line_from(&lines, index, |line| {
+                    strip_agent_visibility_marker(&line.text)
+                        .starts_with(&format!("TR {}", decl.name))
+                }) {
+                    map.add(&decl.id, line_span(file, &lines[line_idx]));
+                    index = line_idx + 1;
+                }
+            }
+            Item::TraitImpl(decl) => {
+                if let Some(line_idx) = find_line_from(&lines, index, |line| {
+                    strip_agent_visibility_marker(&line.text).starts_with(&format!(
+                        "IM {} {}",
+                        decl.trait_name,
+                        decl.for_type.to_agent()
+                    ))
+                }) {
+                    map.add(&decl.id, line_span(file, &lines[line_idx]));
+                    index = line_idx + 1;
+                }
+            }
             Item::Function(function) => {
                 let Some(line_idx) = find_line_from(&lines, index, |line| {
                     let text = strip_agent_visibility_marker(&line.text);
@@ -986,10 +1348,18 @@ fn map_stmt_and_expr_spans(stmt: &Stmt, id: &str, span: SourceSpan, map: &mut So
             map_expr_spans(start, &format!("{id}.start"), span.clone(), map);
             map_expr_spans(end, &format!("{id}.end"), span, map);
         }
+        Stmt::While { cond, .. } => {
+            map.add(format!("{id}.loop"), span.clone());
+            map_expr_spans(cond, &format!("{id}.cond"), span, map);
+        }
+        Stmt::Match { scrutinee, .. } => {
+            map_expr_spans(scrutinee, &format!("{id}.scrutinee"), span, map);
+        }
         Stmt::Assign { target, expr } => {
             map_expr_spans(target, &format!("{id}.target"), span.clone(), map);
             map_expr_spans(expr, &format!("{id}.expr"), span, map);
         }
+        Stmt::Break | Stmt::Continue => {}
         Stmt::Expr(expr) => map_expr_spans(expr, &format!("{id}.expr"), span, map),
         Stmt::Asm(_) => map.add(format!("{id}.asm"), span),
     }
@@ -998,6 +1368,7 @@ fn map_stmt_and_expr_spans(stmt: &Stmt, id: &str, span: SourceSpan, map: &mut So
 fn map_expr_spans(expr: &Expr, id: &str, span: SourceSpan, map: &mut SourceMap) {
     map.add(id, span.clone());
     match expr {
+        Expr::Lambda { body, .. } => map_expr_spans(body, &format!("{id}.body"), span, map),
         Expr::Unary { expr, .. } => map_expr_spans(expr, &format!("{id}.expr"), span, map),
         Expr::Binary { left, right, .. } => {
             map_expr_spans(left, &format!("{id}.left"), span.clone(), map);
@@ -1014,7 +1385,12 @@ fn map_expr_spans(expr: &Expr, id: &str, span: SourceSpan, map: &mut SourceMap) 
             map_expr_spans(base, &format!("{id}.base"), span.clone(), map);
             map_expr_spans(index, &format!("{id}.index"), span, map);
         }
-        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::String(_) | Expr::Var(_) => {}
+        Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::String(_)
+        | Expr::Var(_)
+        | Expr::TraitConst { .. } => {}
     }
 }
 
@@ -1275,11 +1651,107 @@ fn parse_human_function_header(text: &str) -> Result<FunctionHeader, String> {
     let close = rest
         .rfind(')')
         .ok_or_else(|| format!("function header missing ')': {text}"))?;
-    let name = rest[..open].trim().to_string();
+    let (name, type_params, type_bounds) = split_fn_type_params(&rest[..open])?;
     let params = parse_human_params(&rest[open + 1..close])?;
     let after = rest[close + 1..].trim();
     let (ret, effects) = parse_return_and_effects(after)?;
-    Ok((name, unsafe_fn, params, ret, effects))
+    Ok((
+        name,
+        type_params,
+        type_bounds,
+        unsafe_fn,
+        params,
+        ret,
+        effects,
+    ))
+}
+
+fn parse_human_trait_method(text: &str) -> Result<TraitMethodDecl, String> {
+    let rest = text
+        .strip_prefix("requires ")
+        .ok_or_else(|| format!("trait method must start with 'requires': {text}"))?;
+    let open = rest
+        .find('(')
+        .ok_or_else(|| format!("trait method missing '(': {text}"))?;
+    let close = rest
+        .rfind(')')
+        .ok_or_else(|| format!("trait method missing ')': {text}"))?;
+    let name = rest[..open].trim().to_string();
+    let params = parse_human_params(&rest[open + 1..close])?;
+    let suffix = rest[close + 1..].trim();
+    let (signature, default_function) = match suffix.rsplit_once(" default ") {
+        Some((signature, function)) if !function.trim().is_empty() => {
+            (signature.trim(), Some(function.trim().to_string()))
+        }
+        _ => (suffix, None),
+    };
+    let (ret, effects) = parse_return_and_effects(signature)?;
+    if !effects.is_empty() {
+        return Err("trait method effects are not supported in this slice".to_string());
+    }
+    Ok(TraitMethodDecl {
+        name,
+        params,
+        ret,
+        default_function,
+    })
+}
+
+fn parse_human_trait_const(text: &str) -> Result<TraitConstDecl, String> {
+    let rest = text
+        .strip_prefix("requires const ")
+        .ok_or_else(|| format!("trait constant must start with 'requires const': {text}"))?;
+    let (name, ty) = rest
+        .split_once(':')
+        .ok_or_else(|| format!("trait constant must use 'requires const name: Type': {text}"))?;
+    Ok(TraitConstDecl {
+        name: name.trim().to_string(),
+        ty: Type::parse(ty),
+    })
+}
+
+fn parse_agent_trait_method(text: &str) -> Result<TraitMethodDecl, String> {
+    let rest = text
+        .strip_prefix("REQ ")
+        .ok_or_else(|| format!("trait method must start with REQ: {text}"))?;
+    let open = rest
+        .find('(')
+        .ok_or_else(|| format!("trait method missing '(': {text}"))?;
+    let close = rest
+        .rfind(')')
+        .ok_or_else(|| format!("trait method missing ')': {text}"))?;
+    let name = rest[..open].trim().to_string();
+    let params = parse_agent_params(&rest[open + 1..close])?;
+    let suffix = rest[close + 1..].trim();
+    let (signature, default_function) = match suffix.rsplit_once(" DEFAULT ") {
+        Some((signature, function)) if !function.trim().is_empty() => {
+            (signature.trim(), Some(function.trim().to_string()))
+        }
+        _ => (suffix, None),
+    };
+    let (ret, effects) = parse_return_and_effects(signature)?;
+    if !effects.is_empty() {
+        return Err("trait method effects are not supported in this slice".to_string());
+    }
+    Ok(TraitMethodDecl {
+        name,
+        params,
+        ret,
+        default_function,
+    })
+}
+
+fn parse_agent_trait_const(text: &str) -> Result<TraitConstDecl, String> {
+    let rest = text
+        .strip_prefix("CONST ")
+        .ok_or_else(|| format!("trait constant must start with CONST: {text}"))?;
+    let (name, ty) = rest
+        .split_once(' ')
+        .ok_or_else(|| format!("trait constant must use 'CONST name Type': {text}"))?;
+    Ok(TraitConstDecl {
+        name: name.trim().to_string(),
+        ty: Type::parse(ty),
+    })
 }
 
 fn parse_return_and_effects(after: &str) -> Result<(Type, Vec<String>), String> {
@@ -1401,6 +1873,42 @@ fn parse_human_test_expectation(text: &str) -> Result<TestExpectation, String> {
     })
 }
 
+/// After a human `if`/`else if` block, parse a trailing `else:` or chained
+/// `else if …:` at the same indent. `else if` desugars to a nested `if` in the
+/// `else_body`, so the AST has a single `If` shape regardless of chain length.
+fn parse_human_else(
+    lines: &[SourceLine],
+    index: &mut usize,
+    indent: usize,
+) -> Result<Vec<Stmt>, String> {
+    if *index >= lines.len() {
+        return Ok(Vec::new());
+    }
+    let line = &lines[*index];
+    if line.indent != indent {
+        return Ok(Vec::new());
+    }
+    let text = line.text.as_str();
+    if let Some(cond) = text
+        .strip_prefix("else if ")
+        .and_then(|s| s.strip_suffix(':'))
+    {
+        *index += 1;
+        let then_body = parse_human_block(lines, index, indent + 4)?;
+        let else_body = parse_human_else(lines, index, indent)?;
+        return Ok(vec![Stmt::If {
+            cond: parse_expr(cond)?,
+            then_body,
+            else_body,
+        }]);
+    }
+    if text == "else:" {
+        *index += 1;
+        return parse_human_block(lines, index, indent + 4);
+    }
+    Ok(Vec::new())
+}
+
 fn parse_human_block(
     lines: &[SourceLine],
     index: &mut usize,
@@ -1423,14 +1931,19 @@ fn parse_human_block(
         if let Some(cond) = text.strip_prefix("if ").and_then(|s| s.strip_suffix(':')) {
             *index += 1;
             let then_body = parse_human_block(lines, index, indent + 4)?;
+            let else_body = parse_human_else(lines, index, indent)?;
             body.push(Stmt::If {
                 cond: parse_expr(cond)?,
                 then_body,
+                else_body,
             });
             continue;
         }
         if text.starts_with("if ") {
             return Err(format!("if statement must end with ':': {text}"));
+        }
+        if text == "else:" || text.starts_with("else if ") || text == "else" {
+            return Err(format!("'{text}' has no matching 'if'"));
         }
         if let Some(loop_text) = text.strip_prefix("for ").and_then(|s| s.strip_suffix(':')) {
             let (var, range) =
@@ -1451,6 +1964,80 @@ fn parse_human_block(
             return Err(format!(
                 "for loop must end with ':' and use 'for name in start .. end': {text}"
             ));
+        }
+        if let Some(cond) = text
+            .strip_prefix("while ")
+            .and_then(|s| s.strip_suffix(':'))
+        {
+            *index += 1;
+            let loop_body = parse_human_block(lines, index, indent + 4)?;
+            body.push(Stmt::While {
+                cond: parse_expr(cond)?,
+                body: loop_body,
+            });
+            continue;
+        }
+        if text.starts_with("while ") {
+            return Err(format!("while loop must end with ':': {text}"));
+        }
+        if let Some(scrut) = text
+            .strip_prefix("match ")
+            .and_then(|s| s.strip_suffix(':'))
+        {
+            *index += 1;
+            let scrutinee = parse_expr(scrut)?;
+            let mut arms = Vec::new();
+            while *index < lines.len() {
+                let arm_line = &lines[*index];
+                if arm_line.text.is_empty() {
+                    *index += 1;
+                    continue;
+                }
+                if arm_line.indent <= indent {
+                    break;
+                }
+                if arm_line.indent != indent + 4 {
+                    return Err(format!(
+                        "unexpected indentation in match arm: {}",
+                        arm_line.text
+                    ));
+                }
+                let pat = arm_line
+                    .text
+                    .strip_prefix("case ")
+                    .and_then(|s| s.strip_suffix(':'))
+                    .ok_or_else(|| {
+                        format!("match arm must be 'case <pattern>:': {}", arm_line.text)
+                    })?;
+                let pattern = parse_pattern(pat.trim())?;
+                *index += 1;
+                let arm_body = parse_human_block(lines, index, indent + 8)?;
+                arms.push(MatchArm {
+                    pattern,
+                    body: arm_body,
+                });
+            }
+            if arms.is_empty() {
+                return Err(format!("match must have at least one case: {text}"));
+            }
+            body.push(Stmt::Match { scrutinee, arms });
+            continue;
+        }
+        if text.starts_with("match ") {
+            return Err(format!("match statement must end with ':': {text}"));
+        }
+        if text.starts_with("case ") {
+            return Err(format!("'{text}' has no matching 'match'"));
+        }
+        if text == "break" {
+            *index += 1;
+            body.push(Stmt::Break);
+            continue;
+        }
+        if text == "continue" {
+            *index += 1;
+            body.push(Stmt::Continue);
+            continue;
         }
         if let Some(target) = text.strip_prefix("asm ").and_then(|s| s.strip_suffix(':')) {
             *index += 1;
@@ -1601,11 +2188,19 @@ fn parse_agent_function_header(line: &str) -> Result<FunctionHeader, String> {
     let close = rest
         .rfind(')')
         .ok_or_else(|| format!("agent function missing ')': {line}"))?;
-    let name = rest[..open].trim().to_string();
+    let (name, type_params, type_bounds) = split_fn_type_params(&rest[..open])?;
     let params = parse_agent_params(&rest[open + 1..close])?;
     let after = rest[close + 1..].trim();
     let (ret, effects) = parse_return_and_effects(after)?;
-    Ok((name, unsafe_fn, params, ret, effects))
+    Ok((
+        name,
+        type_params,
+        type_bounds,
+        unsafe_fn,
+        params,
+        ret,
+        effects,
+    ))
 }
 
 fn parse_agent_params(raw: &str) -> Result<Vec<Param>, String> {
@@ -1692,6 +2287,103 @@ fn parse_agent_test_expectation(line: &str) -> Result<TestExpectation, String> {
     })
 }
 
+/// After an agent `IF`/`EI` block, parse a trailing dense `EL { … }` or chained
+/// `EI <cond> { … }`. `EI` desugars to a nested `IF` in the `else_body`.
+fn parse_agent_else(lines: &[String], index: &mut usize) -> Result<Vec<Stmt>, String> {
+    if *index >= lines.len() {
+        return Ok(Vec::new());
+    }
+    let line = lines[*index].trim();
+    if let Some(cond) = line
+        .strip_prefix("EI ")
+        .and_then(|rest| rest.strip_suffix('{'))
+    {
+        let cond = cond.trim();
+        *index += 1;
+        let then_body = parse_agent_block(lines, index)?;
+        let else_body = parse_agent_else(lines, index)?;
+        return Ok(vec![Stmt::If {
+            cond: parse_expr(cond)?,
+            then_body,
+            else_body,
+        }]);
+    }
+    if line == "EL {" {
+        *index += 1;
+        return parse_agent_block(lines, index);
+    }
+    Ok(Vec::new())
+}
+
+/// An enum variant declaration: `Name` (data-less) or `Name(Type)` (one payload).
+fn parse_enum_variant(text: &str) -> Result<EnumVariant, String> {
+    let text = text.trim();
+    if let Some(open) = text.find('(') {
+        let name = text[..open].trim().to_string();
+        let payload = text[open + 1..]
+            .strip_suffix(')')
+            .ok_or_else(|| format!("enum variant payload must close with ')': {text}"))?;
+        Ok(EnumVariant {
+            name,
+            payload: Some(Type::parse(payload.trim())),
+        })
+    } else {
+        Ok(EnumVariant {
+            name: text.to_string(),
+            payload: None,
+        })
+    }
+}
+
+/// A match pattern: `_` (wildcard), an enum variant path (`Color::Red`), or a
+/// variant binding its payload (`Shape::Circle(r)`).
+fn parse_pattern(text: &str) -> Result<Pattern, String> {
+    let text = text.trim();
+    if text == "_" {
+        return Ok(Pattern::Wildcard);
+    }
+    let (path, binding) = if let Some(open) = text.find('(') {
+        let path = text[..open].trim().to_string();
+        let name = text[open + 1..]
+            .strip_suffix(')')
+            .ok_or_else(|| format!("pattern binding must close with ')': {text}"))?
+            .trim()
+            .to_string();
+        (path, Some(name))
+    } else {
+        (text.to_string(), None)
+    };
+    if !path.contains("::") {
+        return Err(format!(
+            "match pattern must be '_' or an enum variant path (Enum::Variant): {text}"
+        ));
+    }
+    Ok(Pattern::Variant { path, binding })
+}
+
+/// Parse the arms of an agent `MT … { … }` block: each arm is `<pat> => { … }`,
+/// ending at the closing `}` of the match.
+fn parse_agent_match_arms(lines: &[String], index: &mut usize) -> Result<Vec<MatchArm>, String> {
+    let mut arms = Vec::new();
+    while *index < lines.len() {
+        let line = lines[*index].trim();
+        if line == "}" {
+            *index += 1;
+            return Ok(arms);
+        }
+        let head = line
+            .strip_suffix('{')
+            .map(str::trim)
+            .and_then(|h| h.strip_suffix("=>"))
+            .ok_or_else(|| format!("match arm must be '<pattern> => {{': {line}"))?;
+        let pattern = parse_pattern(head.trim())?;
+        *index += 1;
+        let body = parse_agent_block(lines, index)?;
+        arms.push(MatchArm { pattern, body });
+    }
+    Err("agent match is missing closing '}'".to_string())
+}
+
 fn parse_agent_block(lines: &[String], index: &mut usize) -> Result<Vec<Stmt>, String> {
     let mut body = Vec::new();
     let mut closed = false;
@@ -1721,9 +2413,12 @@ fn parse_agent_block(lines: &[String], index: &mut usize) -> Result<Vec<Stmt>, S
                 .unwrap()
                 .trim();
             *index += 1;
+            let then_body = parse_agent_block(lines, index)?;
+            let else_body = parse_agent_else(lines, index)?;
             body.push(Stmt::If {
                 cond: parse_expr(cond)?,
-                then_body: parse_agent_block(lines, index)?,
+                then_body,
+                else_body,
             });
             continue;
         }
@@ -1747,6 +2442,35 @@ fn parse_agent_block(lines: &[String], index: &mut usize) -> Result<Vec<Stmt>, S
                 start: parse_expr(start)?,
                 end: parse_expr(&end)?,
                 body: parse_agent_block(lines, index)?,
+            });
+            continue;
+        }
+        if line.starts_with("WH ") && line.ends_with('{') {
+            let cond = line
+                .trim_end_matches('{')
+                .trim()
+                .strip_prefix("WH ")
+                .unwrap()
+                .trim();
+            *index += 1;
+            body.push(Stmt::While {
+                cond: parse_expr(cond)?,
+                body: parse_agent_block(lines, index)?,
+            });
+            continue;
+        }
+        if line.starts_with("MT ") && line.ends_with('{') {
+            let scrut = line
+                .trim_end_matches('{')
+                .trim()
+                .strip_prefix("MT ")
+                .unwrap()
+                .trim();
+            *index += 1;
+            let arms = parse_agent_match_arms(lines, index)?;
+            body.push(Stmt::Match {
+                scrutinee: parse_expr(scrut)?,
+                arms,
             });
             continue;
         }
@@ -1822,6 +2546,12 @@ fn parse_agent_simple_stmt(line: &str) -> Result<Stmt, String> {
     if line == "R" {
         return Ok(Stmt::Return(None));
     }
+    if line == "BR" {
+        return Ok(Stmt::Break);
+    }
+    if line == "CN" {
+        return Ok(Stmt::Continue);
+    }
     if let Some(expr) = line.strip_prefix("REQ ") {
         return Ok(Stmt::Require(parse_expr(expr)?));
     }
@@ -1873,6 +2603,19 @@ fn tokenize_expr(source: &str) -> Result<Vec<String>, String> {
                 && (chars[index].is_ascii_alphanumeric() || chars[index] == '_')
             {
                 index += 1;
+            }
+            // Enum variant paths: `Name::Variant` (and `A::B::C`) are one token.
+            while index + 2 < chars.len()
+                && chars[index] == ':'
+                && chars[index + 1] == ':'
+                && (chars[index + 2].is_ascii_alphabetic() || chars[index + 2] == '_')
+            {
+                index += 2;
+                while index < chars.len()
+                    && (chars[index].is_ascii_alphanumeric() || chars[index] == '_')
+                {
+                    index += 1;
+                }
             }
             tokens.push(chars[start..index].iter().collect());
             continue;
@@ -1931,7 +2674,8 @@ fn tokenize_expr(source: &str) -> Result<Vec<String>, String> {
                 continue;
             }
         }
-        if "()[],.+-*/%<>&|!=".contains(ch) {
+        // ':' appears only in closure parameter annotations, e.g. `|x: i32| …`.
+        if "()[],.+-*/%<>&|!=:".contains(ch) {
             tokens.push(ch.to_string());
             index += 1;
             continue;
@@ -1974,7 +2718,21 @@ impl ExprParser {
             .next()
             .ok_or_else(|| "expected expression, found end of input".to_string())?
             .to_string();
-        let mut expr = if token == "-" || token == "!" {
+        let mut expr = if token == "|" || token == "||" {
+            // A closure (lang.4): `|x: i32, y: f64| body`, or `|| body` for no
+            // parameters (the `||` token is the empty parameter list here).
+            // Unambiguous: in prefix position `|` can never be bitwise-or.
+            let params = if token == "||" {
+                Vec::new()
+            } else {
+                self.parse_lambda_params()?
+            };
+            let body = self.parse_min_prec(0)?;
+            return Ok(Expr::Lambda {
+                params,
+                body: Box::new(body),
+            });
+        } else if token == "-" || token == "!" {
             Expr::Unary {
                 op: token,
                 expr: Box::new(self.parse_min_prec(10)?),
@@ -1995,7 +2753,14 @@ impl ExprParser {
                 .map_err(|_| format!("invalid float literal: {token}"))?;
             Expr::Float(value)
         } else if is_identifier(&token) {
-            if self.consume("(") {
+            if token.contains("::") && self.consume("[") {
+                let (trait_name, name) = token.split_once("::").unwrap();
+                Expr::TraitConst {
+                    trait_name: trait_name.to_string(),
+                    name: name.to_string(),
+                    for_type: self.parse_trait_const_type()?,
+                }
+            } else if self.consume("(") {
                 let args = self.parse_args()?;
                 if is_primitive_name(&token) && args.len() == 1 {
                     Expr::Cast {
@@ -2041,6 +2806,77 @@ impl ExprParser {
             break;
         }
         Ok(expr)
+    }
+
+    fn parse_trait_const_type(&mut self) -> Result<Type, String> {
+        let mut tokens = Vec::new();
+        let mut depth = 0usize;
+        loop {
+            let token = self
+                .next()
+                .ok_or_else(|| "trait constant type selector must close with ']'".to_string())?;
+            match token.as_str() {
+                "[" => {
+                    depth += 1;
+                    tokens.push(token);
+                }
+                "]" if depth == 0 => break,
+                "]" => {
+                    depth -= 1;
+                    tokens.push(token);
+                }
+                _ => tokens.push(token),
+            }
+        }
+        if tokens.is_empty() {
+            return Err("trait constant type selector cannot be empty".to_string());
+        }
+        Ok(Type::parse(&tokens.join("")))
+    }
+
+    /// Parse `name: type, …|` — the parameter list of a closure whose opening
+    /// `|` was already consumed. Types may contain commas inside brackets
+    /// (e.g. `Fn[i32, i32]`), so the type is read token-wise at bracket depth.
+    fn parse_lambda_params(&mut self) -> Result<Vec<Param>, String> {
+        let mut params = Vec::new();
+        loop {
+            let name = self
+                .next()
+                .ok_or_else(|| "expected closure parameter name".to_string())?
+                .to_string();
+            if !is_identifier(&name) {
+                return Err(format!("invalid closure parameter name: {name}"));
+            }
+            self.expect(":")?;
+            let mut ty_tokens: Vec<String> = Vec::new();
+            let mut depth = 0usize;
+            loop {
+                let Some(token) = self.peek() else {
+                    return Err("closure parameter list must close with '|'".to_string());
+                };
+                match token {
+                    "[" => depth += 1,
+                    "]" => depth = depth.saturating_sub(1),
+                    "," | "|" if depth == 0 => break,
+                    _ => {}
+                }
+                ty_tokens.push(token.to_string());
+                self.pos += 1;
+            }
+            if ty_tokens.is_empty() {
+                return Err("closure parameter needs a type annotation".to_string());
+            }
+            params.push(Param {
+                name,
+                ty: Type::parse(&ty_tokens.join(" ")),
+            });
+            if self.consume(",") {
+                continue;
+            }
+            self.expect("|")?;
+            break;
+        }
+        Ok(params)
     }
 
     fn parse_args(&mut self) -> Result<Vec<Expr>, String> {

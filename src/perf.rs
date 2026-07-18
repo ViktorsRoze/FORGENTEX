@@ -456,10 +456,15 @@ fn analyze_body(body: &[Stmt], counts: &mut OperationCounts) {
             Stmt::Return(Some(expr)) | Stmt::Require(expr) | Stmt::Expr(expr) => {
                 analyze_expr(expr, counts);
             }
-            Stmt::Return(None) | Stmt::Asm(_) => {}
-            Stmt::If { cond, then_body } => {
+            Stmt::Return(None) | Stmt::Asm(_) | Stmt::Break | Stmt::Continue => {}
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
                 analyze_expr(cond, counts);
                 analyze_body(then_body, counts);
+                analyze_body(else_body, counts);
             }
             Stmt::For {
                 start, end, body, ..
@@ -468,6 +473,17 @@ fn analyze_body(body: &[Stmt], counts: &mut OperationCounts) {
                 analyze_expr(start, counts);
                 analyze_expr(end, counts);
                 analyze_body(body, counts);
+            }
+            Stmt::While { cond, body } => {
+                counts.loops += 1;
+                analyze_expr(cond, counts);
+                analyze_body(body, counts);
+            }
+            Stmt::Match { scrutinee, arms } => {
+                analyze_expr(scrutinee, counts);
+                for arm in arms {
+                    analyze_body(&arm.body, counts);
+                }
             }
             Stmt::Assign { target, expr } => {
                 counts.stores += 1;
@@ -480,6 +496,7 @@ fn analyze_body(body: &[Stmt], counts: &mut OperationCounts) {
 
 fn analyze_expr(expr: &Expr, counts: &mut OperationCounts) {
     match expr {
+        Expr::Lambda { body, .. } => analyze_expr(body, counts),
         Expr::Binary { left, right, .. } => {
             counts.scalar_ops += 1;
             analyze_expr(left, counts);
@@ -510,7 +527,12 @@ fn analyze_expr(expr: &Expr, counts: &mut OperationCounts) {
             analyze_expr(base, counts);
             analyze_expr(index, counts);
         }
-        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::String(_) | Expr::Var(_) => {}
+        Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::String(_)
+        | Expr::Var(_)
+        | Expr::TraitConst { .. } => {}
     }
 }
 

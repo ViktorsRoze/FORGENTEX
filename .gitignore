@@ -6,4 +6,4 @@
 
 # Editor and local tool state
 /.idea
-
+/.claude/settings.local.json

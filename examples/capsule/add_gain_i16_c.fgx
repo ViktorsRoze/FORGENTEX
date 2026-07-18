@@ -1,0 +1,20 @@
+# native-call v1.2: a copy-in/copy-back mutable audio-style buffer boundary.
+# Forgentex &mut [i16] lowers to `int16_t *samples, size_t samples_len`.
+
+foreign add_gain_i16 c version "c11" effects [cpu.avx2]:
+    input samples: &mut [i16]
+    input gain: i16
+    output changed: i32
+    sandbox "fs.none"
+    code:
+        #include <stdint.h>
+        #include <stddef.h>
+
+        int32_t add_gain_i16(int16_t *samples, size_t samples_len, int16_t gain) {
+            for (size_t i = 0; i < samples_len; ++i) samples[i] += gain;
+            return (int32_t)samples_len;
+        }
+
+fn boost_then_first(samples: &mut [i16]) -> i16 effects [cpu.avx2]:
+    let changed: i32 = add_gain_i16(samples, 5)
+    return samples[0]

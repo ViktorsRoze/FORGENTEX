@@ -1,0 +1,33 @@
+# Owned-output v1.1: Zig transfers a Vec[u8] descriptor and frees it explicitly.
+
+foreign make_bytes_zig zig version "0.14" effects [alloc, cpu.avx2]:
+    input count: i32
+    output bytes: Vec[u8]
+    sandbox "fs.none"
+    sandbox "artifact.media_type application/octet-stream"
+    sandbox "artifact.max_bytes 1048576"
+    code:
+        const std = @import("std");
+
+        pub const FgxOwnedU8 = extern struct {
+            ptr: ?[*]u8,
+            len: usize,
+            capacity: usize,
+        };
+
+        pub export fn make_bytes_zig(count: i32) FgxOwnedU8 {
+            const len: usize = @intCast(@max(count, 0));
+            if (len == 0) return .{ .ptr = null, .len = 0, .capacity = 0 };
+            const bytes = std.heap.page_allocator.alloc(u8, len) catch
+                return .{ .ptr = null, .len = 0, .capacity = 0 };
+            for (bytes, 0..) |*byte, index| byte.* = @intCast(index + 1);
+            return .{ .ptr = bytes.ptr, .len = bytes.len, .capacity = bytes.len };
+        }
+
+        pub export fn make_bytes_zig_free(ptr: ?[*]u8, len: usize, capacity: usize) void {
+            _ = len;
+            if (ptr) |bytes| std.heap.page_allocator.free(bytes[0..capacity]);
+        }
+
+fn bytes_from_zig(count: i32) -> Vec[u8] effects [alloc, cpu.avx2]:
+    return make_bytes_zig(count)

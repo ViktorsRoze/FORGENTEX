@@ -382,6 +382,9 @@ Borrow checker conformance suite:
   acceptance
 - v0.26 branch cases add conditional alias reassignment joins for later writes
   and call boundaries
+- the safe.1 reference slice adds 510 generated whole-value/partial-field move
+  programs and requires an independent availability model to agree with the
+  production checker before conformance or strict release checks pass
 
 Representative case IDs include:
 
@@ -464,6 +467,96 @@ fn ok(flag: bool, xs: &mut [u8], ys: &mut [u8]) -> void:
     alias[0] = 1
     xs[0] = 2                # accepted: alias's last use is before root write
 ```
+
+## safe.1 Generated Reference-Model Hardening
+
+`src/borrow_reference.rs` is an independent model for one deliberately narrow
+ownership subset. It does not inspect the Forgentex AST or invoke the production
+borrow checker. It tracks definite availability for an owned `Pair` and its
+`left`/`right` move paths, joins branch states by intersection, and evaluates a
+known two-iteration loop twice.
+
+The model exhaustively generates 510 equivalent `.fgx` programs:
+
+- 258 one-, two-, and three-action straight-line programs;
+- 216 one-action-per-arm branches followed by another action;
+- 36 one-action loop bodies followed by another action.
+
+Actions read or move the whole pair, its left field, or its right field. The
+model predicts whether `use_after_move` must occur; the conformance runner then
+parses and checks the generated source independently.
+
+The next independent slices model alias places and liveness without using the
+Forgentex AST or production checker. They exhaustively generate:
+
+- 39 one-, two-, and three-write programs over a mutable root, parent alias,
+  and child reborrow;
+- 56 programs over two aliases independently projected to `left` or `right`,
+  including both overlapping and provably disjoint fields;
+- 16 conditional reassignments whose joined alias target set is checked against
+  a direct mutable-root write before or after the alias's last use.
+- 126 programs over two aliases independently projected to three nested field
+  paths, covering equal paths and paths separated at either projection depth;
+- 8 two-iteration loops covering same-root and disjoint-root writes in both
+  alias-before-root and root-before-alias statement orders;
+- 16 ordered pairs over constant-zero, constant-one, and two dynamic index
+  expressions, where only different constants prove disjointness;
+- 16 conditional alias reassignments inside loops, with both possible targets
+  carried across the back edge and checked in both statement orders.
+
+The model accepts child-before-parent activation after the child's last use,
+uses projection-path equality for overlap, unions conditional target sets, and
+unrolls bounded loop bodies twice. It predicts `mutable_borrow_alias` when an
+overlapping loan remains live.
+
+The lifetime-provenance family uses an independent two-point lattice:
+`parameter` or `unproven`. Its 132 programs cover direct returns through up to
+two aliases, every conditional and match-arm pair of origins, loop/while body
+and fallback returns, helper calls whose contracts select the left argument,
+right argument, or both, one-to-three-layer transitive wrappers, field/index
+projection returns, and self/mutual recursive return cycles. Helper-local and
+caller-local aliases are varied independently. A helper result is proven only
+when every argument selected by its return contract has parameter origin;
+unselected unproven field/index arguments do not taint the result. Returned
+recursive cycles remain conservatively unproven because no finite parameter
+summary can be established while the function is already being analyzed.
+
+The first soundness-directed property slice adds 256 deterministic long-form
+programs beyond the exhaustive small matrices: 64 move sequences, 64
+root/parent/child sequences, 64 projected-alias sequences, and 64 lifetime
+wrapper chains at depths four through eight. Four fixed seeds and stable case
+IDs make every failure exactly replayable. The generators reuse only the
+independent abstract models and source renderers; they do not inspect production
+checker state.
+
+The runtime campaign layer adds 128 default cases (32 per family) on top of the
+fixed matrix. `--campaign-seed <u64>` accepts decimal or hexadecimal seeds and
+`--campaign-cases <1..256>` controls the bounded number of cases per family.
+Move, descendant-loan, and projected-alias sequences span eight through 24
+operations; lifetime wrappers span depths eight through 16. Every case records
+a versioned replay command. If the reference model and production checker
+disagree, the runner tests smaller model-equivalent candidates and emits the
+smallest reproduced source, original/minimized complexity, and replay command
+in `campaign_failure_artifacts`. `--failure-dir <path>` also persists each
+minimized `.fgx` reproducer beside `forgentex.borrow_regression.v1` metadata so
+CI failures can be downloaded and promoted without copying source out of logs.
+
+Four minimal regression fixtures are checked into `tests/borrow_regressions`
+and replayed on every conformance and strict release run. The scheduled CI job
+also runs four fixed seeds at 64 cases per family (1,024 runtime-generated
+programs per weekly campaign) and retains minimized source/metadata artifacts
+when any model/checker disagreement occurs.
+
+The JSON report embeds `forgentex.borrow_reference.v1` with aggregate and
+per-family generated/mismatch counts: 510 move cases, 277 alias/reborrow cases,
+132 lifetime-provenance cases, 256 fixed seeded property cases, and 128 default
+runtime-seeded campaign cases, plus four persisted regression cases. The default
+report therefore cross-checks 1,307 reference/regression programs plus 30
+curated cases. Any family mismatch fails `fgx borrow-conformance` and strict
+release hardening. Remaining reference-model targets include deeper projection
+and recursion combinations, slice-range alias projections, richer nested-loop
+interactions, collections, closure captures, and generics. Larger and more
+frequent campaigns plus promotion of newly discovered minimized failures remain.
 
 ## Stable Diagnostics
 

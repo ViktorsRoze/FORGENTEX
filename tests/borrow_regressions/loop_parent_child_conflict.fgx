@@ -1,0 +1,5 @@
+fn bad(xs: &mut [u8]) -> void:
+    let alias: &mut [u8] = xs
+    for i in 0 .. 2:
+        alias[0] = 1
+        xs[0] = 2

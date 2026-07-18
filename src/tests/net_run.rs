@@ -1,10 +1,14 @@
+use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::path::PathBuf;
 use std::thread;
 
-use crate::net_run::run;
+use crate::backend::generate_backend_ir;
+use crate::net_run::{run, run_with_ir};
+use crate::parser::parse_file;
 
-use super::parse_fixture;
+use super::{manifest_path, parse_fixture};
 
 /// A one-shot in-process echo server on an ephemeral loopback port.
 /// Returns its address and a join handle. No external network needed.
@@ -20,6 +24,12 @@ fn echo_server() -> (String, thread::JoinHandle<()>) {
         }
     });
     (addr, handle)
+}
+
+fn scratch(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("forgentex_{}_net_{tag}", std::process::id()));
+    let _ = fs::create_dir_all(&dir);
+    dir
 }
 
 #[test]
@@ -42,6 +52,39 @@ fn allowed_request_does_a_real_round_trip() {
     assert_eq!(report.ops[0].decision, "allow");
     assert_eq!(report.bytes_out, 4);
     assert_eq!(report.bytes_in, 4);
+}
+
+#[test]
+fn net_run_with_ir_executes_fir_body_instead_of_ast_body() {
+    let dir = scratch("direct_fir");
+    let ir_path = dir.join("net_ir.fgx");
+    fs::write(
+        &ir_path,
+        "import core.socket\n\nfn ping(endpoint: str, payload: str) -> str effects [network.connect, network.write, network.read]:\n    return core_socket_tcp_request(endpoint, payload)\n",
+    )
+    .unwrap();
+    let ir = generate_backend_ir(&ir_path).unwrap();
+    let program = parse_file(
+        &manifest_path("net_ast.fgx"),
+        "import core.socket\n\nfn ping(endpoint: str, payload: str) -> str effects [network.connect, network.write, network.read]:\n    return \"wrong\"\n",
+    )
+    .unwrap();
+    let (addr, handle) = echo_server();
+    let report = run_with_ir(
+        "net_ir.fgx",
+        &program,
+        &ir,
+        "ping",
+        vec![addr.clone(), "ping".to_string()],
+        vec![addr.clone()],
+    );
+    handle.join().ok();
+
+    assert_eq!(report.status, "ok");
+    assert_eq!(report.return_value.as_deref(), Some("ping"));
+    assert_eq!(report.ops.len(), 1);
+    assert_eq!(report.ops[0].op, "request");
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]

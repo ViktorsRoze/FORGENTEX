@@ -1,7 +1,7 @@
 # Native and GPU Capsules (v2.6)
 
-v2.6 adds review for the highest-risk non-shell capsule classes: C and C++
-(`native`) and CUDA (`gpu`). These cross a C ABI boundary, may pass raw
+v2.6 adds review for the highest-risk non-shell capsule classes: C, C++, Rust,
+and Zig (`native`) and CUDA (`gpu`). These cross a C ABI boundary, may pass raw
 memory, and — for CUDA — target a specific GPU architecture. The capsule
 contract, sandbox, dependency locking, and fixtures from v2.0–v2.5 apply
 unchanged; v2.6 adds native/GPU-specific review.
@@ -12,12 +12,13 @@ unchanged; v2.6 adds native/GPU-specific review.
 
 | Language | Class |
 | --- | --- |
-| `c`, `cpp`, `c++` | `native` |
+| `c`, `cpp`, `c++`, `rust`, `zig` | `native` |
 | `cuda` | `gpu` |
 
 Native and GPU capsules are **always at least `review`** — never
-auto-approved — and report `not_lowerable` until real native execution
-exists.
+auto-approved. Checked C/C++ capsules and scalar/slice Rust capsules with explicit C
+ABI exports can execute through the process-isolated live bridge; Zig and GPU
+execution remain review-only.
 
 ## Metadata
 

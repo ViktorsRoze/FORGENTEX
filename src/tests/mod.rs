@@ -1,5 +1,6 @@
 mod abi;
 mod assembly;
+mod async_concurrency;
 mod audio_dsp;
 mod backend;
 mod borrow_conformance;
@@ -8,19 +9,25 @@ mod c_backend;
 mod canonical_ast;
 mod capsule;
 mod capsule_lock;
+mod capsule_runtime;
 mod capsule_tokens;
 mod capsule_workbench;
 mod cfg;
 mod checker;
+mod collections;
 mod compress;
 mod contract;
+mod control_flow;
 mod crypto;
 mod crypto_agent;
+mod debugger;
 mod diagnostic_catalog;
 mod dotnet_run;
 mod edit_bench;
 mod effects;
+mod enums;
 mod ffi;
+mod fn_values;
 mod formatter;
 mod fuzzing;
 mod go_run;
@@ -37,12 +44,14 @@ mod native_capsule;
 mod net_run;
 mod node_run;
 mod numeric;
+mod optimizer;
 mod ownership;
 mod package;
 mod parser;
 mod parser_infrastructure;
 mod patcher;
 mod perf;
+mod pipeline;
 mod polyglot;
 mod prelude;
 mod project;
@@ -61,6 +70,7 @@ mod tokens;
 mod trust;
 mod type_system;
 mod vscode_extension;
+mod warm_workers;
 mod workbench;
 mod zig_backend;
 
@@ -158,6 +168,51 @@ fn fixture(relative: &str) -> &'static str {
             include_str!("../../examples/capsule/order_total_java.fgx")
         }
         "examples/capsule/clamp_c.fgx" => include_str!("../../examples/capsule/clamp_c.fgx"),
+        "examples/capsule/clamp_rust.fgx" => {
+            include_str!("../../examples/capsule/clamp_rust.fgx")
+        }
+        "examples/capsule/clamp_zig.fgx" => {
+            include_str!("../../examples/capsule/clamp_zig.fgx")
+        }
+        "examples/capsule/sum_i16_rust.fgx" => {
+            include_str!("../../examples/capsule/sum_i16_rust.fgx")
+        }
+        "examples/capsule/sum_i16_zig.fgx" => {
+            include_str!("../../examples/capsule/sum_i16_zig.fgx")
+        }
+        "examples/capsule/add_gain_i16_rust.fgx" => {
+            include_str!("../../examples/capsule/add_gain_i16_rust.fgx")
+        }
+        "examples/capsule/add_gain_i16_zig.fgx" => {
+            include_str!("../../examples/capsule/add_gain_i16_zig.fgx")
+        }
+        "examples/capsule/make_bytes_c.fgx" => {
+            include_str!("../../examples/capsule/make_bytes_c.fgx")
+        }
+        "examples/capsule/make_bytes_rust.fgx" => {
+            include_str!("../../examples/capsule/make_bytes_rust.fgx")
+        }
+        "examples/capsule/sum_i16_c.fgx" => {
+            include_str!("../../examples/capsule/sum_i16_c.fgx")
+        }
+        "examples/capsule/add_gain_i16_c.fgx" => {
+            include_str!("../../examples/capsule/add_gain_i16_c.fgx")
+        }
+        "examples/capsule/add_gain_i16_cpp.fgx" => {
+            include_str!("../../examples/capsule/add_gain_i16_cpp.fgx")
+        }
+        "examples/capsule/render_params_c.fgx" => {
+            include_str!("../../examples/capsule/render_params_c.fgx")
+        }
+        "examples/capsule/render_params_rust.fgx" => {
+            include_str!("../../examples/capsule/render_params_rust.fgx")
+        }
+        "examples/capsule/render_params_zig.fgx" => {
+            include_str!("../../examples/capsule/render_params_zig.fgx")
+        }
+        "examples/capsule/scene_metrics_c.fgx" => {
+            include_str!("../../examples/capsule/scene_metrics_c.fgx")
+        }
         "examples/capsule/saxpy_cuda.fgx" => {
             include_str!("../../examples/capsule/saxpy_cuda.fgx")
         }

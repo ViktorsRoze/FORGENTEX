@@ -78,7 +78,7 @@ pub fn detect_python() -> Option<(String, String)> {
 
 /// Strip the common leading indentation so the body is valid top-level
 /// Python (the `code:` block is stored indented under the capsule).
-fn dedent(lines: &[String]) -> String {
+pub(crate) fn dedent(lines: &[String]) -> String {
     let indent = lines
         .iter()
         .filter(|l| !l.trim().is_empty())
@@ -99,7 +99,7 @@ fn dedent(lines: &[String]) -> String {
 }
 
 /// The entry function is the first top-level `def` in the body.
-fn find_entry(body: &str) -> Option<String> {
+pub(crate) fn find_entry(body: &str) -> Option<String> {
     for line in body.lines() {
         if let Some(rest) = line.strip_prefix("def ") {
             let name: String = rest
@@ -141,6 +141,50 @@ fn select<'a>(program: &'a Program, name: Option<&str>) -> Option<&'a Capsule> {
         .capsules()
         .filter(|c| c.language == "python")
         .find(|c| name.map(|n| n == c.name).unwrap_or(true))
+}
+
+/// Invoke a python capsule's entry with live, JSON-encoded positional arguments
+/// (a JSON array string), returning the entry's JSON result printed on stdout.
+///
+/// This is the live capsule runtime path (rt.1): the interpreter marshals real
+/// runtime values across the typed boundary and dispatches to the host python,
+/// instead of replaying mock fixtures. The call is gated by the capsule's
+/// sandbox approval just like the fixture runner.
+pub fn invoke_live(capsule: &Capsule, json_args: &str) -> Result<String, String> {
+    if !crate::sandbox::is_approved(capsule) {
+        return Err("capsule effects are not covered by its sandbox".to_string());
+    }
+    let body = dedent(&capsule.code);
+    let entry =
+        find_entry(&body).ok_or_else(|| "no top-level def found in capsule body".to_string())?;
+    let (py_name, _version) = detect_python()
+        .ok_or_else(|| "no host python found (looked for $PYTHON, python3, python)".to_string())?;
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LIVE_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = LIVE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("forgentex_{}_{}_pylive", std::process::id(), seq));
+    std::fs::create_dir_all(&dir).map_err(|err| format!("failed to create scratch dir: {err}"))?;
+    let driver_path = dir.join("driver.py");
+    let driver = format!(
+        "import json, sys\n{body}\n_inputs = json.loads(sys.argv[1])\n_result = {entry}(*_inputs)\nprint(json.dumps(_result))\n"
+    );
+    std::fs::write(&driver_path, driver).map_err(|err| format!("failed to write driver: {err}"))?;
+
+    let output = Command::new(&py_name)
+        .arg(&driver_path)
+        .arg(json_args)
+        .output()
+        .map_err(|err| format!("failed to spawn python: {err}"))?;
+    let _ = std::fs::remove_dir_all(&dir);
+    if !output.status.success() {
+        return Err(format!(
+            "python capsule '{}' raised: {}",
+            capsule.name,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 pub fn run(file: &str, program: &Program, name: Option<&str>) -> Result<PythonRun, String> {

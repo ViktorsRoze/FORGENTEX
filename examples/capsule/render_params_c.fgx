@@ -1,0 +1,23 @@
+# native-call v1.4: a reviewed `@repr(C)` scalar-field record crosses by value.
+# Native code includes the generated private `types.h` declaration.
+
+@repr(C)
+struct RenderParams:
+    width: i32
+    height: i32
+    exposure: f32
+
+foreign score_render_params c version "c11" effects [cpu.avx2]:
+    input params: RenderParams
+    output score: i32
+    sandbox "fs.none"
+    code:
+        #include "types.h"
+        #include <stdint.h>
+
+        int32_t score_render_params(RenderParams params) {
+            return params.width + params.height + (int32_t)params.exposure;
+        }
+
+fn render_param_score(params: RenderParams) -> i32 effects [cpu.avx2]:
+    return score_render_params(params)

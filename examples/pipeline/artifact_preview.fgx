@@ -1,0 +1,50 @@
+# Deterministic owned-artifact handoff: scalar seed -> owned bytes -> checksum.
+
+share preview_seed: i32 = 4
+share preview_bytes: Vec[u8]
+share preview_checksum: i32 = 0
+
+foreign make_preview_bytes c version "c11" effects [alloc]:
+    input count: i32
+    output bytes: Vec[u8]
+    sandbox "fs.none"
+    sandbox "artifact.media_type application/octet-stream"
+    sandbox "artifact.max_bytes 1048576"
+    bind preview_seed read
+    bind preview_bytes rw
+    code:
+        #include "types.h"
+        #include <stdlib.h>
+
+        FgxOwnedU8 make_preview_bytes(int32_t count) {
+            FgxOwnedU8 result = { NULL, 0, 0 };
+            if (count <= 0) return result;
+            result.ptr = (uint8_t *)malloc((size_t)count);
+            if (result.ptr == NULL) return result;
+            result.len = (size_t)count;
+            result.capacity = (size_t)count;
+            for (size_t i = 0; i < result.len; ++i) result.ptr[i] = (uint8_t)(i + 1);
+            return result;
+        }
+
+        void make_preview_bytes_free(uint8_t *ptr, size_t len, size_t capacity) {
+            (void)len;
+            (void)capacity;
+            free(ptr);
+        }
+
+foreign checksum_preview c version "c11" effects [cpu]:
+    input bytes: &[u8]
+    output checksum: i32
+    sandbox "fs.none"
+    bind preview_bytes read
+    bind preview_checksum rw
+    code:
+        #include <stddef.h>
+        #include <stdint.h>
+
+        int32_t checksum_preview(const uint8_t *bytes, size_t bytes_len) {
+            int32_t result = 0;
+            for (size_t i = 0; i < bytes_len; ++i) result += bytes[i];
+            return result;
+        }

@@ -106,6 +106,109 @@ fn valid_capsule_has_no_contract_diagnostics() {
 }
 
 #[test]
+fn artifact_policy_requires_typed_owned_bytes_and_a_bounded_media_contract() {
+    let missing_limit = human(
+        "foreign render c version \"c11\":\n    output bytes: Vec[u8]\n    sandbox \"fs.none\"\n    sandbox \"artifact.media_type image/png\"\n    code:\n        int render(void) { return 0; }\n",
+    );
+    let diagnostics = validate(&missing_limit);
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "capsule_invalid_artifact_policy"));
+
+    let wrong_output = human(
+        "foreign render c version \"c11\":\n    output value: i32\n    sandbox \"fs.none\"\n    sandbox \"artifact.media_type image/png\"\n    sandbox \"artifact.max_bytes 1024\"\n    code:\n        int render(void) { return 0; }\n",
+    );
+    assert!(validate(&wrong_output).iter().any(|diagnostic| diagnostic
+        .message
+        .contains("requires exactly one owned Vec[u8]")));
+
+    let unsafe_path = human(
+        "foreign render c version \"c11\" effects [fs.write]:\n    output bytes: Vec[u8]\n    sandbox \"fs.write build/artifacts\"\n    sandbox \"artifact.media_type image/png\"\n    sandbox \"artifact.max_bytes 1024\"\n    sandbox \"artifact.path ../escape.png\"\n    code:\n        int render(void) { return 0; }\n",
+    );
+    assert!(validate(&unsafe_path)
+        .iter()
+        .any(|diagnostic| diagnostic.message.contains("without parent traversal")));
+
+    let uncovered_path = human(
+        "foreign render c version \"c11\":\n    output bytes: Vec[u8]\n    sandbox \"fs.none\"\n    sandbox \"artifact.media_type image/png\"\n    sandbox \"artifact.max_bytes 1024\"\n    sandbox \"artifact.path build/render.png\"\n    code:\n        int render(void) { return 0; }\n",
+    );
+    assert!(validate(&uncovered_path)
+        .iter()
+        .any(|diagnostic| diagnostic.message.contains("requires the fs.write effect")));
+}
+
+#[test]
+fn preview_render_policy_requires_seed_artifact_effect_and_budgets() {
+    let source = include_str!("../../examples/pipeline/render_preview.fgx");
+    let program = human(source);
+    assert!(validate(&program).is_empty());
+    let renderer = program
+        .capsules()
+        .find(|capsule| capsule.name == "render_ppm_preview")
+        .unwrap();
+    let policy = crate::capsule::render_policy(renderer)
+        .unwrap()
+        .expect("render policy");
+    assert_eq!(policy.profile, "preview");
+    assert_eq!(policy.seed_field, "seed");
+
+    let missing_budget = human(&source.replacen("    sandbox \"limit.mem_mb 64\"\n", "", 1));
+    assert!(validate(&missing_budget).iter().any(|diagnostic| {
+        diagnostic.code == "capsule_invalid_render_policy"
+            && diagnostic.message.contains("requires limit.mem_mb")
+    }));
+
+    let wrong_media =
+        human(&source.replacen("image/x-portable-pixmap", "application/octet-stream", 1));
+    assert!(validate(&wrong_media).iter().any(|diagnostic| {
+        diagnostic.code == "capsule_invalid_render_policy"
+            && diagnostic
+                .message
+                .contains("must be an image/* or application/x-forgentex-rgb")
+    }));
+}
+
+#[test]
+fn image_encode_policy_requires_raw_input_image_output_effect_and_budgets() {
+    let source = include_str!("../../examples/pipeline/render_encode_preview.fgx");
+    let program = human(source);
+    assert!(validate(&program).is_empty());
+    let encoder = program
+        .capsules()
+        .find(|capsule| capsule.name == "encode_ppm_preview")
+        .unwrap();
+    let policy = crate::capsule::encode_policy(encoder)
+        .unwrap()
+        .expect("encode policy");
+    assert_eq!(policy.profile, "ppm");
+
+    let missing_budget = human(&source.replacen("    sandbox \"limit.mem_mb 64\"\n", "", 2));
+    assert!(validate(&missing_budget).iter().any(|diagnostic| {
+        diagnostic.code == "capsule_invalid_encode_policy"
+            && diagnostic.message.contains("requires limit.mem_mb")
+    }));
+
+    let wrong_input =
+        human(&source.replacen("    input frame: &[u8]", "    input frame: &mut [u8]", 1));
+    assert!(validate(&wrong_input).iter().any(|diagnostic| {
+        diagnostic.code == "capsule_invalid_encode_policy"
+            && diagnostic
+                .message
+                .contains("exactly one immutable &[u8] input")
+    }));
+
+    let wrong_output = human(&source.replacen(
+        "artifact.media_type image/x-portable-pixmap",
+        "artifact.media_type application/octet-stream",
+        1,
+    ));
+    assert!(validate(&wrong_output).iter().any(|diagnostic| {
+        diagnostic.code == "capsule_invalid_encode_policy"
+            && diagnostic.message.contains("must start with image/")
+    }));
+}
+
+#[test]
 fn review_report_classifies_managed_and_high_risk() {
     let managed = parse_fixture("examples/capsule/normalize_python.fgx");
     let report = analyze("normalize_python.fgx", &managed);

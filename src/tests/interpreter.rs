@@ -1,6 +1,8 @@
+use std::fs;
 use std::path::Path;
 
-use crate::interp::{run_demo, run_entry_json};
+use crate::backend::generate_backend_ir;
+use crate::interp::{run_demo, run_demo_with_ir, run_entry_json};
 use crate::parser::parse_file;
 use crate::typecheck::check;
 
@@ -12,6 +14,29 @@ fn audio_mix_interpreter_demo_passes() {
     let output = run_demo(&program).unwrap();
     assert!(output.contains("run mix_samples: pass"));
     assert!(output.contains("dst: [5500, 0, -12000, 17000]"));
+}
+
+#[test]
+fn demo_run_with_ir_executes_fir_body_instead_of_ast_body() {
+    let root = std::env::temp_dir().join(format!("forgentex_{}_demo_fir_body", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let ir_path = root.join("clamp_demo.fgx");
+    fs::write(
+        &ir_path,
+        "fn clamp_i16(x: f32) -> i16:\n    return i16(7)\n",
+    )
+    .unwrap();
+    let ir = generate_backend_ir(&ir_path).unwrap();
+    let ast_program = parse_file(
+        Path::new("clamp_demo_ast.fgx"),
+        "fn clamp_i16(x: f32) -> i16:\n    return i16(0)\n",
+    )
+    .unwrap();
+
+    let output = run_demo_with_ir(&ast_program, &ir).unwrap();
+    assert!(output.contains("run clamp_i16(40000.0): 7"), "{output}");
+    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]

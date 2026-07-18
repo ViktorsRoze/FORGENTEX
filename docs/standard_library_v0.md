@@ -61,6 +61,43 @@ fgx stdlib --json
 - `core_math_checked_mul_i32(left, right) -> i32`
 - `core_math_saturating_add_i16(left, right) -> i16`
 
+`core.music`:
+
+- `MusicalTime { bar, beat, tick }` with one-based bars/beats
+- `TempoMap { change_tick, initial_bpm, next_bpm }` for one bounded tempo change
+- `MusicCue { version, cue_id, action_id, track, start_tick, duration_ticks, priority }`
+- `SceneAction { version, action_id, kind, target_id, parameter_q16, seed, max_instances }`
+- `core_music_position_valid(position, beats_per_bar, ticks_per_beat) -> bool`
+- `core_music_to_tick(position, beats_per_bar, ticks_per_beat) -> u32`
+- `core_music_bar_start_tick(bar, beats_per_bar, ticks_per_beat) -> u32`
+- `core_music_tick_to_millis(tick, bpm, ticks_per_beat) -> u32`
+- `core_music_quantize_tick(tick, grid_ticks) -> u32`
+- `core_music_make_cue(...) -> MusicCue`
+- `core_music_make_action(...) -> SceneAction`
+- `core_music_action_valid(action, instance_limit) -> bool`
+- `core_music_cue_valid(cue, track_count, timeline_ticks) -> bool`
+- `core_music_cue_action_valid(cue, action, track_count, timeline_ticks, instance_limit) -> bool`
+- `core_music_cues_overlap(left, right) -> bool`
+- `core_music_cues_conflict(left, right) -> bool`
+- `core_music_cue_wins(left, right) -> bool`
+- `core_music_conflict_winner_id(left, right) -> u32`
+- `core_music_tempo_map_valid(tempo_map, ticks_per_beat) -> bool`
+- `core_music_tempo_map_millis(tempo_map, tick, ticks_per_beat) -> u32`
+
+All time conversion uses integer milliseconds rounded down. Cue quantization
+uses nearest-grid rounding with exact half-grid ties moving forward. The
+validator rejects a zero change tick, zero BPM, and zero tick rates; callers
+validate before conversion, while zero divisors still produce deterministic
+interpreter traps if they bypass validation. Millisecond intermediates widen
+to `u64` so useful timelines do not overflow the public `u32` tick inputs.
+`MusicCue` version 1 uses half-open intervals, same-track conflicts, higher-
+priority wins, and lower cue ID as the stable tie-break. Its numeric action ID
+must refer to an approved scene-action table; it is not executable code. See
+[`music_timeline.md`](music_timeline.md).
+`SceneAction` version 1 defines one bounded table entry: reveal, emit, camera
+key, or material key. Emitters require an explicit seed; all actions obey the
+caller's instance budget, and the cue/action validator requires matching IDs.
+
 `core.option`:
 
 - `core_option_some_u8(value) -> Option[u8]`
@@ -169,6 +206,7 @@ Those names still work in v0. Stage 16 adds standard-library names on top:
 - `core_mem_*`
 - `core_fs_*`, `core_net_*`, `core_serialize_*`, and `core_stream_*`
 - `core_crypto_*` and `core_agent_*`
+- `core_music_*`
 
 New examples should prefer the `core_*` names.
 
@@ -184,6 +222,8 @@ The media examples now use standard library APIs for reusable behavior:
   `core.stream`
 - Stage 18 agent examples use `core.crypto` and `core.agent` for signed patch
   and mock payment receipt flows
+- the music visualizer uses `core.music` for authored marker positions,
+  deterministic cue grids, and tempo-map conversion
 
 This keeps demo code from depending on ad hoc compiler magic while preserving a
 small implementation surface.
@@ -226,7 +266,7 @@ Later libraries, after the ownership and allocation story is stronger:
 | `core.collections` | Small vectors, maps, ring buffers, and sets. | Needs allocation/fixed-buffer policy and generic APIs. |
 | `core.time` | Mock clock, monotonic time, durations, and timers. | Real time is platform/runtime dependent; deterministic mock time comes first. |
 | `core.log` | Structured logging and trace events. | Needs stable effect and output policy for production use. |
-| `core.concurrent` | Atomics, tasks, channels, or async primitives. | Deferred until the memory model and runtime story are mature. |
+| `core.concurrent` | Deterministic cooperative `Task[T]`, bounded affine `TaskGroup[T]`, and bounded `Channel[T]` interpreter primitives; ordered joins, group cancellation propagation, and explicit concurrency effects. | Partial: real parallel scheduling, nested scopes, suspension, atomics, timers, and async I/O remain deferred. |
 
 The butterfly ray-grid benchmark described in
 [`docs/token_efficiency_benchmarks.md`](token_efficiency_benchmarks.md) should be

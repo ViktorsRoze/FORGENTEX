@@ -48,7 +48,7 @@ pub struct DotnetRun {
     pub message: Option<String>,
 }
 
-struct Dotnet {
+pub struct Dotnet {
     exe: String,
     version: String,
     tfm: String,
@@ -92,7 +92,7 @@ fn tfm_for_sdk(exe: &str) -> String {
     }
 }
 
-fn detect_dotnet() -> Option<Dotnet> {
+pub fn detect_dotnet() -> Option<Dotnet> {
     for exe in dotnet_candidates() {
         if let Ok(output) = Command::new(&exe).arg("--version").output() {
             if output.status.success() {
@@ -190,6 +190,113 @@ fn matches(expected: &CapsuleValue, got: &str) -> bool {
         CapsuleValue::Bool(b) => got.eq_ignore_ascii_case(if *b { "true" } else { "false" }),
         CapsuleValue::Str(s) => got.trim_matches('"') == s,
     }
+}
+
+/// Invoke a C# capsule's entry with live, plain-string positional arguments,
+/// returning the entry's result in JSON form on stdout. Like the JVM path, .NET
+/// is compiled with no stdlib JSON splat, so this is the type-directed boundary:
+/// each argument is parsed into its declared type (`csharp_parse`) and the
+/// result is printed as JSON (numbers culture-invariant, booleans lowercased,
+/// strings quoted) so the interpreter parses it back uniformly. Gated by the
+/// capsule's sandbox approval (the live capsule runtime, rt.1).
+///
+/// Best-effort placeholder: this mirrors the verified JVM path but is **not
+/// exercised on a box without a .NET SDK**, so treat it as unproven until a host
+/// `dotnet` runs the gated test.
+pub fn invoke_live(capsule: &Capsule, args: &[String]) -> Result<String, String> {
+    if !crate::sandbox::is_approved(capsule) {
+        return Err("capsule effects are not covered by its sandbox".to_string());
+    }
+    let body = dedent(&capsule.code);
+    let class = find_class(&body).ok_or_else(|| "no class found in capsule body".to_string())?;
+    let method = find_method(&body)
+        .ok_or_else(|| "no public static method found in capsule body".to_string())?;
+    let dotnet = detect_dotnet()
+        .ok_or_else(|| "no host .NET found (looked for $DOTNET, dotnet)".to_string())?;
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LIVE_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = LIVE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "forgentex_{}_{}_dotnetlive",
+        std::process::id(),
+        seq
+    ));
+    std::fs::create_dir_all(&dir).map_err(|err| format!("failed to create scratch dir: {err}"))?;
+
+    let arg_exprs = capsule
+        .inputs
+        .iter()
+        .enumerate()
+        .map(|(i, b)| csharp_parse(&b.ty.to_agent(), i))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let call = format!("{class}.{method}({arg_exprs})");
+    // Print the result as JSON, by the declared output type.
+    let out_ty = capsule
+        .outputs
+        .first()
+        .map(|o| o.ty.to_agent())
+        .unwrap_or_default();
+    let print = match out_ty.as_str() {
+        "str" => format!(
+            "string _r = {call};\n        System.Console.WriteLine(\"\\\"\" + _r.Replace(\"\\\\\", \"\\\\\\\\\").Replace(\"\\\"\", \"\\\\\\\"\") + \"\\\"\");"
+        ),
+        "bool" => format!("System.Console.WriteLine(({call}) ? \"true\" : \"false\");"),
+        "f32" | "f64" => format!(
+            "System.Console.WriteLine(System.Convert.ToString({call}, System.Globalization.CultureInfo.InvariantCulture));"
+        ),
+        _ => format!("System.Console.WriteLine({call});"),
+    };
+    let program_cs = format!(
+        "class ForgentexDriver {{\n    static void Main(string[] args) {{\n        {print}\n    }}\n}}\n{body}\n"
+    );
+    let csproj = format!(
+        "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>{}</TargetFramework></PropertyGroup></Project>\n",
+        dotnet.tfm
+    );
+    std::fs::write(dir.join("Program.cs"), program_cs)
+        .map_err(|err| format!("failed to write csharp source: {err}"))?;
+    std::fs::write(dir.join("app.csproj"), csproj)
+        .map_err(|err| format!("failed to write csproj: {err}"))?;
+
+    let out_dir = dir.join("out");
+    let build = Command::new(&dotnet.exe)
+        .arg("build")
+        .arg(dir.join("app.csproj"))
+        .arg("-c")
+        .arg("Release")
+        .arg("-o")
+        .arg(&out_dir)
+        .output()
+        .map_err(|err| format!("failed to launch dotnet: {err}"))?;
+    if !build.status.success() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(format!(
+            "dotnet build failed for capsule '{}': {}{}",
+            capsule.name,
+            String::from_utf8_lossy(&build.stderr).trim(),
+            String::from_utf8_lossy(&build.stdout).trim()
+        ));
+    }
+
+    let mut command = Command::new(&dotnet.exe);
+    command.arg(out_dir.join("app.dll"));
+    for arg in args {
+        command.arg(arg);
+    }
+    let output = command
+        .output()
+        .map_err(|err| format!("failed to spawn dotnet: {err}"))?;
+    let _ = std::fs::remove_dir_all(&dir);
+    if !output.status.success() {
+        return Err(format!(
+            "csharp capsule '{}' raised: {}",
+            capsule.name,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn select<'a>(program: &'a Program, name: Option<&str>) -> Option<&'a Capsule> {

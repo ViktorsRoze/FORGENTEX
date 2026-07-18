@@ -1,0 +1,5 @@
+struct Holder:
+    view: &[u8]
+
+fn bad(holder: Holder) -> &[u8]:
+    return holder.view

@@ -1,0 +1,32 @@
+# Native-call v1.22: C transfers a broader Vec[i32] through the reviewed ABI.
+
+foreign make_values_c c version "c11" effects [alloc, cpu.avx2]:
+    input count: i32
+    output values: Vec[i32]
+    sandbox "fs.none"
+    code:
+        #include "types.h"
+        #include <stdint.h>
+        #include <stdlib.h>
+
+        FgxOwnedI32 make_values_c(int32_t count) {
+            FgxOwnedI32 result = { NULL, 0, 0 };
+            if (count <= 0) return result;
+            result.ptr = (int32_t *)malloc((size_t)count * sizeof(int32_t));
+            if (result.ptr == NULL) return result;
+            result.len = (size_t)count;
+            result.capacity = (size_t)count;
+            for (size_t i = 0; i < result.len; ++i) {
+                result.ptr[i] = ((int32_t)i - 2) * 100000;
+            }
+            return result;
+        }
+
+        void make_values_c_free(int32_t *ptr, size_t len, size_t capacity) {
+            (void)len;
+            (void)capacity;
+            free(ptr);
+        }
+
+fn values_from_c(count: i32) -> Vec[i32] effects [alloc, cpu.avx2]:
+    return make_values_c(count)

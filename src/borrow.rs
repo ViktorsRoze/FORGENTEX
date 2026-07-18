@@ -432,11 +432,16 @@ impl RegionBuilder {
                 }
                 self.collect_expr_uses(expr, node);
             }
-            Stmt::Return(None) => {}
+            Stmt::Return(None) | Stmt::Break | Stmt::Continue => {}
             Stmt::Require(expr) | Stmt::Expr(expr) => self.collect_expr_uses(expr, node),
-            Stmt::If { cond, then_body } => {
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
                 self.collect_expr_uses(cond, node);
                 self.with_child_scope(|builder| builder.walk_statements(then_body));
+                self.with_child_scope(|builder| builder.walk_statements(else_body));
             }
             Stmt::For {
                 start, end, body, ..
@@ -444,6 +449,16 @@ impl RegionBuilder {
                 self.collect_expr_uses(start, node);
                 self.collect_expr_uses(end, node);
                 self.with_child_scope(|builder| builder.walk_statements(body));
+            }
+            Stmt::While { cond, body } => {
+                self.collect_expr_uses(cond, node);
+                self.with_child_scope(|builder| builder.walk_statements(body));
+            }
+            Stmt::Match { scrutinee, arms } => {
+                self.collect_expr_uses(scrutinee, node);
+                for arm in arms {
+                    self.with_child_scope(|builder| builder.walk_statements(&arm.body));
+                }
             }
             Stmt::Assign { target, expr } => {
                 self.collect_assign_target(target, node);
@@ -496,6 +511,7 @@ impl RegionBuilder {
 
     fn collect_expr_uses(&mut self, expr: &Expr, node: &str) {
         match expr {
+            Expr::Lambda { body, .. } => self.collect_expr_uses(body, node),
             Expr::Var(name) => {
                 if let Some(binding) = self.bindings.get(name).cloned() {
                     self.add_use(&binding.root, "read", name, node);
@@ -529,7 +545,11 @@ impl RegionBuilder {
                 self.collect_expr_uses(base, node);
                 self.collect_expr_uses(index, node);
             }
-            Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::String(_) => {}
+            Expr::Int(_)
+            | Expr::Float(_)
+            | Expr::Bool(_)
+            | Expr::String(_)
+            | Expr::TraitConst { .. } => {}
         }
     }
 
@@ -541,10 +561,12 @@ impl RegionBuilder {
 
     fn borrow_root(&self, expr: &Expr) -> Option<String> {
         match expr {
+            Expr::Lambda { .. } => None,
             Expr::Var(name) => self.bindings.get(name).map(|binding| binding.root.clone()),
             Expr::Field { base, .. } | Expr::Index { base, .. } => self.borrow_root(base),
             Expr::Cast { expr, .. } | Expr::Unary { expr, .. } => self.borrow_root(expr),
             Expr::Call { .. }
+            | Expr::TraitConst { .. }
             | Expr::Binary { .. }
             | Expr::Int(_)
             | Expr::Float(_)
@@ -658,11 +680,17 @@ fn target_var(expr: &Expr) -> Option<&str> {
 
 fn expr_place(expr: &Expr) -> String {
     match expr {
+        Expr::Lambda { .. } => "<lambda>".to_string(),
         Expr::Int(value) => value.to_string(),
         Expr::Float(value) => value.to_string(),
         Expr::Bool(value) => value.to_string(),
         Expr::String(value) => format!("\"{}\"", value.replace('"', "\\\"")),
         Expr::Var(name) => name.clone(),
+        Expr::TraitConst {
+            trait_name,
+            name,
+            for_type,
+        } => format!("{trait_name}::{name}[{}]", for_type.to_agent()),
         Expr::Unary { op, expr } => format!("{op}{}", expr_place(expr)),
         Expr::Binary { op, left, right } => {
             format!("({} {op} {})", expr_place(left), expr_place(right))

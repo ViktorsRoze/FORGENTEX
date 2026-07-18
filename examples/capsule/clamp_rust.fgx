@@ -1,0 +1,14 @@
+# Live Rust scalar capsule through the reviewed C ABI and isolated child.
+
+foreign clamp_rust rust version "2021" effects [cpu.avx2]:
+    input value: i32
+    output result: i16
+    sandbox "fs.none"
+    code:
+        #[unsafe(no_mangle)]
+        pub extern "C" fn clamp_rust(value: i32) -> i16 {
+            value.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+        }
+
+fn clamp_with_rust(value: i32) -> i16 effects [cpu.avx2]:
+    return clamp_rust(value)

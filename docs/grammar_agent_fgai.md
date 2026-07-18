@@ -10,7 +10,7 @@ as `.fgx`.
 
 ```text
 file        ::= item*
-item        ::= attribute* (struct_decl | function_decl)
+item        ::= attribute* (struct_decl | trait_decl | trait_impl | function_decl)
 ```
 
 ## Declarations
@@ -25,8 +25,16 @@ field_list  ::= field (";" field)* ";"?
 field       ::= ident type inline_attribute*
 inline_attribute ::= "@" ident ("(" attr_args? ")")?
 
-function_decl ::= function_marker ident "(" params? ")" return_type? effects? "{" stmt* "}"
+trait_decl  ::= "TR" ident "{" trait_item* "}"
+trait_item  ::= "REQ" ident "(" params? ")" return_type ("DEFAULT" ident)? | "CONST" ident type | "TYPE" ident
+trait_impl  ::= "IM" type_params? ident type "{" impl_item* "}"
+impl_item   ::= "BIND" ident ident | "CONST" ident "=" const_expr | "TYPE" ident "=" type
+
+function_decl ::= function_marker ident type_params? "(" params? ")" return_type? effects? "{" stmt* "}"
 function_marker ::= "F" | "UF"
+type_params ::= "[" type_param ("," type_param)* "]"
+type_param  ::= ident (":" trait_bound ("+" trait_bound)*)?
+trait_bound ::= ident
 params      ::= param ("," param)*
 param       ::= ident type
 return_type ::= "->" type
@@ -35,6 +43,9 @@ effect      ::= ident ("." ident)*
 ```
 
 `UF` means unsafe function.
+
+`Eq` is built in. Other bound names must have a `TR` declaration, and concrete
+types satisfy them only through an `IM` declaration.
 
 ## Statements
 
@@ -77,6 +88,8 @@ Assembly blocks are only valid inside `UF` functions.
 ```text
 type        ::= primitive_type
              | named_type
+             | associated_type
+             | projected_type
              | generic_type
              | array_type
              | slice_type
@@ -90,11 +103,18 @@ primitive_type ::= "bool"
                  | "void"
 
 named_type  ::= ident
+associated_type ::= "Self" "::" ident
+projected_type ::= ident "::" ident "[" type "]"
 generic_type ::= ident "[" type ("," type)* "]"
+fn_binder   ::= ident [":" ident ("+" ident)*]
 array_type  ::= "[" type ";" int_literal "]"
 slice_type  ::= "&[" type "]" | "&mut[" type "]"
 pointer_type ::= "*const" type | "*mut" type
 ```
+
+The `Fn` generic reserves an optional leading `forall[fn_binder, …]` marker
+and an optional final `effects[...]` marker. For example,
+`Fn[forall[T:Eq],T,T,bool]` is a generic equality-shaped callable.
 
 The parser accepts unannotated `LET` statements, but Stage 4 type checking
 requires local `LET` bindings to include an explicit type annotation.
@@ -109,11 +129,13 @@ binary_expr ::= unary_expr (binary_op unary_expr)*
 unary_expr  ::= unary_op unary_expr | postfix_expr
 postfix_expr ::= primary_expr postfix*
 postfix     ::= "." ident | "[" expr "]"
-primary_expr ::= literal | ident | call_expr | cast_expr | "(" expr ")"
+primary_expr ::= literal | ident | call_expr | trait_const_expr | cast_expr | "(" expr ")"
 call_expr   ::= ident "(" args? ")"
+trait_const_expr ::= ident "::" ident "[" type "]"
 cast_expr   ::= primitive_type "(" expr ")"
 args        ::= expr ("," expr)*
 literal     ::= int_literal | float_literal | bool_literal | string_literal
+const_expr  ::= literal | unary_op const_expr | primitive_type "(" const_expr ")"
 ```
 
 ## Canonical Formatting Rules

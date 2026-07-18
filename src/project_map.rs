@@ -43,6 +43,30 @@ pub fn generate_map_with_options(
                         token_cost
                     ));
                 }
+                Item::Enum(decl) => {
+                    out.push_str(&format!(
+                        "  E {} {} variants={} tokens~{}\n",
+                        decl.name,
+                        decl.id,
+                        decl.variants.len(),
+                        token_cost
+                    ));
+                }
+                Item::Trait(decl) => {
+                    out.push_str(&format!(
+                        "  TR {} {} tokens~{}\n",
+                        decl.name, decl.id, token_cost
+                    ));
+                }
+                Item::TraitImpl(decl) => {
+                    out.push_str(&format!(
+                        "  IM {} {} {} tokens~{}\n",
+                        decl.trait_name,
+                        decl.for_type.to_agent(),
+                        decl.id,
+                        token_cost
+                    ));
+                }
                 Item::Function(function) => {
                     let safety = if function.unsafe_fn { " unsafe" } else { "" };
                     let asm = if function.has_asm() { " asm" } else { "" };
@@ -129,6 +153,21 @@ pub fn get_symbol(root: &Path, target: &str, deps: Option<&str>) -> Result<Strin
                     }
                     if seen_structs.insert(decl.id.clone()) {
                         structs.push(item);
+                    }
+                }
+                Item::Enum(decl) => {
+                    if target == decl.id {
+                        found = Some(item);
+                    }
+                }
+                Item::Trait(decl) => {
+                    if target == decl.id {
+                        found = Some(item);
+                    }
+                }
+                Item::TraitImpl(decl) => {
+                    if target == decl.id {
+                        found = Some(item);
                     }
                 }
                 Item::Function(function) => {

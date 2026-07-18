@@ -1,0 +1,15 @@
+# Rust read-only slice: temporary `*const i16` plus `usize` length.
+
+foreign sum_i16_rust rust version "2021" effects [cpu.avx2]:
+    input samples: &[i16]
+    output total: i32
+    sandbox "fs.none"
+    code:
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn sum_i16_rust(samples: *const i16, samples_len: usize) -> i32 {
+            let samples = unsafe { std::slice::from_raw_parts(samples, samples_len) };
+            samples.iter().map(|value| i32::from(*value)).sum()
+        }
+
+fn sum_with_rust(samples: &[i16]) -> i32 effects [cpu.avx2]:
+    return sum_i16_rust(samples)

@@ -1,0 +1,32 @@
+# Owned-output v1: C returns a bounded byte allocation plus an explicit free.
+
+foreign make_bytes_c c version "c11" effects [alloc, cpu.avx2]:
+    input count: i32
+    output bytes: Vec[u8]
+    sandbox "fs.none"
+    sandbox "artifact.media_type application/octet-stream"
+    sandbox "artifact.max_bytes 1048576"
+    code:
+        #include "types.h"
+        #include <stdint.h>
+        #include <stdlib.h>
+
+        FgxOwnedU8 make_bytes_c(int32_t count) {
+            FgxOwnedU8 result = { NULL, 0, 0 };
+            if (count <= 0) return result;
+            result.ptr = (uint8_t *)malloc((size_t)count);
+            if (result.ptr == NULL) return result;
+            result.len = (size_t)count;
+            result.capacity = (size_t)count;
+            for (size_t i = 0; i < result.len; ++i) result.ptr[i] = (uint8_t)(i + 1);
+            return result;
+        }
+
+        void make_bytes_c_free(uint8_t *ptr, size_t len, size_t capacity) {
+            (void)len;
+            (void)capacity;
+            free(ptr);
+        }
+
+fn bytes_from_c(count: i32) -> Vec[u8] effects [alloc, cpu.avx2]:
+    return make_bytes_c(count)

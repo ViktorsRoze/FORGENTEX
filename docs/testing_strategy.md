@@ -103,6 +103,10 @@ Effect tests:
 
 - Function effect declarations parse, format, roundtrip, and appear in canonical AST.
 - Calls to effectful functions require matching caller declarations.
+- Effectful named functions and closures type as
+  `Fn[P…, R, effects[E…]]`; indirect calls propagate that annotated set.
+- Pure/wider `Fn` contracts enforce effect-subset assignment, and unknown,
+  duplicate, or misplaced effect markers produce stable diagnostics.
 - Builtin capability functions infer effects such as `io.read`, `fs.read`, `network.write`, `crypto.sign`, and `alloc`.
 - `memory.raw` and `cpu.asm` require an unsafe boundary.
 - `fgx effects <file> --json` has a stable schema.
@@ -197,7 +201,8 @@ Package manager and build-system tests:
 - `fgx test --project <path> --all-targets --json` checks x86_64, AArch64, and
   RISC-V targets for root packages and local path dependencies.
 - `fgx build <project> --backend c --all-targets --out <dir> --json` writes
-  target-specific artifacts under `<out>/<profile>/<target>`.
+  target-specific artifacts and FIR receipt metadata under
+  `<out>/<profile>/<target>`.
 - `fgx publish <project> --dry-run --json` emits package readiness, source file
   lists, lock graph size, package verification status, and deferred registry
   upload checks.
@@ -322,10 +327,75 @@ C backend tests:
 Backend strategy tests:
 
 - `fgx backends` and `fgx backends --json` list the available C and Zig backends and planned Cranelift, LLVM, and MLIR backends.
-- `fgx ir <project>` emits deterministic human-readable FGIR with module, struct, function, effect, target, and review-only assembly metadata.
-- `fgx ir <project> --json` emits the `forgentex.backend_ir.v1` schema.
-- `fgx ir <project> --contract-json` emits the frontend contract used to prove backend choice does not alter AST/check/effects semantics.
+- `fgx ir <project|file>` emits deterministic human-readable FGIR with module, enum, struct, function, effect, target, and review-only assembly metadata.
+- `fgx ir <project|file> --json` emits the `forgentex.backend_ir.v1` schema.
+- `fgx ir <project|file> --contract-json` emits the frontend contract used to prove backend choice does not alter AST/check/effects semantics.
+- `fgx run <file> --entry <function> --backend interp`, including `--live`,
+  preflights the selected entry against its FIR backend contract and executes
+  FIR-backed interpreter bodies.
+- `fgx run <file>` default demo execution generates FGIR and runs the demo
+  entry from the FIR body.
+- `fgx io-run` and `fgx net-run` preserve their gated runtime transcripts while
+  executing helper entries from generated FIR.
+- Direct interpreter helper tests exercise in-memory FGIR lowering by default,
+  including JSON entry runs, live capsule runs, and gated I/O/network hosts.
 - `fgx build <project> --backend zig` writes deterministic Zig source while `--backend c` remains the reference build path.
+- `fgx build <project> --backend c|zig` writes `forgentex.fgir.json` and
+  `forgentex.backend_build.json` metadata for successful source builds.
+- FIR backend contracts report source-backend blockers for runtime-only
+  effects, generic runtime types, interpreter-only intrinsics, and foreign
+  capsule calls before C/Zig source emission.
+- C/Zig build preflight also reports FIR declaration blockers such as generic
+  struct fields before source/header emission.
+- Eligible private generic functions with fully concrete direct calls are
+  deterministically monomorphized before C/Zig FIR preflight; nested calls,
+  literal context, raw/source/optimized entry paths, and retained blockers for
+  exported or uncalled templates are covered in `tests/fn_values.rs`.
+- `T: Eq` bounds round-trip in `.fgx`, `.fgai`, and canonical AST data; generic
+  equality requires the bound and concrete call sites must satisfy it.
+- Bounds propagate through generic wrappers and eligible private bounded helpers
+  still monomorphize. Generic function values preserve ordered parameters and
+  bounds in `Fn[forall[...], ...]`; tests cover dual-syntax round-trip,
+  alpha-renamed higher-order assignment, bound narrowing/rejection, fresh
+  per-call inference, interpreter execution, malformed binder diagnostics, and
+  retained C/Zig `generic_type:Fn` blockers.
+- User marker traits and explicit impls round-trip in both syntaxes, canonical
+  AST, source maps, graph/project/workbench summaries, and enforce every bound.
+- Reserved/unknown/duplicate trait declarations and impls have stable
+  diagnostics; marker metadata erases before eligible C/Zig specialization.
+- Required trait methods round-trip and impl mappings are checked for
+  completeness, uniqueness, backing-function existence, purity, and exact
+  `Self`-substituted signatures.
+- Trait-qualified calls round-trip and execute through concrete and bounded
+  generic interpreter paths; missing bounds/impls and unknown methods have
+  stable diagnostics. Unique concrete calls, including calls inside generated
+  generic clones, rewrite to backing functions for C/Zig; ambiguous calls retain
+  `op:trait_dispatch` before emission.
+- Associated constants round-trip as contracts, impl values, and canonical
+  `trait_const` expressions; tests enforce `Self` substitution, completeness,
+  uniqueness, literal constness, interpreter evaluation, and C/Zig inlining.
+- Associated types round-trip as required names and concrete impl bindings;
+  tests enforce declaration, completeness, uniqueness, `Self::Item` resolution
+  in method/constant contracts, interpreter execution, and C/Zig specialization.
+- Generic/blanket impls round-trip with bounds; tests cover recursive structural
+  matching, bound rejection, unconstrained parameters, conservative coherence,
+  symbolic method/constant/associated-type contracts, interpreter selection,
+  and C/Zig associated-item resolution plus backing-function specialization.
+- Standalone `Trait::Item[Type]` projections round-trip in both syntaxes; tests
+  cover generic-bound preservation, nested `Self::Item` exposure, concrete
+  normalization, unknown trait/item/missing-impl diagnostics, interpreter
+  execution, and projection-free C/Zig specialization.
+- Default trait methods round-trip with pure backing functions; tests cover
+  missing/impure/mismatched defaults, concrete overrides, interpreter fallback,
+  impl-selected numeric specialization, and C/Zig generic-default lowering.
+- The allocation-free borrowed String subset (`str_len`, `.len`,
+  `str_contains`, `==`, `!=`) is generated for C/Zig with a sub-16-MiB bound;
+  host-gated C compilation/execution proves UTF-8 byte length, empty-needle,
+  and value-equality behavior. Owned String operations remain FIR-blocked.
+- Generated C and Zig source artifacts include FIR declaration/signature markers
+  and keep public/private declarations aligned with `forgentex.backend_ir.v1`.
+- Generated C and Zig source include FIR body markers for straight-line
+  functions emitted from entry-block FIR instructions.
 - `fgx build <project> --backend llvm` and other planned native backends fail explicitly.
 - Unknown backend names produce stable diagnostics.
 
@@ -409,16 +479,36 @@ CLI tests:
 - v0.26 borrow conformance includes conditional alias reassignment rejection,
   conditional alias call rejection, and conditional alias last-use acceptance
   cases.
+- safe.1 adds `forgentex.borrow_reference.v1`: an implementation-independent
+  move-availability model generates 510 owned root/field programs across linear
+  flow, branch joins, and two-iteration loops. `fgx borrow-conformance` and
+  strict release checks require all 510 results to match the production checker.
+- Its independent alias/liveness model generates 277 cases across descendant
+  loans, shallow and nested fields, branch joins, loop-carried aliases,
+  constant/dynamic index pairs, and conditional target joins inside loops.
+  Only differing constant indices prove disjointness; all dynamic pairs remain
+  conservatively overlapping.
+- Its independent lifetime lattice generates 132 parameter/unproven provenance
+  cases across direct/control-flow/helper/wrapper returns, field/index
+  projections, and self/mutual recursive cycles. Selective helper contracts
+  prove that unreturned projection arguments do not taint a result.
+- safe.1 runtime campaigns accept a bounded caller seed and case count, run 128
+  cases by default, and emit minimized source plus replay metadata if a
+  differential mismatch survives model-equivalent shrinking.
+- `--failure-dir <path>` persists mismatch source and
+  `forgentex.borrow_regression.v1` metadata; four checked-in minimal fixtures
+  replay on every run. Weekly CI covers four seeds at 64 cases per family and
+  retains any minimized failure artifacts.
 - `fgx effects <file> --json` reports declared, inferred, missing, invalid, and capability effects.
 - `fgx check --project --json`, `fgx api --public`, and `fgx map --project` cover Stage 8 project workflows.
-- `fgx run <file> --entry <function> --json-input <file>` covers Stage 9 interpreter workflows.
+- `fgx run <file> --entry <function> --json-input <file> --backend interp` covers Stage 9 interpreter workflows through the v3.0/v3.1 backend boundary.
 - `fgx build <project> --backend c` covers Stage 10 backend workflows.
 - `fgx build <project> --backend zig` covers Stage 28 backend workflows.
 - `fgx targets`, `fgx check --target`, and `fgx map --include-targets` cover Stage 11 target workflows.
 - `fgx asm-check <file> --target <triple>` covers Stage 12 structured assembly workflows.
 - `fgx simd-review <file> --target <triple>` covers Stage 13 portable SIMD workflows.
 - `fgx abi <file> --target <triple>` and `fgx header <file> --target <triple>` cover Stage 14 ABI/layout workflows.
-- `fgx backends` and `fgx ir <project>` cover Stage 15 backend strategy workflows.
+- `fgx backends` and `fgx ir <project|file>` cover Stage 15 backend strategy workflows.
 - `fgx stdlib` covers Stage 16 standard library workflows.
 - `fgx check`, `fgx effects`, and `fgx run --entry` cover Stage 17 I/O and
   networking workflows.
@@ -470,8 +560,9 @@ framework. Stable snapshots should cover:
 - assembly review text and `forgentex.asm_check.v1` JSON
 - SIMD review text and `forgentex.simd_review.v1` JSON
 - ABI report text, `forgentex.abi.v1` JSON, and generated C headers
-- backend catalog text and `forgentex.backends.v1` JSON
+- backend catalog text and `forgentex.backend_info.v1` JSON
 - FGIR text and `forgentex.backend_ir.v1` JSON
+- backend build receipt `forgentex.backend_build.v1` JSON
 - `forgentex.frontend_contract.v1` JSON
 - standard library catalog text and `forgentex.stdlib.v1` JSON
 - agent context `forgentex.agent_context.v1` JSON

@@ -95,7 +95,10 @@ impl Inst {
 }
 
 pub fn build_cfg(function: &FunctionDecl) -> Cfg {
-    let mut builder = Builder { blocks: Vec::new() };
+    let mut builder = Builder {
+        blocks: Vec::new(),
+        loop_targets: Vec::new(),
+    };
     let entry = builder.new_block(BlockKind::Entry);
     let exit = builder.new_block(BlockKind::Exit);
     for param in &function.params {
@@ -122,6 +125,9 @@ pub fn build_cfg(function: &FunctionDecl) -> Cfg {
 
 struct Builder {
     blocks: Vec<Block>,
+    /// Stack of the innermost loop's (continue target = header, break target =
+    /// after) blocks, so `continue`/`break` can edge to the right place.
+    loop_targets: Vec<(BlockId, BlockId)>,
 }
 
 impl Builder {
@@ -216,7 +222,29 @@ impl Builder {
                     }
                     return None;
                 }
-                Stmt::If { cond, then_body } => {
+                Stmt::Break | Stmt::Continue => {
+                    // `break` jumps to the loop's exit (after) block; `continue`
+                    // jumps to the loop header. Both end the current path, so
+                    // following statements are unreachable (like a return).
+                    if let Some(&(header, after)) = self.loop_targets.last() {
+                        let target = if matches!(stmt, Stmt::Break) {
+                            after
+                        } else {
+                            header
+                        };
+                        self.edge(current, target);
+                    }
+                    if idx + 1 < body.len() {
+                        current = self.new_block(BlockKind::Body);
+                        continue;
+                    }
+                    return None;
+                }
+                Stmt::If {
+                    cond,
+                    then_body,
+                    else_body,
+                } => {
                     let mut inst = Inst::new(node.clone(), InstKind::Branch);
                     collect_uses(cond, &mut inst.uses);
                     inst.source = Some(Stmt::Expr(cond.clone()));
@@ -224,11 +252,23 @@ impl Builder {
                     let then_entry = self.new_block(BlockKind::Body);
                     let join = self.new_block(BlockKind::Join);
                     self.edge(current, then_entry);
-                    self.edge(current, join);
                     if let Some(then_exit) =
                         self.lower_body(then_body, then_entry, &format!("{node}.then"), exit)
                     {
                         self.edge(then_exit, join);
+                    }
+                    if else_body.is_empty() {
+                        // No else: the cond-false path flows straight to the join.
+                        self.edge(current, join);
+                    } else {
+                        // The cond-false path runs the else branch, then joins.
+                        let else_entry = self.new_block(BlockKind::Body);
+                        self.edge(current, else_entry);
+                        if let Some(else_exit) =
+                            self.lower_body(else_body, else_entry, &format!("{node}.else"), exit)
+                        {
+                            self.edge(else_exit, join);
+                        }
                     }
                     current = join;
                 }
@@ -256,13 +296,76 @@ impl Builder {
                     let after = self.new_block(BlockKind::Join);
                     self.edge(header, body_entry);
                     self.edge(header, after);
-                    if let Some(body_exit) =
-                        self.lower_body(body, body_entry, &format!("{node}.body"), exit)
-                    {
+                    self.loop_targets.push((header, after));
+                    let body_exit =
+                        self.lower_body(body, body_entry, &format!("{node}.body"), exit);
+                    self.loop_targets.pop();
+                    if let Some(body_exit) = body_exit {
                         // Loop back edge.
                         self.edge(body_exit, header);
                     }
                     current = after;
+                }
+                Stmt::While { cond, body } => {
+                    // A loop header that branches on the condition each
+                    // iteration; the body loops back to it. Same shape as a
+                    // `for` loop so the borrow checker's loop-carried liveness
+                    // and back-edge handling apply (sound).
+                    let header = self.new_block(BlockKind::LoopHeader);
+                    self.edge(current, header);
+                    let mut branch = Inst::new(format!("{node}.cond"), InstKind::Branch);
+                    collect_uses(cond, &mut branch.uses);
+                    branch.source = Some(Stmt::Expr(cond.clone()));
+                    self.push(header, branch);
+                    let body_entry = self.new_block(BlockKind::Body);
+                    let after = self.new_block(BlockKind::Join);
+                    self.edge(header, body_entry);
+                    self.edge(header, after);
+                    self.loop_targets.push((header, after));
+                    let body_exit =
+                        self.lower_body(body, body_entry, &format!("{node}.body"), exit);
+                    self.loop_targets.pop();
+                    if let Some(body_exit) = body_exit {
+                        self.edge(body_exit, header);
+                    }
+                    current = after;
+                }
+                Stmt::Match { scrutinee, arms } => {
+                    // An N-way branch: the scrutinee is read once, then each arm
+                    // is its own block, all joining after. Like `if`/`else`
+                    // generalized, so the borrow checker (which runs over the
+                    // CFG) sees every arm and merges their effects (sound).
+                    let mut inst = Inst::new(node.clone(), InstKind::Branch);
+                    collect_uses(scrutinee, &mut inst.uses);
+                    inst.source = Some(Stmt::Expr(scrutinee.clone()));
+                    self.push(current, inst);
+                    let join = self.new_block(BlockKind::Join);
+                    for (arm_idx, arm) in arms.iter().enumerate() {
+                        let arm_entry = self.new_block(BlockKind::Body);
+                        self.edge(current, arm_entry);
+                        // A payload binding is a local defined at the arm entry,
+                        // taking its value from the scrutinee.
+                        if let crate::ast::Pattern::Variant {
+                            binding: Some(name),
+                            ..
+                        } = &arm.pattern
+                        {
+                            let mut bind =
+                                Inst::new(format!("{node}.arm{arm_idx}.bind"), InstKind::Let);
+                            collect_uses(scrutinee, &mut bind.uses);
+                            bind.defs.insert(name.clone());
+                            self.push(arm_entry, bind);
+                        }
+                        if let Some(arm_exit) = self.lower_body(
+                            &arm.body,
+                            arm_entry,
+                            &format!("{node}.arm{arm_idx}"),
+                            exit,
+                        ) {
+                            self.edge(arm_exit, join);
+                        }
+                    }
+                    current = join;
                 }
                 Stmt::Asm(block) => {
                     let mut inst = Inst::new(node, InstKind::Asm);
@@ -285,6 +388,16 @@ impl Builder {
 /// field and index projections.
 pub fn collect_uses(expr: &Expr, uses: &mut BTreeSet<String>) {
     match expr {
+        Expr::Lambda { params, body } => {
+            // A closure's free variables are captured (read) at creation; its
+            // parameters are not outer uses.
+            let mut inner = BTreeSet::new();
+            collect_uses(body, &mut inner);
+            for param in params {
+                inner.remove(&param.name);
+            }
+            uses.extend(inner);
+        }
         Expr::Var(name) => {
             uses.insert(name.clone());
         }
@@ -303,7 +416,11 @@ pub fn collect_uses(expr: &Expr, uses: &mut BTreeSet<String>) {
             collect_uses(base, uses);
             collect_uses(index, uses);
         }
-        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::String(_) => {}
+        Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::String(_)
+        | Expr::TraitConst { .. } => {}
     }
 }
 

@@ -1,0 +1,22 @@
+# native-call v1.3: a C++17 capsule with an explicit C ABI export.
+# The C++ body receives a copy-in/copy-back mutable scalar buffer.
+
+foreign add_gain_i16_cpp cpp version "c++17" effects [cpu.avx2]:
+    input samples: &mut [i16]
+    output changed: i32
+    sandbox "fs.none"
+    code:
+        #include <cstddef>
+        #include <cstdint>
+
+        extern "C" std::int32_t add_gain_i16_cpp(
+            std::int16_t *samples,
+            std::size_t samples_len
+        ) {
+            for (std::size_t i = 0; i < samples_len; ++i) samples[i] += 7;
+            return static_cast<std::int32_t>(samples_len);
+        }
+
+fn boost_cpp_then_first(samples: &mut [i16]) -> i16 effects [cpu.avx2]:
+    let changed: i32 = add_gain_i16_cpp(samples)
+    return samples[0]

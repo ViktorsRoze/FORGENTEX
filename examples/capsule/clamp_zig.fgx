@@ -1,0 +1,16 @@
+# native-call v1.8: a checked numeric scalar crosses an explicit Zig export
+# through the same isolated native child and receipt path as C and Rust.
+
+foreign clamp_zig zig version "0.14" effects [cpu.avx2]:
+    input x: f32
+    output y: i16
+    sandbox "fs.none"
+    code:
+        pub export fn clamp_zig(x: f32) i16 {
+            if (x > 32767.0) return 32767;
+            if (x < -32768.0) return -32768;
+            return @intFromFloat(x);
+        }
+
+fn clamp_with_zig(x: f32) -> i16 effects [cpu.avx2]:
+    return clamp_zig(x)

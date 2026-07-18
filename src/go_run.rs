@@ -61,7 +61,7 @@ fn go_candidates() -> Vec<String> {
     candidates
 }
 
-fn detect_go() -> Option<(String, String)> {
+pub fn detect_go() -> Option<(String, String)> {
     for exe in go_candidates() {
         if let Ok(output) = Command::new(&exe).arg("version").output() {
             if output.status.success() {
@@ -73,7 +73,7 @@ fn detect_go() -> Option<(String, String)> {
     None
 }
 
-fn dedent(lines: &[String]) -> String {
+pub(crate) fn dedent(lines: &[String]) -> String {
     let indent = lines
         .iter()
         .filter(|l| !l.trim().is_empty())
@@ -93,7 +93,7 @@ fn dedent(lines: &[String]) -> String {
         .join("\n")
 }
 
-fn find_entry(body: &str) -> Option<String> {
+pub(crate) fn find_entry(body: &str) -> Option<String> {
     let idx = body.find("func ")?;
     let rest = &body[idx + "func ".len()..];
     let name: String = rest
@@ -101,6 +101,83 @@ fn find_entry(body: &str) -> Option<String> {
         .take_while(|c| c.is_alphanumeric() || *c == '_')
         .collect();
     (!name.is_empty()).then_some(name)
+}
+
+/// The Go type a boundary input unmarshals into.
+pub(crate) fn go_json_type(ty: &str) -> &'static str {
+    match ty {
+        "f32" | "f64" => "float64",
+        "bool" => "bool",
+        t if is_numeric(t) => "int64",
+        _ => "string",
+    }
+}
+
+/// Invoke a go capsule's entry with live, JSON-encoded positional arguments (a
+/// JSON array string), returning the entry's JSON result on stdout. Go has a
+/// stdlib JSON codec, so the boundary stays uniform with python/node: the
+/// driver unmarshals each argument into its typed parameter, calls the entry,
+/// and marshals the result back to JSON. Gated by the capsule's sandbox
+/// approval (the live capsule runtime, rt.1).
+pub fn invoke_live(capsule: &Capsule, json_args: &str) -> Result<String, String> {
+    if !crate::sandbox::is_approved(capsule) {
+        return Err("capsule effects are not covered by its sandbox".to_string());
+    }
+    let body = dedent(&capsule.code);
+    let entry = find_entry(&body).ok_or_else(|| "no func found in capsule body".to_string())?;
+    let (go, _version) =
+        detect_go().ok_or_else(|| "no host Go found (looked for $GO, go)".to_string())?;
+
+    let mut binds = Vec::new();
+    let mut call_args = Vec::new();
+    for (i, input) in capsule.inputs.iter().enumerate() {
+        binds.push(format!(
+            "    var a{i} {}\n    json.Unmarshal(_args[{i}], &a{i})",
+            go_json_type(&input.ty.to_agent())
+        ));
+        call_args.push(format!("a{i}"));
+    }
+    let needs_os = !capsule.inputs.is_empty();
+    let mut imports = vec!["\t\"encoding/json\"", "\t\"fmt\""];
+    if needs_os {
+        imports.push("\t\"os\"");
+    }
+    let read_args = if needs_os {
+        "    var _args []json.RawMessage\n    json.Unmarshal([]byte(os.Args[1]), &_args)\n"
+    } else {
+        ""
+    };
+    let main_src = format!(
+        "package main\n\nimport (\n{}\n)\n\n{body}\n\nfunc main() {{\n{read_args}{}\n    _r := {entry}({})\n    _b, _ := json.Marshal(_r)\n    fmt.Println(string(_b))\n}}\n",
+        imports.join("\n"),
+        binds.join("\n"),
+        call_args.join(", ")
+    );
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LIVE_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = LIVE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("forgentex_{}_{}_golive", std::process::id(), seq));
+    std::fs::create_dir_all(&dir).map_err(|err| format!("failed to create scratch dir: {err}"))?;
+    let main_path = dir.join("main.go");
+    std::fs::write(&main_path, main_src)
+        .map_err(|err| format!("failed to write go source: {err}"))?;
+
+    let output = Command::new(&go)
+        .arg("run")
+        .arg(&main_path)
+        .arg(json_args)
+        .output()
+        .map_err(|err| format!("failed to spawn go: {err}"))?;
+    let _ = std::fs::remove_dir_all(&dir);
+    if !output.status.success() {
+        return Err(format!(
+            "go capsule '{}' failed: {}",
+            capsule.name,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn is_numeric(ty: &str) -> bool {

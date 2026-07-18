@@ -619,24 +619,38 @@ fn stmt_has_simd(stmt: &Stmt) -> bool {
         | Stmt::Return(Some(expr))
         | Stmt::Require(expr)
         | Stmt::Expr(expr) => expr_has_simd(expr),
-        Stmt::Return(None) | Stmt::Asm(_) => false,
-        Stmt::If { cond, then_body } => expr_has_simd(cond) || body_has_simd(then_body),
+        Stmt::Return(None) | Stmt::Asm(_) | Stmt::Break | Stmt::Continue => false,
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => expr_has_simd(cond) || body_has_simd(then_body) || body_has_simd(else_body),
         Stmt::For {
             start, end, body, ..
         } => expr_has_simd(start) || expr_has_simd(end) || body_has_simd(body),
+        Stmt::While { cond, body } => expr_has_simd(cond) || body_has_simd(body),
+        Stmt::Match { scrutinee, arms } => {
+            expr_has_simd(scrutinee) || arms.iter().any(|arm| body_has_simd(&arm.body))
+        }
         Stmt::Assign { target, expr } => expr_has_simd(target) || expr_has_simd(expr),
     }
 }
 
 fn expr_has_simd(expr: &Expr) -> bool {
     match expr {
+        Expr::Lambda { body, .. } => expr_has_simd(body),
         Expr::Call { name, args } => is_simd_intrinsic(name) || args.iter().any(expr_has_simd),
         Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Field { base: expr, .. } => {
             expr_has_simd(expr)
         }
         Expr::Binary { left, right, .. } => expr_has_simd(left) || expr_has_simd(right),
         Expr::Index { base, index } => expr_has_simd(base) || expr_has_simd(index),
-        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::String(_) | Expr::Var(_) => false,
+        Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::String(_)
+        | Expr::Var(_)
+        | Expr::TraitConst { .. } => false,
     }
 }
 
@@ -658,10 +672,15 @@ fn collect_simd_summary(
             Stmt::Return(Some(expr)) | Stmt::Require(expr) | Stmt::Expr(expr) => {
                 collect_expr_simd(expr, intrinsics, vector_types);
             }
-            Stmt::Return(None) | Stmt::Asm(_) => {}
-            Stmt::If { cond, then_body } => {
+            Stmt::Return(None) | Stmt::Asm(_) | Stmt::Break | Stmt::Continue => {}
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
                 collect_expr_simd(cond, intrinsics, vector_types);
                 collect_simd_summary(then_body, intrinsics, vector_types);
+                collect_simd_summary(else_body, intrinsics, vector_types);
             }
             Stmt::For {
                 start, end, body, ..
@@ -669,6 +688,16 @@ fn collect_simd_summary(
                 collect_expr_simd(start, intrinsics, vector_types);
                 collect_expr_simd(end, intrinsics, vector_types);
                 collect_simd_summary(body, intrinsics, vector_types);
+            }
+            Stmt::While { cond, body } => {
+                collect_expr_simd(cond, intrinsics, vector_types);
+                collect_simd_summary(body, intrinsics, vector_types);
+            }
+            Stmt::Match { scrutinee, arms } => {
+                collect_expr_simd(scrutinee, intrinsics, vector_types);
+                for arm in arms {
+                    collect_simd_summary(&arm.body, intrinsics, vector_types);
+                }
             }
             Stmt::Assign { target, expr } => {
                 collect_expr_simd(target, intrinsics, vector_types);
@@ -684,6 +713,7 @@ fn collect_expr_simd(
     vector_types: &mut BTreeSet<String>,
 ) {
     match expr {
+        Expr::Lambda { body, .. } => collect_expr_simd(body, intrinsics, vector_types),
         Expr::Call { name, args } => {
             if is_simd_intrinsic(name) {
                 intrinsics.insert(name.clone());
@@ -706,7 +736,12 @@ fn collect_expr_simd(
             collect_expr_simd(base, intrinsics, vector_types);
             collect_expr_simd(index, intrinsics, vector_types);
         }
-        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::String(_) | Expr::Var(_) => {}
+        Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::String(_)
+        | Expr::Var(_)
+        | Expr::TraitConst { .. } => {}
     }
 }
 
@@ -735,10 +770,16 @@ fn has_in_body_scalar_fallback(body: &[Stmt]) -> bool {
             return true;
         }
         match stmt {
-            Stmt::If { then_body, .. }
-            | Stmt::For {
-                body: then_body, ..
-            } if has_in_body_scalar_fallback(then_body) => return true,
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } if has_in_body_scalar_fallback(then_body)
+                || has_in_body_scalar_fallback(else_body) =>
+            {
+                return true
+            }
+            Stmt::For { body, .. } if has_in_body_scalar_fallback(body) => return true,
             _ => {}
         }
     }
@@ -748,10 +789,13 @@ fn has_in_body_scalar_fallback(body: &[Stmt]) -> bool {
 fn stmt_is_scalar_work(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Expr(expr) => !expr_has_simd(expr),
-        Stmt::For { .. } | Stmt::Assign { .. } | Stmt::Return(_) => true,
+        Stmt::For { .. } | Stmt::While { .. } | Stmt::Assign { .. } | Stmt::Return(_) => true,
         Stmt::Let { expr, .. } => !expr_has_simd(expr),
         Stmt::If { then_body, .. } => then_body.iter().any(stmt_is_scalar_work),
-        Stmt::Require(_) | Stmt::Asm(_) => false,
+        Stmt::Match { arms, .. } => arms
+            .iter()
+            .any(|arm| arm.body.iter().any(stmt_is_scalar_work)),
+        Stmt::Require(_) | Stmt::Asm(_) | Stmt::Break | Stmt::Continue => false,
     }
 }
 

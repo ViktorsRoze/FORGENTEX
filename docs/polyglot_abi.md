@@ -42,7 +42,7 @@ snapshot/orchestration-level (the v2.2 deferral).
 
 | Capsule language | Backend | Executor |
 | --- | --- | --- |
-| `c`, `cpp`, `rust`, `zig` | `ffi` | C-ABI bridge (v2.13) |
+| `c`, `cpp`, `rust`, `zig` | `ffi` | C-ABI bridge (C/C++ live boundaries; Rust scalars/slices live; Zig planned) |
 | `python` | `python` | host CPython (v2.17) |
 | others | `not_wired` | later milestones (v2.20–v2.24, contract/shell) |
 
@@ -62,7 +62,7 @@ or sandbox denial makes the run `partial`.
 
 ## Scope and honesty
 
-- Real execution of the C and Python backends; not-yet-wired languages are
+- Real execution of the C, C++, Rust scalar/slice, and Python backends; not-yet-wired languages are
   marked, not faked.
 - One gate (sandbox + deps) applied uniformly; one marshaling notion
   (`CapsuleValue`) shared across backends.

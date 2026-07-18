@@ -85,3 +85,14 @@ foreign engine cpp version \"c++17\" env \"x86_64-pc-windows-msvc\":
     assert_eq!(entry.risk_class, "native");
     assert!(entry.memory_boundary);
 }
+
+#[test]
+fn rust_and_zig_capsules_are_classified_native() {
+    for language in ["rust", "zig"] {
+        let source = format!(
+            "foreign engine {language} version \"2021\":\n    input value: i32\n    output result: i32\n    sandbox \"fs.none\"\n    code:\n        boundary placeholder\n"
+        );
+        let report = analyze("engine.fgx", &human(&source));
+        assert_eq!(report.capsules[0].risk_class, "native");
+    }
+}

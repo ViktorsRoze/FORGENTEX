@@ -1416,9 +1416,17 @@ fn replace_first_return_expr(body: &mut [Stmt], expr: Expr) -> Option<()> {
                 return Some(());
             }
             Stmt::If {
-                then_body: nested, ..
+                then_body,
+                else_body,
+                ..
+            } => {
+                let replaced = replace_first_return_expr(then_body, expr.clone()).is_some()
+                    || replace_first_return_expr(else_body, expr.clone()).is_some();
+                if replaced {
+                    return Some(());
+                }
             }
-            | Stmt::For { body: nested, .. } => {
+            Stmt::For { body: nested, .. } => {
                 let replaced = replace_first_return_expr(nested, expr.clone()).is_some();
                 if replaced {
                     return Some(());
@@ -1654,6 +1662,7 @@ fn build_fast_path(params: &[Param], call: &str, target_features: &str) -> Resul
     Ok(Stmt::If {
         cond,
         then_body: vec![Stmt::Expr(call_expr), Stmt::Return(None)],
+        else_body: Vec::new(),
     })
 }
 
@@ -1717,6 +1726,8 @@ fn unsafe_stub_from_template(
     FunctionDecl {
         id: format!("@function.{name}"),
         name: name.to_string(),
+        type_params: Vec::new(),
+        type_bounds: Vec::new(),
         unsafe_fn: true,
         params: template.params.clone(),
         ret: template.ret.clone(),

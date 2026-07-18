@@ -39,6 +39,28 @@ const MODULES: &[StdModule] = &[
         ],
     },
     StdModule {
+        name: "core.music",
+        purpose: "deterministic bar/beat/tick conversion, cue quantization, and tempo maps",
+        functions: &[
+            "core_music_position_valid",
+            "core_music_to_tick",
+            "core_music_bar_start_tick",
+            "core_music_tick_to_millis",
+            "core_music_quantize_tick",
+            "core_music_make_cue",
+            "core_music_make_action",
+            "core_music_action_valid",
+            "core_music_cue_valid",
+            "core_music_cue_action_valid",
+            "core_music_cues_overlap",
+            "core_music_cues_conflict",
+            "core_music_cue_wins",
+            "core_music_conflict_winner_id",
+            "core_music_tempo_map_valid",
+            "core_music_tempo_map_millis",
+        ],
+    },
+    StdModule {
         name: "core.result",
         purpose: "allocation-free Result constructors and predicates",
         functions: &[

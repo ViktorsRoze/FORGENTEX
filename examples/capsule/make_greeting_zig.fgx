@@ -1,0 +1,31 @@
+# Native-call v1.23: Zig transfers an owned UTF-8 string explicitly.
+
+foreign make_greeting_zig zig version "0.14" effects [alloc]:
+    output greeting: str
+    sandbox "fs.none"
+    code:
+        const std = @import("std");
+
+        pub const FgxOwnedStr = extern struct {
+            ptr: ?[*]u8,
+            len: usize,
+            capacity: usize,
+        };
+
+        pub export fn make_greeting_zig() FgxOwnedStr {
+            const text = std.heap.page_allocator.dupe(u8, "Forgentex,\n✓") catch
+                return .{ .ptr = null, .len = 0, .capacity = 0 };
+            return .{ .ptr = text.ptr, .len = text.len, .capacity = text.len };
+        }
+
+        pub export fn make_greeting_zig_free(
+            ptr: ?[*]u8,
+            len: usize,
+            capacity: usize,
+        ) void {
+            _ = len;
+            if (ptr) |text| std.heap.page_allocator.free(text[0..capacity]);
+        }
+
+fn greeting_from_zig() -> str effects [alloc]:
+    return make_greeting_zig()

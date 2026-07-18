@@ -8,10 +8,100 @@ pub struct Program {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Item {
     Struct(StructDecl),
+    Enum(EnumDecl),
+    Trait(TraitDecl),
+    TraitImpl(TraitImplDecl),
     Function(FunctionDecl),
     Test(TestDecl),
     Capsule(Capsule),
     Share(ShareDecl),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraitDecl {
+    pub id: String,
+    pub name: String,
+    pub attrs: Vec<Attribute>,
+    pub methods: Vec<TraitMethodDecl>,
+    pub constants: Vec<TraitConstDecl>,
+    pub associated_types: Vec<TraitTypeDecl>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraitTypeDecl {
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraitConstDecl {
+    pub name: String,
+    pub ty: Type,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraitMethodDecl {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub ret: Type,
+    pub default_function: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraitImplDecl {
+    pub id: String,
+    pub trait_name: String,
+    pub for_type: Type,
+    pub type_params: Vec<String>,
+    pub type_bounds: Vec<TypeParamBound>,
+    pub attrs: Vec<Attribute>,
+    pub methods: Vec<TraitMethodImpl>,
+    pub constants: Vec<TraitConstImpl>,
+    pub associated_types: Vec<TraitTypeImpl>,
+}
+
+impl TraitImplDecl {
+    pub fn bounds_for(&self, type_param: &str) -> &[String] {
+        self.type_bounds
+            .iter()
+            .find(|bound| bound.type_param == type_param)
+            .map_or(&[], |bound| bound.traits.as_slice())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraitTypeImpl {
+    pub name: String,
+    pub ty: Type,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraitConstImpl {
+    pub name: String,
+    pub value: Expr,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraitMethodImpl {
+    pub method: String,
+    pub function: String,
+}
+
+/// A sum type. Each variant is data-less or carries a single optional payload
+/// (`Circle(i32)`); matched with exhaustive `match` and binding patterns.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnumDecl {
+    pub id: String,
+    pub name: String,
+    pub attrs: Vec<Attribute>,
+    pub variants: Vec<EnumVariant>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnumVariant {
+    pub name: String,
+    /// A single optional payload field (`Circle(i32)`); `None` is data-less.
+    /// Multi-field variants are expressed by carrying a struct.
+    pub payload: Option<Type>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,12 +129,25 @@ pub struct Field {
 pub struct FunctionDecl {
     pub id: String,
     pub name: String,
+    /// Generic type parameters (lang.4), e.g. `fn first[T](v: Vec[T]) -> T`
+    /// declares `["T"]`. Empty for monomorphic functions.
+    pub type_params: Vec<String>,
+    /// Static interface constraints for generic parameters (lang.4 slice 5),
+    /// e.g. `T: Eq`. Kept separate so existing monomorphization continues to
+    /// use plain parameter names.
+    pub type_bounds: Vec<TypeParamBound>,
     pub unsafe_fn: bool,
     pub params: Vec<Param>,
     pub ret: Type,
     pub effects: Vec<String>,
     pub attrs: Vec<Attribute>,
     pub body: Vec<Stmt>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypeParamBound {
+    pub type_param: String,
+    pub traits: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -78,6 +181,7 @@ pub enum Stmt {
     If {
         cond: Expr,
         then_body: Vec<Stmt>,
+        else_body: Vec<Stmt>,
     },
     For {
         var: String,
@@ -85,12 +189,40 @@ pub enum Stmt {
         end: Expr,
         body: Vec<Stmt>,
     },
+    While {
+        cond: Expr,
+        body: Vec<Stmt>,
+    },
+    Match {
+        scrutinee: Expr,
+        arms: Vec<MatchArm>,
+    },
     Assign {
         target: Expr,
         expr: Expr,
     },
+    Break,
+    Continue,
     Expr(Expr),
     Asm(AsmBlock),
+}
+
+/// One arm of a `match`: a pattern and the body it guards.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MatchArm {
+    pub pattern: Pattern,
+    pub body: Vec<Stmt>,
+}
+
+/// A `match` pattern: the wildcard `_`, or an enum variant path (`Color::Red`)
+/// optionally binding its payload (`Shape::Circle(r)` binds `r`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Pattern {
+    Wildcard,
+    Variant {
+        path: String,
+        binding: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -100,6 +232,11 @@ pub enum Expr {
     Bool(bool),
     String(String),
     Var(String),
+    TraitConst {
+        trait_name: String,
+        name: String,
+        for_type: Type,
+    },
     Unary {
         op: String,
         expr: Box<Expr>,
@@ -124,6 +261,12 @@ pub enum Expr {
     Index {
         base: Box<Expr>,
         index: Box<Expr>,
+    },
+    /// An anonymous function (lang.4 closures): typed parameters and a single
+    /// expression body. Free variables are captured by value at creation.
+    Lambda {
+        params: Vec<Param>,
+        body: Box<Expr>,
     },
 }
 
@@ -378,7 +521,7 @@ impl Capsule {
     pub fn risk_class(&self) -> &'static str {
         match self.language.as_str() {
             "bash" | "powershell" | "sh" => "shell",
-            "c" | "cpp" | "c++" => "native",
+            "c" | "cpp" | "c++" | "rust" | "zig" => "native",
             "cuda" => "gpu",
             "solidity" | "vyper" => "smart_contract",
             _ => "managed",
@@ -401,6 +544,27 @@ impl Program {
     pub fn structs(&self) -> impl Iterator<Item = &StructDecl> {
         self.items.iter().filter_map(|item| match item {
             Item::Struct(decl) => Some(decl),
+            _ => None,
+        })
+    }
+
+    pub fn enums(&self) -> impl Iterator<Item = &EnumDecl> {
+        self.items.iter().filter_map(|item| match item {
+            Item::Enum(decl) => Some(decl),
+            _ => None,
+        })
+    }
+
+    pub fn traits(&self) -> impl Iterator<Item = &TraitDecl> {
+        self.items.iter().filter_map(|item| match item {
+            Item::Trait(decl) => Some(decl),
+            _ => None,
+        })
+    }
+
+    pub fn trait_impls(&self) -> impl Iterator<Item = &TraitImplDecl> {
+        self.items.iter().filter_map(|item| match item {
+            Item::TraitImpl(decl) => Some(decl),
             _ => None,
         })
     }
@@ -517,6 +681,8 @@ impl FunctionDecl {
         Self {
             id,
             name,
+            type_params: Vec::new(),
+            type_bounds: Vec::new(),
             unsafe_fn,
             params,
             ret,
@@ -528,6 +694,13 @@ impl FunctionDecl {
 
     pub fn has_asm(&self) -> bool {
         body_has_asm(&self.body)
+    }
+
+    pub fn bounds_for(&self, type_param: &str) -> &[String] {
+        self.type_bounds
+            .iter()
+            .find(|bound| bound.type_param == type_param)
+            .map_or(&[], |bound| bound.traits.as_slice())
     }
 }
 
@@ -681,12 +854,150 @@ impl Type {
             Type::Array { elem, .. } | Type::Slice { elem, .. } | Type::Pointer { elem, .. } => {
                 Some((**elem).clone())
             }
+            // A growable `Vec<T>` indexes to `T`.
+            Type::Generic { name, args } if name == "Vec" => args.first().cloned(),
             _ => None,
+        }
+    }
+
+    /// Decode a first-class function type. The pure form is `Fn[P..., R]`;
+    /// `forall[T: Bound]` may appear first and `effects[E...]` may appear last.
+    /// Both markers reuse generic type nodes and are excluded from the returned
+    /// parameter/return slices.
+    pub fn function_parts(&self) -> Option<(&[Type], &Type, &[Type])> {
+        let Type::Generic { name, args } = self else {
+            return None;
+        };
+        if name != "Fn" || args.is_empty() {
+            return None;
+        }
+        let (signature, effects) = match args.last() {
+            Some(Type::Generic {
+                name: marker,
+                args: effects,
+            }) if marker == "effects" => (&args[..args.len() - 1], effects.as_slice()),
+            _ => (args.as_slice(), &[][..]),
+        };
+        let signature = match signature.first() {
+            Some(Type::Generic { name, .. }) if name == "forall" => &signature[1..],
+            _ => signature,
+        };
+        let (ret, params) = signature.split_last()?;
+        Some((params, ret, effects))
+    }
+
+    /// Return the higher-rank binders declared by a leading `forall[...]`
+    /// marker. Each entry is `(parameter, bounds)`; malformed entries return
+    /// `None` so the checker can diagnose the contract.
+    pub fn function_binders(&self) -> Option<Vec<(String, Vec<String>)>> {
+        let Type::Generic { name, args } = self else {
+            return None;
+        };
+        if name != "Fn" {
+            return None;
+        }
+        let Some(Type::Generic {
+            name: marker,
+            args: binders,
+        }) = args.first()
+        else {
+            return Some(Vec::new());
+        };
+        if marker != "forall" {
+            return Some(Vec::new());
+        }
+        binders
+            .iter()
+            .map(|binder| {
+                let Type::Named(spec) = binder else {
+                    return None;
+                };
+                let (name, bounds) = spec.split_once(':').map_or_else(
+                    || (spec.as_str(), Vec::new()),
+                    |(name, bounds)| {
+                        (
+                            name,
+                            bounds
+                                .split('+')
+                                .filter(|bound| !bound.is_empty())
+                                .map(str::to_string)
+                                .collect(),
+                        )
+                    },
+                );
+                (!name.is_empty()).then(|| (name.to_string(), bounds))
+            })
+            .collect()
+    }
+
+    pub fn function_effect_names(&self) -> Option<Vec<String>> {
+        let (_, _, effects) = self.function_parts()?;
+        Some(effects.iter().map(Type::to_agent).collect())
+    }
+
+    pub fn function_type(params: Vec<Type>, ret: Type, effects: &[String]) -> Type {
+        Self::generic_function_type(&[], &[], params, ret, effects)
+    }
+
+    pub fn generic_function_type(
+        type_params: &[String],
+        type_bounds: &[TypeParamBound],
+        params: Vec<Type>,
+        ret: Type,
+        effects: &[String],
+    ) -> Type {
+        let mut signature = Vec::new();
+        if !type_params.is_empty() {
+            let binders = type_params
+                .iter()
+                .map(|param| {
+                    let bounds = type_bounds
+                        .iter()
+                        .find(|bound| bound.type_param == *param)
+                        .map(|bound| bound.traits.join("+"))
+                        .unwrap_or_default();
+                    Type::Named(if bounds.is_empty() {
+                        param.clone()
+                    } else {
+                        format!("{param}:{bounds}")
+                    })
+                })
+                .collect();
+            signature.push(Type::Generic {
+                name: "forall".to_string(),
+                args: binders,
+            });
+        }
+        signature.extend(params);
+        signature.push(ret);
+        if !effects.is_empty() {
+            signature.push(Type::Generic {
+                name: "effects".to_string(),
+                args: effects.iter().map(|effect| Type::parse(effect)).collect(),
+            });
+        }
+        Type::Generic {
+            name: "Fn".to_string(),
+            args: signature,
         }
     }
 
     pub fn is_mutable_slice(&self) -> bool {
         matches!(self, Type::Slice { mutable: true, .. })
+    }
+
+    /// Decode a standalone associated-type projection such as
+    /// `Iterator::Item[Vec[i32]]`. Keeping this in the existing generic type
+    /// node preserves both source syntaxes and the canonical AST schema.
+    pub fn associated_projection_parts(&self) -> Option<(&str, &str, &Type)> {
+        let Type::Generic { name, args } = self else {
+            return None;
+        };
+        let (trait_name, item_name) = name.split_once("::")?;
+        if trait_name.is_empty() || item_name.is_empty() || args.len() != 1 {
+            return None;
+        }
+        Some((trait_name, item_name, &args[0]))
     }
 }
 
@@ -792,10 +1103,13 @@ pub fn is_integer_name(name: &str) -> bool {
 pub fn body_has_asm(body: &[Stmt]) -> bool {
     body.iter().any(|stmt| match stmt {
         Stmt::Asm(_) => true,
-        Stmt::If { then_body, .. }
-        | Stmt::For {
-            body: then_body, ..
-        } => body_has_asm(then_body),
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => body_has_asm(then_body) || body_has_asm(else_body),
+        Stmt::For { body, .. } | Stmt::While { body, .. } => body_has_asm(body),
+        Stmt::Match { arms, .. } => arms.iter().any(|arm| body_has_asm(&arm.body)),
         _ => false,
     })
 }
@@ -817,15 +1131,29 @@ fn collect_asm_target_metadata(body: &[Stmt], labels: &mut BTreeSet<String>) {
             Stmt::Asm(asm) => {
                 labels.insert(format!("target.{}", asm.target));
             }
-            Stmt::If { then_body, .. }
-            | Stmt::For {
-                body: then_body, ..
-            } => collect_asm_target_metadata(then_body, labels),
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_asm_target_metadata(then_body, labels);
+                collect_asm_target_metadata(else_body, labels);
+            }
+            Stmt::For { body, .. } | Stmt::While { body, .. } => {
+                collect_asm_target_metadata(body, labels)
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    collect_asm_target_metadata(&arm.body, labels);
+                }
+            }
             Stmt::Let { .. }
             | Stmt::Return(_)
             | Stmt::Require(_)
             | Stmt::Assign { .. }
-            | Stmt::Expr(_) => {}
+            | Stmt::Expr(_)
+            | Stmt::Break
+            | Stmt::Continue => {}
         }
     }
 }
@@ -853,6 +1181,32 @@ fn item_to_json(item: &Item, indent: usize) -> String {
             out.push_str(&format!("]\n{pad}}}"));
             out
         }
+        Item::Enum(decl) => {
+            let mut out = format!(
+                "{pad}{{\n{pad}  \"kind\": \"enum\",\n{pad}  \"id\": \"{}\",\n{pad}  \"name\": \"{}\",\n{pad}  \"variants\": [",
+                escape(&decl.id),
+                escape(&decl.name)
+            );
+            for (idx, variant) in decl.variants.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&format!("\"{}\"", escape(&variant_repr(variant))));
+            }
+            out.push_str(&format!("]\n{pad}}}"));
+            out
+        }
+        Item::Trait(decl) => format!(
+            "{pad}{{\n{pad}  \"kind\": \"trait\",\n{pad}  \"id\": \"{}\",\n{pad}  \"name\": \"{}\"\n{pad}}}",
+            escape(&decl.id),
+            escape(&decl.name)
+        ),
+        Item::TraitImpl(decl) => format!(
+            "{pad}{{\n{pad}  \"kind\": \"trait_impl\",\n{pad}  \"id\": \"{}\",\n{pad}  \"trait\": \"{}\",\n{pad}  \"for_type\": \"{}\"\n{pad}}}",
+            escape(&decl.id),
+            escape(&decl.trait_name),
+            escape(&decl.for_type.to_agent())
+        ),
         Item::Function(function) => {
             let mut out = format!(
                 "{pad}{{\n{pad}  \"kind\": \"function\",\n{pad}  \"id\": \"{}\",\n{pad}  \"name\": \"{}\",\n{pad}  \"unsafe\": {},\n{pad}  \"return\": \"{}\",\n{pad}  \"params\": [",
@@ -997,11 +1351,166 @@ fn item_to_json(item: &Item, indent: usize) -> String {
 fn item_to_canonical_json(out: &mut String, item: &Item, indent: usize) {
     match item {
         Item::Struct(decl) => struct_to_canonical_json(out, decl, indent),
+        Item::Enum(decl) => enum_to_canonical_json(out, decl, indent),
+        Item::Trait(decl) => trait_to_canonical_json(out, decl, indent),
+        Item::TraitImpl(decl) => trait_impl_to_canonical_json(out, decl, indent),
         Item::Function(function) => function_to_canonical_json(out, function, indent),
         Item::Test(test) => test_to_canonical_json(out, test, indent),
         Item::Capsule(capsule) => capsule_to_canonical_json(out, capsule, indent),
         Item::Share(share) => share_to_canonical_json(out, share, indent),
     }
+}
+
+fn trait_to_canonical_json(out: &mut String, decl: &TraitDecl, indent: usize) {
+    push_line(out, indent, "{");
+    push_prop(out, indent + 1, "kind", &quoted("trait"), true);
+    push_prop(out, indent + 1, "id", &quoted(&decl.id), true);
+    push_prop(out, indent + 1, "name", &quoted(&decl.name), true);
+    let methods = decl
+        .methods
+        .iter()
+        .map(|method| {
+            let params = method
+                .params
+                .iter()
+                .map(|param| param.ty.to_agent())
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut signature = format!("{}({})->{}", method.name, params, method.ret.to_agent());
+            if let Some(default) = &method.default_function {
+                signature.push_str(&format!("={default}"));
+            }
+            signature
+        })
+        .map(|method| quoted(&method))
+        .collect::<Vec<_>>()
+        .join(", ");
+    push_prop(out, indent + 1, "methods", &format!("[{methods}]"), true);
+    let constants = decl
+        .constants
+        .iter()
+        .map(|constant| quoted(&format!("{}:{}", constant.name, constant.ty.to_agent())))
+        .collect::<Vec<_>>()
+        .join(", ");
+    push_prop(
+        out,
+        indent + 1,
+        "constants",
+        &format!("[{constants}]"),
+        true,
+    );
+    let associated_types = decl
+        .associated_types
+        .iter()
+        .map(|associated_type| quoted(&associated_type.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    push_prop(
+        out,
+        indent + 1,
+        "associated_types",
+        &format!("[{associated_types}]"),
+        true,
+    );
+    push_attributes(out, indent + 1, "annotations", &decl.attrs, false);
+    push_line(out, indent, "}");
+}
+
+fn trait_impl_to_canonical_json(out: &mut String, decl: &TraitImplDecl, indent: usize) {
+    push_line(out, indent, "{");
+    push_prop(out, indent + 1, "kind", &quoted("trait_impl"), true);
+    push_prop(out, indent + 1, "id", &quoted(&decl.id), true);
+    push_prop(out, indent + 1, "trait", &quoted(&decl.trait_name), true);
+    if !decl.type_params.is_empty() {
+        let list = decl
+            .type_params
+            .iter()
+            .map(|param| quoted(param))
+            .collect::<Vec<_>>()
+            .join(", ");
+        push_prop(out, indent + 1, "type_params", &format!("[{list}]"), true);
+    }
+    if !decl.type_bounds.is_empty() {
+        let list = decl
+            .type_bounds
+            .iter()
+            .map(|bound| quoted(&format!("{}:{}", bound.type_param, bound.traits.join("+"))))
+            .collect::<Vec<_>>()
+            .join(", ");
+        push_prop(out, indent + 1, "type_bounds", &format!("[{list}]"), true);
+    }
+    push_prop(
+        out,
+        indent + 1,
+        "for_type",
+        &quoted(&decl.for_type.to_agent()),
+        true,
+    );
+    let methods = decl
+        .methods
+        .iter()
+        .map(|method| quoted(&format!("{}={}", method.method, method.function)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    push_prop(out, indent + 1, "methods", &format!("[{methods}]"), true);
+    let constants = decl
+        .constants
+        .iter()
+        .map(|constant| {
+            quoted(&format!(
+                "{}={}",
+                constant.name,
+                expr_to_inline_text(&constant.value)
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    push_prop(
+        out,
+        indent + 1,
+        "constants",
+        &format!("[{constants}]"),
+        true,
+    );
+    let associated_types = decl
+        .associated_types
+        .iter()
+        .map(|associated_type| {
+            quoted(&format!(
+                "{}={}",
+                associated_type.name,
+                associated_type.ty.to_agent()
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    push_prop(
+        out,
+        indent + 1,
+        "associated_types",
+        &format!("[{associated_types}]"),
+        true,
+    );
+    push_attributes(out, indent + 1, "annotations", &decl.attrs, false);
+    push_line(out, indent, "}");
+}
+
+fn enum_to_canonical_json(out: &mut String, decl: &EnumDecl, indent: usize) {
+    push_line(out, indent, "{");
+    push_prop(out, indent + 1, "kind", &quoted("enum"), true);
+    push_prop(out, indent + 1, "id", &quoted(&decl.id), true);
+    push_prop(out, indent + 1, "name", &quoted(&decl.name), true);
+    push_array_block_start(out, indent + 1, "variants");
+    for (idx, variant) in decl.variants.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(",\n");
+        }
+        push_indent(out, indent + 2);
+        out.push_str(&quoted(&variant_repr(variant)));
+    }
+    out.push('\n');
+    push_line(out, indent + 1, "]");
+    push_line(out, indent, "}");
 }
 
 fn share_to_canonical_json(out: &mut String, share: &ShareDecl, indent: usize) {
@@ -1199,6 +1708,26 @@ fn function_to_canonical_json(out: &mut String, function: &FunctionDecl, indent:
     push_prop(out, indent + 1, "kind", &quoted("function"), true);
     push_prop(out, indent + 1, "id", &quoted(&function.id), true);
     push_prop(out, indent + 1, "name", &quoted(&function.name), true);
+    // Emitted only for generic functions (lang.4) so monomorphic programs keep
+    // their existing canonical form byte-for-byte.
+    if !function.type_params.is_empty() {
+        let list = function
+            .type_params
+            .iter()
+            .map(|p| quoted(p))
+            .collect::<Vec<_>>()
+            .join(", ");
+        push_prop(out, indent + 1, "type_params", &format!("[{list}]"), true);
+    }
+    if !function.type_bounds.is_empty() {
+        let list = function
+            .type_bounds
+            .iter()
+            .map(|bound| quoted(&format!("{}:{}", bound.type_param, bound.traits.join("+"))))
+            .collect::<Vec<_>>()
+            .join(", ");
+        push_prop(out, indent + 1, "type_bounds", &format!("[{list}]"), true);
+    }
     push_prop(
         out,
         indent + 1,
@@ -1341,6 +1870,31 @@ fn param_to_canonical_json(
     push_line(out, indent, "}");
 }
 
+/// Canonical text for a match pattern: `_` for the wildcard, otherwise the
+/// variant path verbatim (`Color::Red`).
+/// Canonical text for an enum variant: `Name` when data-less, `Name(Type)`
+/// when it carries a payload (the agent type rendering).
+pub fn variant_repr(variant: &EnumVariant) -> String {
+    match &variant.payload {
+        Some(ty) => format!("{}({})", variant.name, ty.to_agent()),
+        None => variant.name.clone(),
+    }
+}
+
+pub fn pattern_to_string(pattern: &Pattern) -> String {
+    match pattern {
+        Pattern::Wildcard => "_".to_string(),
+        Pattern::Variant {
+            path,
+            binding: Some(name),
+        } => format!("{path}({name})"),
+        Pattern::Variant {
+            path,
+            binding: None,
+        } => path.clone(),
+    }
+}
+
 fn stmt_to_canonical_json(out: &mut String, stmt: &Stmt, id: &str, indent: usize) {
     push_line(out, indent, "{");
     push_prop(out, indent + 1, "id", &quoted(id), true);
@@ -1363,11 +1917,21 @@ fn stmt_to_canonical_json(out: &mut String, stmt: &Stmt, id: &str, indent: usize
             push_prop(out, indent + 1, "kind", &quoted("return"), true);
             push_prop(out, indent + 1, "expr", "null", false);
         }
+        Stmt::Break => {
+            push_prop(out, indent + 1, "kind", &quoted("break"), false);
+        }
+        Stmt::Continue => {
+            push_prop(out, indent + 1, "kind", &quoted("continue"), false);
+        }
         Stmt::Require(expr) => {
             push_prop(out, indent + 1, "kind", &quoted("require"), true);
             push_expr_prop(out, indent + 1, "expr", expr, &format!("{id}.expr"), false);
         }
-        Stmt::If { cond, then_body } => {
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
             push_prop(out, indent + 1, "kind", &quoted("if"), true);
             push_expr_prop(out, indent + 1, "cond", cond, &format!("{id}.cond"), true);
             push_array_block_start(out, indent + 1, "then_body");
@@ -1376,6 +1940,15 @@ fn stmt_to_canonical_json(out: &mut String, stmt: &Stmt, id: &str, indent: usize
                     out.push_str(",\n");
                 }
                 stmt_to_canonical_json(out, stmt, &format!("{id}.then.{idx}"), indent + 2);
+            }
+            out.push('\n');
+            push_line(out, indent + 1, "],");
+            push_array_block_start(out, indent + 1, "else_body");
+            for (idx, stmt) in else_body.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(",\n");
+                }
+                stmt_to_canonical_json(out, stmt, &format!("{id}.else.{idx}"), indent + 2);
             }
             out.push('\n');
             push_line(out, indent + 1, "]");
@@ -1410,6 +1983,68 @@ fn stmt_to_canonical_json(out: &mut String, stmt: &Stmt, id: &str, indent: usize
                     out.push_str(",\n");
                 }
                 stmt_to_canonical_json(out, stmt, &format!("{id}.body.{idx}"), indent + 2);
+            }
+            out.push('\n');
+            push_line(out, indent + 1, "]");
+        }
+        Stmt::While { cond, body } => {
+            push_prop(out, indent + 1, "kind", &quoted("while"), true);
+            push_prop(
+                out,
+                indent + 1,
+                "loop_id",
+                &quoted(&format!("{id}.loop")),
+                true,
+            );
+            push_expr_prop(out, indent + 1, "cond", cond, &format!("{id}.cond"), true);
+            push_array_block_start(out, indent + 1, "body");
+            for (idx, stmt) in body.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(",\n");
+                }
+                stmt_to_canonical_json(out, stmt, &format!("{id}.body.{idx}"), indent + 2);
+            }
+            out.push('\n');
+            push_line(out, indent + 1, "]");
+        }
+        Stmt::Match { scrutinee, arms } => {
+            push_prop(out, indent + 1, "kind", &quoted("match"), true);
+            push_expr_prop(
+                out,
+                indent + 1,
+                "scrutinee",
+                scrutinee,
+                &format!("{id}.scrutinee"),
+                true,
+            );
+            push_array_block_start(out, indent + 1, "arms");
+            for (idx, arm) in arms.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(",\n");
+                }
+                push_line(out, indent + 2, "{");
+                push_prop(
+                    out,
+                    indent + 3,
+                    "pattern",
+                    &quoted(&pattern_to_string(&arm.pattern)),
+                    true,
+                );
+                push_array_block_start(out, indent + 3, "body");
+                for (sidx, stmt) in arm.body.iter().enumerate() {
+                    if sidx > 0 {
+                        out.push_str(",\n");
+                    }
+                    stmt_to_canonical_json(
+                        out,
+                        stmt,
+                        &format!("{id}.arm.{idx}.{sidx}"),
+                        indent + 4,
+                    );
+                }
+                out.push('\n');
+                push_line(out, indent + 3, "]");
+                push_line(out, indent + 2, "}");
             }
             out.push('\n');
             push_line(out, indent + 1, "]");
@@ -1489,6 +2124,22 @@ fn expr_to_canonical_json(out: &mut String, expr: &Expr, id: &str, indent: usize
             push_prop(out, indent + 1, "kind", &quoted("var"), true);
             push_prop(out, indent + 1, "name", &quoted(name), false);
         }
+        Expr::TraitConst {
+            trait_name,
+            name,
+            for_type,
+        } => {
+            push_prop(out, indent + 1, "kind", &quoted("trait_const"), true);
+            push_prop(out, indent + 1, "trait", &quoted(trait_name), true);
+            push_prop(out, indent + 1, "name", &quoted(name), true);
+            push_prop(
+                out,
+                indent + 1,
+                "for_type",
+                &quoted(&for_type.to_agent()),
+                false,
+            );
+        }
         Expr::Unary { op, expr } => {
             push_prop(out, indent + 1, "kind", &quoted("unary"), true);
             push_prop(out, indent + 1, "op", &quoted(op), true);
@@ -1541,6 +2192,22 @@ fn expr_to_canonical_json(out: &mut String, expr: &Expr, id: &str, indent: usize
                 &format!("{id}.index"),
                 false,
             );
+        }
+        Expr::Lambda { params, body } => {
+            push_prop(out, indent + 1, "kind", &quoted("lambda"), true);
+            let params_json = params
+                .iter()
+                .map(|param| {
+                    format!(
+                        "{{\"name\": {}, \"type\": {}}}",
+                        quoted(&param.name),
+                        quoted(&param.ty.to_agent())
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            push_prop(out, indent + 1, "params", &format!("[{params_json}]"), true);
+            push_expr_prop(out, indent + 1, "body", body, &format!("{id}.body"), false);
         }
     }
     push_line(out, indent, "}");
@@ -1742,6 +2409,11 @@ fn expr_to_inline_text(expr: &Expr) -> String {
         Expr::Bool(value) => value.to_string(),
         Expr::String(value) => quoted(value),
         Expr::Var(name) => name.clone(),
+        Expr::TraitConst {
+            trait_name,
+            name,
+            for_type,
+        } => format!("{trait_name}::{name}[{}]", for_type.to_agent()),
         Expr::Unary { op, expr } => format!("{op}{}", expr_to_inline_text(expr)),
         Expr::Binary { op, left, right } => {
             format!(
@@ -1767,6 +2439,15 @@ fn expr_to_inline_text(expr: &Expr) -> String {
                 expr_to_inline_text(index)
             )
         }
+        Expr::Lambda { params, body } => format!(
+            "|{}| {}",
+            params
+                .iter()
+                .map(|param| format!("{}: {}", param.name, param.ty.to_agent()))
+                .collect::<Vec<_>>()
+                .join(", "),
+            expr_to_inline_text(body)
+        ),
     }
 }
 

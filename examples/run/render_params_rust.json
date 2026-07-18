@@ -1,0 +1,18 @@
+{
+  "args": {
+    "params": {
+      "$struct": "RenderParams",
+      "width": 1280,
+      "height": 720,
+      "exposure": 1.25
+    }
+  },
+  "expect": {
+    "return": {
+      "$struct": "RenderParams",
+      "width": 1296,
+      "height": 729,
+      "exposure": 2.5
+    }
+  }
+}

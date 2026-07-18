@@ -28,22 +28,32 @@ The Stage 28 Zig backend lowers:
 - `let`, `return`, `require`, `if`, `for`, assignments, and expression
   statements
 - arithmetic, comparisons, casts, calls, indexing, field access, and `.len`
+- bounded borrowed-string byte length, containment, and content equality through
+  allocation-free helpers shared semantically with the C backend
+- fresh annotated function-local `Vec[i32]` with explicit `effects [alloc]`, a
+  1,048,576-element cap, checked access, and lexical `defer` cleanup
 - deterministic traps and bounds checks matching interpreter/C behavior
 
 The backend should reject:
 
 - `unsafe fn`
 - structured assembly
-- unsupported generic runtime values
+- unsupported generic runtime values, including Vec aliases/escapes,
+  signatures/returns, nested declarations, non-`i32` elements, and
+  value-returning pop
 - runtime-only effects such as filesystem, networking, streaming,
   serialization, and implicit allocation
+- owned/allocating String operations and String operations returning Option or
+  Vec until those runtime representations have explicit ownership
 
 ## Zig-Inspired Speed Ideas
 
 Forgentex should borrow these ideas even before Zig generation is complete:
 
 - **Explicit allocators**: allocation must appear in effects, API signatures,
-  and performance reports instead of being hidden in helper code.
+  and performance reports instead of being hidden in helper code. Native Vec
+  growth therefore requires `effects [alloc]` even though the compiler owns the
+  bounded helper and cleanup sequence.
 - **Comptime-like specialization**: hot paths may specialize by element type,
   lane count, target feature, fixed buffer size, or constant policy, but the
   specialization facts must be recorded in FGIR/review output.

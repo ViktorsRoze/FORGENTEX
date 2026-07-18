@@ -288,8 +288,12 @@ fn check_targeted_calls(
             | Stmt::Expr(expr) => {
                 check_expr_calls(expr, caller, target, requirements, guards, diagnostics);
             }
-            Stmt::Return(None) | Stmt::Asm(_) => {}
-            Stmt::If { cond, then_body } => {
+            Stmt::Return(None) | Stmt::Asm(_) | Stmt::Break | Stmt::Continue => {}
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
                 check_expr_calls(cond, caller, target, requirements, guards, diagnostics);
                 let mut branch_guards = guards.clone();
                 collect_feature_guards(cond, &mut branch_guards);
@@ -301,6 +305,9 @@ fn check_targeted_calls(
                     &branch_guards,
                     diagnostics,
                 );
+                // The else branch is the un-guarded path: the feature tested in
+                // `cond` is NOT guaranteed there, so use the original guards.
+                check_targeted_calls(else_body, caller, target, requirements, guards, diagnostics);
             }
             Stmt::For {
                 start, end, body, ..
@@ -308,6 +315,23 @@ fn check_targeted_calls(
                 check_expr_calls(start, caller, target, requirements, guards, diagnostics);
                 check_expr_calls(end, caller, target, requirements, guards, diagnostics);
                 check_targeted_calls(body, caller, target, requirements, guards, diagnostics);
+            }
+            Stmt::While { cond, body } => {
+                check_expr_calls(cond, caller, target, requirements, guards, diagnostics);
+                check_targeted_calls(body, caller, target, requirements, guards, diagnostics);
+            }
+            Stmt::Match { scrutinee, arms } => {
+                check_expr_calls(scrutinee, caller, target, requirements, guards, diagnostics);
+                for arm in arms {
+                    check_targeted_calls(
+                        &arm.body,
+                        caller,
+                        target,
+                        requirements,
+                        guards,
+                        diagnostics,
+                    );
+                }
             }
             Stmt::Assign { target: lhs, expr } => {
                 check_expr_calls(lhs, caller, target, requirements, guards, diagnostics);
@@ -326,7 +350,15 @@ fn check_expr_calls(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     match expr {
-        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::String(_) | Expr::Var(_) => {}
+        Expr::Lambda { body, .. } => {
+            check_expr_calls(body, caller, target, requirements, guards, diagnostics)
+        }
+        Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::String(_)
+        | Expr::Var(_)
+        | Expr::TraitConst { .. } => {}
         Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Field { base: expr, .. } => {
             check_expr_calls(expr, caller, target, requirements, guards, diagnostics);
         }
@@ -440,6 +472,7 @@ struct GuardContext {
 
 fn collect_feature_guards(expr: &Expr, guards: &mut GuardContext) {
     match expr {
+        Expr::Lambda { body, .. } => collect_feature_guards(body, guards),
         Expr::Call { name, .. } => {
             if let Some(feature) = standard_target_feature_probe(name) {
                 guards.features.insert(feature);
@@ -458,7 +491,8 @@ fn collect_feature_guards(expr: &Expr, guards: &mut GuardContext) {
         | Expr::Float(_)
         | Expr::Bool(_)
         | Expr::String(_)
-        | Expr::Var(_) => {}
+        | Expr::Var(_)
+        | Expr::TraitConst { .. } => {}
     }
 }
 
@@ -484,10 +518,22 @@ fn requirements_for_function(function: &FunctionDecl) -> TargetRequirements {
 fn collect_body_requirements(body: &[Stmt], requirements: &mut TargetRequirements) {
     for stmt in body {
         match stmt {
-            Stmt::If { then_body, .. }
-            | Stmt::For {
-                body: then_body, ..
-            } => collect_body_requirements(then_body, requirements),
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_body_requirements(then_body, requirements);
+                collect_body_requirements(else_body, requirements);
+            }
+            Stmt::For { body, .. } | Stmt::While { body, .. } => {
+                collect_body_requirements(body, requirements)
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    collect_body_requirements(&arm.body, requirements);
+                }
+            }
             Stmt::Asm(asm) => {
                 requirements.families.insert(normalize_family(&asm.target));
             }
@@ -495,7 +541,9 @@ fn collect_body_requirements(body: &[Stmt], requirements: &mut TargetRequirement
             | Stmt::Return(_)
             | Stmt::Require(_)
             | Stmt::Assign { .. }
-            | Stmt::Expr(_) => {}
+            | Stmt::Expr(_)
+            | Stmt::Break
+            | Stmt::Continue => {}
         }
     }
 }
@@ -505,15 +553,27 @@ fn asm_targets(body: &[Stmt]) -> Vec<String> {
     for stmt in body {
         match stmt {
             Stmt::Asm(asm) => targets.push(asm.target.clone()),
-            Stmt::If { then_body, .. }
-            | Stmt::For {
-                body: then_body, ..
-            } => targets.extend(asm_targets(then_body)),
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                targets.extend(asm_targets(then_body));
+                targets.extend(asm_targets(else_body));
+            }
+            Stmt::For { body, .. } | Stmt::While { body, .. } => targets.extend(asm_targets(body)),
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    targets.extend(asm_targets(&arm.body));
+                }
+            }
             Stmt::Let { .. }
             | Stmt::Return(_)
             | Stmt::Require(_)
             | Stmt::Assign { .. }
-            | Stmt::Expr(_) => {}
+            | Stmt::Expr(_)
+            | Stmt::Break
+            | Stmt::Continue => {}
         }
     }
     targets

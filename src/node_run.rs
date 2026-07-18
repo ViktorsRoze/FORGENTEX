@@ -72,7 +72,7 @@ pub fn detect_node() -> Option<(String, String)> {
     None
 }
 
-fn dedent(lines: &[String]) -> String {
+pub(crate) fn dedent(lines: &[String]) -> String {
     let indent = lines
         .iter()
         .filter(|l| !l.trim().is_empty())
@@ -93,7 +93,7 @@ fn dedent(lines: &[String]) -> String {
 }
 
 /// The entry is the first named `function` in the body.
-fn find_entry(body: &str) -> Option<String> {
+pub(crate) fn find_entry(body: &str) -> Option<String> {
     let marker = "function ";
     let idx = body.find(marker)?;
     let rest = &body[idx + marker.len()..];
@@ -127,6 +127,54 @@ fn matches(expected: &CapsuleValue, got: &str) -> bool {
         CapsuleValue::Bool(b) => got == if *b { "true" } else { "false" },
         CapsuleValue::Str(s) => got.trim_matches('"') == s,
     }
+}
+
+/// Invoke a node/typescript capsule's entry with live, JSON-encoded positional
+/// arguments (a JSON array string), returning the entry's JSON result printed on
+/// stdout. The live capsule runtime (rt.1) path: real runtime values are
+/// marshaled across the typed boundary instead of replaying mock fixtures, gated
+/// by the capsule's sandbox approval.
+pub fn invoke_live(capsule: &Capsule, json_args: &str) -> Result<String, String> {
+    if !crate::sandbox::is_approved(capsule) {
+        return Err("capsule effects are not covered by its sandbox".to_string());
+    }
+    let body = dedent(&capsule.code);
+    let entry = find_entry(&body)
+        .ok_or_else(|| "no top-level function found in capsule body".to_string())?;
+    let (node_name, _version) =
+        detect_node().ok_or_else(|| "no host node found (looked for $NODE, node)".to_string())?;
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LIVE_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = LIVE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir =
+        std::env::temp_dir().join(format!("forgentex_{}_{}_nodelive", std::process::id(), seq));
+    std::fs::create_dir_all(&dir).map_err(|err| format!("failed to create scratch dir: {err}"))?;
+    let is_ts = capsule.language == "typescript";
+    let driver_path = dir.join(if is_ts { "driver.ts" } else { "driver.mjs" });
+    let driver = format!(
+        "{body}\nconst _args = JSON.parse(process.argv[2]);\nconst _result = {entry}(..._args);\nconsole.log(JSON.stringify(_result));\n"
+    );
+    std::fs::write(&driver_path, driver).map_err(|err| format!("failed to write driver: {err}"))?;
+
+    let mut command = Command::new(&node_name);
+    if is_ts {
+        command.arg("--experimental-strip-types");
+    }
+    let output = command
+        .arg(&driver_path)
+        .arg(json_args)
+        .output()
+        .map_err(|err| format!("failed to spawn node: {err}"))?;
+    let _ = std::fs::remove_dir_all(&dir);
+    if !output.status.success() {
+        return Err(format!(
+            "node capsule '{}' raised: {}",
+            capsule.name,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn select<'a>(program: &'a Program, name: Option<&str>) -> Option<&'a Capsule> {

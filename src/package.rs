@@ -72,6 +72,7 @@ pub struct PackageBuildTarget {
     pub triple: String,
     pub status: String,
     pub files: Vec<PathBuf>,
+    pub metadata_files: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -214,6 +215,7 @@ pub fn build_package_matrix(
             triple,
             status: "built".to_string(),
             files: artifacts.files,
+            metadata_files: artifacts.metadata_files,
         });
     }
     Ok(PackageBuildReport {
@@ -406,11 +408,17 @@ impl PackageBuildReport {
         ));
         for target in &self.targets {
             out.push_str(&format!(
-                "  - {} status={} files=[{}]\n",
+                "  - {} status={} files=[{}] metadata=[{}]\n",
                 target.triple,
                 target.status,
                 target
                     .files
+                    .iter()
+                    .map(|path| display_path(path))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                target
+                    .metadata_files
                     .iter()
                     .map(|path| display_path(path))
                     .collect::<Vec<_>>()
@@ -443,6 +451,13 @@ impl PackageBuildReport {
                 .map(|path| display_path(path))
                 .collect::<Vec<_>>();
             push_string_array_inline(&mut out, "files", &files);
+            out.push_str(", ");
+            let metadata_files = target
+                .metadata_files
+                .iter()
+                .map(|path| display_path(path))
+                .collect::<Vec<_>>();
+            push_string_array_inline(&mut out, "metadata_files", &metadata_files);
             out.push('}');
         }
         if !self.targets.is_empty() {

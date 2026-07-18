@@ -1,0 +1,98 @@
+# Deterministic typed-buffer handoff across isolated native stages.
+
+share sample_count: i32 = 4
+share samples: Vec[i16]
+share sample_sum: i32 = 0
+share values: Vec[i32]
+share value_sum: i64 = 0
+
+foreign make_pipeline_samples c version "c11" effects [alloc]:
+    input count: i32
+    output samples: Vec[i16]
+    sandbox "fs.none"
+    bind sample_count read
+    bind samples rw
+    code:
+        #include "types.h"
+        #include <stdint.h>
+        #include <stdlib.h>
+
+        FgxOwnedI16 make_pipeline_samples(int32_t count) {
+            FgxOwnedI16 result = { NULL, 0, 0 };
+            if (count <= 0) return result;
+            result.ptr = (int16_t *)malloc((size_t)count * sizeof(int16_t));
+            if (result.ptr == NULL) return result;
+            result.len = (size_t)count;
+            result.capacity = (size_t)count;
+            for (size_t i = 0; i < result.len; ++i) {
+                result.ptr[i] = (int16_t)(((int32_t)i - 2) * 100);
+            }
+            return result;
+        }
+
+        void make_pipeline_samples_free(int16_t *ptr, size_t len, size_t capacity) {
+            (void)len;
+            (void)capacity;
+            free(ptr);
+        }
+
+foreign sum_pipeline_samples c version "c11" effects [cpu]:
+    input samples: &[i16]
+    output sum: i32
+    sandbox "fs.none"
+    bind samples read
+    bind sample_sum rw
+    code:
+        #include <stddef.h>
+        #include <stdint.h>
+
+        int32_t sum_pipeline_samples(const int16_t *samples, size_t samples_len) {
+            int32_t sum = 0;
+            for (size_t i = 0; i < samples_len; ++i) sum += samples[i];
+            return sum;
+        }
+
+foreign make_pipeline_values c version "c11" effects [alloc]:
+    input base: i32
+    output values: Vec[i32]
+    sandbox "fs.none"
+    bind sample_sum read
+    bind values rw
+    code:
+        #include "types.h"
+        #include <stdint.h>
+        #include <stdlib.h>
+
+        FgxOwnedI32 make_pipeline_values(int32_t base) {
+            FgxOwnedI32 result = { NULL, 0, 0 };
+            result.ptr = (int32_t *)malloc(3 * sizeof(int32_t));
+            if (result.ptr == NULL) return result;
+            result.len = 3;
+            result.capacity = 3;
+            for (size_t i = 0; i < result.len; ++i) {
+                result.ptr[i] = base + (int32_t)i * 100000;
+            }
+            return result;
+        }
+
+        void make_pipeline_values_free(int32_t *ptr, size_t len, size_t capacity) {
+            (void)len;
+            (void)capacity;
+            free(ptr);
+        }
+
+foreign sum_pipeline_values c version "c11" effects [cpu]:
+    input values: &[i32]
+    output sum: i64
+    sandbox "fs.none"
+    bind values read
+    bind value_sum rw
+    code:
+        #include <stddef.h>
+        #include <stdint.h>
+
+        int64_t sum_pipeline_values(const int32_t *values, size_t values_len) {
+            int64_t sum = 0;
+            for (size_t i = 0; i < values_len; ++i) sum += values[i];
+            return sum;
+        }

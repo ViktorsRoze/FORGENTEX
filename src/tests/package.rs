@@ -66,6 +66,11 @@ fn package_test_and_build_matrix_cover_stage23_targets() {
     assert_eq!(build.schema, "forgentex.package_build.v1");
     assert_eq!(build.targets.len(), 1);
     assert!(build.targets[0].files.iter().all(|path| path.exists()));
+    assert!(build.targets[0]
+        .metadata_files
+        .iter()
+        .all(|path| path.exists()));
+    assert!(build.to_json().contains("\"metadata_files\": ["));
     let _ = fs::remove_dir_all(out_dir);
 }
 

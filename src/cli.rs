@@ -4,11 +4,12 @@ use std::path::{Path, PathBuf};
 use crate::abi::{abi_json, abi_text, analyze_abi, generate_header};
 use crate::asmcheck::{analyze_assembly, asm_check_json, review_text};
 use crate::backend::{
-    backend_catalog_json, backend_catalog_text, backend_ir_json, backend_ir_text,
+    backend_by_name, backend_catalog_json, backend_catalog_text, backend_ir_json, backend_ir_text,
     build_project_with_backend, frontend_contract_json, generate_backend_ir,
+    run_entry_with_backend, Backend,
 };
 use crate::borrow::analyze_borrows;
-use crate::borrow_conformance::run_borrow_conformance;
+use crate::borrow_conformance::{run_borrow_conformance, run_borrow_conformance_with_campaign};
 use crate::cfg::{back_edges, build_cfg, cfg_to_json, loop_carried_live};
 use crate::diag::diagnostics_to_json;
 use crate::diagnostic_catalog::{
@@ -23,7 +24,7 @@ use crate::graph::{
     roundtrip_graph, validate_graph, view_graph,
 };
 use crate::inline_tests::{run_inline_tests, InlineTestOptions};
-use crate::interp::{run_demo, run_entry_json};
+use crate::interp::{run_demo_with_ir, run_entry_json_hosted_with_ir};
 use crate::lexer::lex;
 use crate::package::{
     build_package_matrix, create_package, generate_lock, publish_dry_run, run_package_tests,
@@ -83,6 +84,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         "net-run" => cmd_net_run(&args[2..]),
         "crypto-selftest" => cmd_crypto_selftest(&args[2..]),
         "polyglot-run" => cmd_polyglot_run(&args[2..]),
+        "pipeline-run" => cmd_pipeline_run(&args[2..]),
         "trust-session" => cmd_trust_session(&args[2..]),
         "asm-check" => cmd_asm_check(&args[2..]),
         "abi" => cmd_abi(&args[2..]),
@@ -103,6 +105,8 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         "effects" => cmd_effects(&args[2..]),
         "patch" => cmd_patch(&args[2..]),
         "run" => cmd_run(&args[2..]),
+        "debug" => cmd_debug(&args[2..]),
+        "optimize" => cmd_optimize(&args[2..]),
         "map" => cmd_map(&args[2..]),
         "get" => cmd_get(&args[2..]),
         "context" => cmd_context(&args[2..]),
@@ -328,11 +332,58 @@ fn cmd_borrow_report(args: &[String]) -> Result<(), String> {
 }
 
 fn cmd_borrow_conformance(args: &[String]) -> Result<(), String> {
-    if args.iter().any(|arg| arg != "--json") {
-        return Err("usage: fgx borrow-conformance [--json]".to_string());
+    let usage = "usage: fgx borrow-conformance [--json] [--campaign-seed <u64>] [--campaign-cases <1..256>] [--failure-dir <path>]";
+    let mut json = false;
+    let mut campaign_seed = crate::borrow_reference::DEFAULT_SAFETY_CAMPAIGN_SEED;
+    let mut campaign_cases = crate::borrow_reference::DEFAULT_SAFETY_CAMPAIGN_CASES_PER_FAMILY;
+    let mut failure_dir = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--json" => {
+                json = true;
+                index += 1;
+            }
+            "--campaign-seed" => {
+                let value = args.get(index + 1).ok_or_else(|| usage.to_string())?;
+                campaign_seed = parse_u64_seed(value)
+                    .ok_or_else(|| format!("invalid campaign seed '{value}'; expected u64"))?;
+                index += 2;
+            }
+            "--campaign-cases" => {
+                let value = args.get(index + 1).ok_or_else(|| usage.to_string())?;
+                campaign_cases = value.parse::<usize>().map_err(|_| {
+                    format!("invalid campaign case count '{value}'; expected 1..256")
+                })?;
+                if !(1..=256).contains(&campaign_cases) {
+                    return Err(format!(
+                        "invalid campaign case count '{value}'; expected 1..256"
+                    ));
+                }
+                index += 2;
+            }
+            "--failure-dir" => {
+                failure_dir = Some(
+                    args.get(index + 1)
+                        .ok_or_else(|| usage.to_string())?
+                        .clone(),
+                );
+                index += 2;
+            }
+            _ => return Err(usage.to_string()),
+        }
     }
-    let report = run_borrow_conformance();
-    if args.iter().any(|arg| arg == "--json") {
+    let report = if campaign_seed == crate::borrow_reference::DEFAULT_SAFETY_CAMPAIGN_SEED
+        && campaign_cases == crate::borrow_reference::DEFAULT_SAFETY_CAMPAIGN_CASES_PER_FAMILY
+    {
+        run_borrow_conformance()
+    } else {
+        run_borrow_conformance_with_campaign(campaign_seed, campaign_cases)
+    };
+    if let Some(directory) = failure_dir {
+        report.persist_campaign_failures(Path::new(&directory))?;
+    }
+    if json {
         println!("{}", report.to_json());
     } else {
         print!("{}", report.to_text());
@@ -342,6 +393,16 @@ fn cmd_borrow_conformance(args: &[String]) -> Result<(), String> {
     } else {
         Err("borrow conformance suite failed".to_string())
     }
+}
+
+fn parse_u64_seed(value: &str) -> Option<u64> {
+    value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .map_or_else(
+            || value.parse().ok(),
+            |hex| u64::from_str_radix(hex, 16).ok(),
+        )
 }
 
 fn cmd_asm_check(args: &[String]) -> Result<(), String> {
@@ -441,7 +502,7 @@ fn cmd_stdlib(args: &[String]) -> Result<(), String> {
 }
 
 fn cmd_ir(args: &[String]) -> Result<(), String> {
-    let project = required_arg(args, 0, "ir <project> [--json|--contract-json]")?;
+    let project = required_arg(args, 0, "ir <project|file> [--json|--contract-json]")?;
     if args.iter().any(|arg| arg == "--contract-json") {
         println!("{}", frontend_contract_json(Path::new(project))?);
         return Ok(());
@@ -493,9 +554,44 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     enforce_package_security(Path::new(project))?;
+    // v3.2: `--opt` builds through the optimizer (report + measured C delta).
+    if args.iter().any(|arg| arg == "--opt") {
+        let (artifacts, report) = crate::backend::build_project_with_backend_opt(
+            Path::new(project),
+            backend,
+            Path::new(out_dir),
+        )?;
+        print!("{}", report.to_text());
+        // Measure the source-size delta against an unoptimized emission.
+        let baseline_len = match backend {
+            "c" => crate::c_backend::generate_c_for_project(Path::new(project))
+                .map(|(_, source)| source.len())
+                .ok(),
+            "zig" => crate::zig_backend::generate_zig_for_project(Path::new(project))
+                .map(|source| source.len())
+                .ok(),
+            _ => None,
+        };
+        if let (Some(before), Some(source_file)) = (baseline_len, artifacts.files.last()) {
+            if let Ok(after) = fs::metadata(source_file).map(|meta| meta.len() as usize) {
+                let saved = before.saturating_sub(after);
+                println!("source size: {before} bytes -> {after} bytes ({saved} saved)");
+            }
+        }
+        for file in artifacts.files {
+            println!("generated {}", file.display());
+        }
+        for file in artifacts.metadata_files {
+            println!("metadata {}", file.display());
+        }
+        return Ok(());
+    }
     let artifacts = build_project_with_backend(Path::new(project), backend, Path::new(out_dir))?;
     for file in artifacts.files {
         println!("generated {}", file.display());
+    }
+    for file in artifacts.metadata_files {
+        println!("metadata {}", file.display());
     }
     Ok(())
 }
@@ -695,7 +791,8 @@ fn cmd_io_run(args: &[String]) -> Result<(), String> {
         option_value(args, "--entry").ok_or_else(|| "io-run requires --entry <fn>".to_string())?;
     let grants = collect_option_values(args, "--grant");
     let call_args = collect_option_values(args, "--arg");
-    let report = crate::io_run::run(file, &program, entry, call_args, grants);
+    let ir = generate_backend_ir(Path::new(file))?;
+    let report = crate::io_run::run_with_ir(file, &program, &ir, entry, call_args, grants);
     if args.iter().any(|arg| arg == "--json") {
         println!("{}", report.to_json());
     } else {
@@ -741,6 +838,46 @@ fn cmd_polyglot_run(args: &[String]) -> Result<(), String> {
     }
 }
 
+fn cmd_pipeline_run(args: &[String]) -> Result<(), String> {
+    let file = required_arg(
+        args,
+        0,
+        "pipeline-run <file> [--set share=value] [--allow-effects a,b] [--json]",
+    )?;
+    let program = read_program(file)?;
+    let mut overrides = Vec::new();
+    for item in collect_option_values(args, "--set") {
+        let (name, value) = item
+            .split_once('=')
+            .ok_or_else(|| format!("pipeline --set needs name=value, got '{item}'"))?;
+        let mut values = crate::parser::parse_capsule_values(value)?;
+        if values.len() != 1 {
+            return Err(format!(
+                "pipeline --set '{name}' needs exactly one scalar value"
+            ));
+        }
+        overrides.push((name.to_string(), values.remove(0)));
+    }
+    let allow = option_value(args, "--allow-effects").map(|value| {
+        value
+            .split(',')
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect::<Vec<_>>()
+    });
+    let report = crate::pipeline::run(file, &program, overrides, allow);
+    if args.iter().any(|arg| arg == "--json") {
+        println!("{}", report.to_json());
+    } else {
+        print!("{}", report.to_text());
+    }
+    if report.is_success() {
+        Ok(())
+    } else {
+        Err(format!("pipeline run: {}", report.status))
+    }
+}
+
 fn cmd_crypto_selftest(args: &[String]) -> Result<(), String> {
     let report = crate::crypto::self_test();
     if args.iter().any(|arg| arg == "--json") {
@@ -766,7 +903,8 @@ fn cmd_net_run(args: &[String]) -> Result<(), String> {
         option_value(args, "--entry").ok_or_else(|| "net-run requires --entry <fn>".to_string())?;
     let allow = collect_option_values(args, "--allow");
     let call_args = collect_option_values(args, "--arg");
-    let report = crate::net_run::run(file, &program, entry, call_args, allow);
+    let ir = generate_backend_ir(Path::new(file))?;
+    let report = crate::net_run::run_with_ir(file, &program, &ir, entry, call_args, allow);
     if args.iter().any(|arg| arg == "--json") {
         println!("{}", report.to_json());
     } else {
@@ -908,6 +1046,67 @@ fn cmd_native_review(args: &[String]) -> Result<(), String> {
     }
     if args.iter().any(|arg| arg == "--strict") && report.is_rejected() {
         return Err(format!("native/GPU capsule review rejected for {file}"));
+    }
+    Ok(())
+}
+
+/// The tracing debugger (v0): a deterministic step trace whose node ids are
+/// the same canonical ids semantic patches target. See docs/debugger_plan.md.
+/// v3.2: the dependency-free optimizer. Reports the passes applied
+/// (forgentex.optimize.v1); `--emit` prints the optimized human source.
+/// In-memory only — source files are never rewritten.
+fn cmd_optimize(args: &[String]) -> Result<(), String> {
+    let file = required_arg(args, 0, "optimize <file> [--json] [--emit]")?;
+    let mut program = read_program(file)?;
+    let report = crate::optimize::optimize_program(&mut program);
+    if args.iter().any(|arg| arg == "--json") {
+        println!("{}", report.to_json());
+    } else {
+        print!("{}", report.to_text());
+    }
+    if args.iter().any(|arg| arg == "--emit") {
+        print!("{}", crate::format::format_human(&program));
+    }
+    Ok(())
+}
+
+fn cmd_debug(args: &[String]) -> Result<(), String> {
+    let file = required_arg(
+        args,
+        0,
+        "debug <file> --entry <fn> [--json-input <in>] [--break <node-id>] [--max-steps N] [--json]",
+    )?;
+    let program = read_program(file)?;
+    let diagnostics = check(&program);
+    if !diagnostics.is_empty() {
+        return Err(format!(
+            "program has diagnostics and was not run:
+{}",
+            diagnostics_to_json(&diagnostics)
+        ));
+    }
+    let entry =
+        option_value(args, "--entry").ok_or_else(|| "debug requires --entry <fn>".to_string())?;
+    let input = if let Some(input_file) = option_value(args, "--json-input") {
+        fs::read_to_string(input_file)
+            .map_err(|err| format!("failed to read json input {input_file}: {err}"))?
+    } else {
+        "{}".to_string()
+    };
+    let mut options = crate::interp::DebugOptions {
+        break_at: option_value(args, "--break").map(str::to_string),
+        ..Default::default()
+    };
+    if let Some(max) = option_value(args, "--max-steps") {
+        options.max_steps = max
+            .parse::<usize>()
+            .map_err(|_| format!("invalid --max-steps value: {max}"))?;
+    }
+    let report = crate::interp::debug_entry(&program, entry, &input, options)?;
+    if args.iter().any(|arg| arg == "--json") {
+        println!("{}", report.to_json());
+    } else {
+        print!("{}", report.to_text());
     }
     Ok(())
 }
@@ -1204,13 +1403,18 @@ fn cmd_patch(args: &[String]) -> Result<(), String> {
 
 fn cmd_run(args: &[String]) -> Result<(), String> {
     let file = required_arg(args, 0, "run <file>")?;
-    let program = read_program(file)?;
+    let mut program = read_program(file)?;
     let diagnostics = check(&program);
     if !diagnostics.is_empty() {
         return Err(format!(
             "program has diagnostics and was not run:\n{}",
             diagnostics_to_json(&diagnostics)
         ));
+    }
+    // v3.2: `--opt` runs the dependency-free optimizer on the checked program
+    // (in memory only) before executing.
+    if args.iter().any(|arg| arg == "--opt") {
+        let _ = crate::optimize::optimize_program(&mut program);
     }
     if let Some(entry) = option_value(args, "--entry") {
         let input = if let Some(input_file) = option_value(args, "--json-input") {
@@ -1219,10 +1423,58 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
         } else {
             "{}".to_string()
         };
-        println!("{}", run_entry_json(&program, entry, &input)?);
+        let backend = option_value(args, "--backend").unwrap_or("interp");
+        // `--live` enables the hosted program runtime (rt.1 + dom.1): capsule
+        // calls reach real host runtimes and fs/net builtins run against the
+        // granted scopes, each domain gated and audited. Off by default so a
+        // plain run stays deterministic and touches nothing. `--allow-effects
+        // a,b` restricts capsule effects; `--grant-fs fs.read,fs.write` grants
+        // filesystem capabilities; `--grant-net host,...` allowlists endpoints.
+        if args.iter().any(|arg| arg == "--live") {
+            let backend_kind =
+                backend_by_name(backend).ok_or_else(|| format!("unknown backend '{backend}'"))?;
+            if backend_kind.info().name != "interp" {
+                return Err(format!(
+                    "backend '{}' does not support hosted live runs yet; use --backend interp",
+                    backend_kind.info().name
+                ));
+            }
+            let split = |value: &str| {
+                value
+                    .split(',')
+                    .map(|item| item.trim().to_string())
+                    .filter(|item| !item.is_empty())
+                    .collect::<Vec<_>>()
+            };
+            let allow = option_value(args, "--allow-effects").map(split);
+            let fs_grants = option_value(args, "--grant-fs")
+                .map(split)
+                .unwrap_or_default();
+            let net_allow = option_value(args, "--grant-net")
+                .map(split)
+                .unwrap_or_default();
+            // rt.3: warm workers (one persistent process per capsule) are the
+            // DEFAULT for live runs — measured 8.6-9.8x on 10-call loops, with
+            // auto-respawn on worker death. `--cold` restores per-call spawn;
+            // `--warm` is accepted for compatibility (it is the default).
+            let warm = !args.iter().any(|arg| arg == "--cold");
+            let ir = generate_backend_ir(Path::new(file))?;
+            println!(
+                "{}",
+                run_entry_json_hosted_with_ir(
+                    &program, &ir, entry, &input, allow, fs_grants, net_allow, warm
+                )?
+            );
+        } else {
+            println!(
+                "{}",
+                run_entry_with_backend(&program, backend, entry, &input)?.json
+            );
+        }
         return Ok(());
     }
-    println!("{}", run_demo(&program)?);
+    let ir = generate_backend_ir(Path::new(file))?;
+    println!("{}", run_demo_with_ir(&program, &ir)?);
     Ok(())
 }
 
@@ -1620,7 +1872,7 @@ Commands:\n\
   fgx check <file> --json\n\
   fgx check <file> --target <triple> --json\n\
   fgx borrow-report <file> [--json]\n\
-  fgx borrow-conformance [--json]\n\
+  fgx borrow-conformance [--json] [--campaign-seed <u64>] [--campaign-cases <1..256>] [--failure-dir <path>]\n\
   fgx cfg <file> [--json]\n\
   fgx capsule <file> [--json] [--strict]\n\
   fgx capsule-run <file> [--capsule <name>] [--input <values>] [--sandbox] [--json] [--strict]\n\
@@ -1643,13 +1895,14 @@ Commands:\n\
   fgx net-run <file> --entry <fn> [--allow <host:port>]... [--arg <v>]... [--json]\n\
   fgx crypto-selftest [--json]\n\
   fgx polyglot-run <file> [--out <dir>] [--json]\n\
+  fgx pipeline-run <file> [--set share=value] [--allow-effects a,b] [--json]\n\
   fgx trust-session [--capability <cap>] [--payload <p>] [--json]\n\
   fgx asm-check <file> --target <triple> [--json]\n\
   fgx abi <file> --target <triple> [--json]\n\
   fgx header <file> --target <triple>\n\
   fgx simd-review <file> --target <triple> [--json]\n\
   fgx backends [--json]\n\
-  fgx ir <project> [--json|--contract-json]\n\
+  fgx ir <project|file> [--json|--contract-json]\n\
   fgx stdlib [--json]\n\
   fgx check --project [path] --json\n\
   fgx targets [--json]\n\
@@ -1665,7 +1918,7 @@ Commands:\n\
   fgx api --public [--project <path>]\n\
   fgx effects <file> --json\n\
   fgx patch <source> <patch> --review|--check-only|--emit-review-json\n\
-  fgx run <file> [--entry <function> --json-input <file>]\n\
+  fgx run <file> [--entry <function> --json-input <file> --backend interp]\n\
   fgx map <dir> --out <file> [--include-targets]\n\
   fgx map --project [path] --out <file> [--include-targets]\n\
   fgx get <symbol> --from <dir> --deps types\n\

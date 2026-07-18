@@ -1,0 +1,31 @@
+module music.timeline
+import core.music
+
+# The visualizer's authored markers use one-based bars/beats and 480 ticks per
+# beat. These small wrappers keep the demo policy visible at the call site.
+export fn marker_tick(position: MusicalTime) -> u32:
+    return core_music_to_tick(position, 4, 480)
+
+export fn preview_duration_ms() -> u32:
+    return core_music_tick_to_millis(30720, 120, 480)
+
+export fn quantized_drop_tick(raw_tick: u32) -> u32:
+    return core_music_quantize_tick(raw_tick, 240)
+
+# action_id 1 is the approved "metal rain" scene action in the demo brief.
+export fn metal_rain_cue(position: MusicalTime) -> MusicCue:
+    return core_music_make_cue(5, 1, 0, position, 1920, 100, 4, 480, 240)
+
+# Approved scene-action entry 1: emit up to 256 instances of target 1 using a
+# fixed deterministic seed. parameter_q16=65536 represents a scale of 1.0.
+export fn metal_rain_action() -> SceneAction:
+    return core_music_make_action(1, 2, 1, 65536, 7, 256)
+
+export fn cue_is_in_preview(cue: MusicCue) -> bool:
+    return core_music_cue_valid(cue, 4, 30720)
+
+export fn cue_action_is_in_preview(cue: MusicCue, action: SceneAction) -> bool:
+    return core_music_cue_action_valid(cue, action, 4, 30720, 1024)
+
+export fn winning_cue_id(left: MusicCue, right: MusicCue) -> u32:
+    return core_music_conflict_winner_id(left, right)

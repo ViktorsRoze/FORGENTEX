@@ -1,0 +1,32 @@
+# Native-call v1.23: C transfers an owned UTF-8 string by descriptor and copy.
+
+foreign make_greeting_c c version "c11" effects [alloc]:
+    output greeting: str
+    sandbox "fs.none"
+    code:
+        #include "types.h"
+        #include <stdint.h>
+        #include <stdlib.h>
+        #include <string.h>
+
+        FgxOwnedStr make_greeting_c(void) {
+            static const uint8_t text[] = {
+                70, 111, 114, 103, 101, 110, 116, 101, 120, 44, 10, 226, 156, 147
+            };
+            FgxOwnedStr result = { NULL, 0, 0 };
+            result.ptr = (uint8_t *)malloc(sizeof(text));
+            if (result.ptr == NULL) return result;
+            memcpy(result.ptr, text, sizeof(text));
+            result.len = sizeof(text);
+            result.capacity = sizeof(text);
+            return result;
+        }
+
+        void make_greeting_c_free(uint8_t *ptr, size_t len, size_t capacity) {
+            (void)len;
+            (void)capacity;
+            free(ptr);
+        }
+
+fn greeting_from_c() -> str effects [alloc]:
+    return make_greeting_c()

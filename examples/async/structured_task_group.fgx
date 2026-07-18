@@ -1,0 +1,20 @@
+# Deterministic structured concurrency: bounded children, ordered join, no escaped handles.
+
+fn score(seed: i32) -> i32:
+    return seed * 10
+
+fn structured_scores() -> i32 effects [concurrency.task]:
+    let group: TaskGroup[i32] = task_group_new(3)
+    let first: bool = task_group_spawn(group, score, 1)
+    let second: bool = task_group_spawn(group, score, 2)
+    let third: bool = task_group_spawn(group, score, 3)
+    if !first || !second || !third:
+        return -1
+    let results: Vec[i32] = task_group_await_all(group)
+    return results[0] + results[1] + results[2]
+
+fn cancel_scores() -> usize effects [concurrency.task]:
+    let group: TaskGroup[i32] = task_group_new(2)
+    let first: bool = task_group_spawn(group, score, 1)
+    let second: bool = task_group_spawn(group, score, 2)
+    return task_group_cancel(group)

@@ -51,7 +51,7 @@ The following CLI commands are part of the v0 demo contract:
 - `fgx check <file> --json`
 - `fgx check <file> --target <triple> --json`
 - `fgx borrow-report <file> [--json]`
-- `fgx borrow-conformance [--json]`
+- `fgx borrow-conformance [--json] [--campaign-seed <u64>] [--campaign-cases <1..256>] [--failure-dir <path>]`
 - `fgx asm-check <file> --target <triple>`
 - `fgx asm-check <file> --target <triple> --json`
 - `fgx abi <file> --target <triple>`
@@ -62,9 +62,9 @@ The following CLI commands are part of the v0 demo contract:
 - `fgx check --project [path] --json`
 - `fgx targets [--json]`
 - `fgx backends [--json]`
-- `fgx ir <project>`
-- `fgx ir <project> --json`
-- `fgx ir <project> --contract-json`
+- `fgx ir <project|file>`
+- `fgx ir <project|file> --json`
+- `fgx ir <project|file> --contract-json`
 - `fgx stdlib [--json]`
 - `fgx build <project> --backend c [--out <dir>]`
 - `fgx build <project> --backend zig [--out <dir>]`
@@ -87,7 +87,7 @@ The following CLI commands are part of the v0 demo contract:
 - `fgx patch <source> <patch> --check-only`
 - `fgx patch <source> <patch> --emit-review-json`
 - `fgx run <file>`
-- `fgx run <file> --entry <function> --json-input <file>`
+- `fgx run <file> --entry <function> --json-input <file> --backend interp`
 - `fgx map <dir> --out <file>`
 - `fgx map <dir> --include-targets --out <file>`
 - `fgx map --project [path] --out <file>`
@@ -162,7 +162,7 @@ The v0 demo now includes a manifest-backed project layer:
 
 The v0 demo now includes interpreter v1 behavior:
 
-- `fgx run <file> --entry <function> --json-input <file>` executes a selected safe function
+- `fgx run <file> --entry <function> --json-input <file> --backend interp` executes a selected safe function through the interpreter backend
 - JSON inputs can provide positional or named arguments plus golden expectations
 - JSON output reports entry, status, return value, and final bindings
 - mutable slice updates propagate through nested safe calls
@@ -237,14 +237,15 @@ The v0 demo now includes target-aware ABI/layout tooling:
 
 The v0 demo now includes a backend boundary before future native compiler work:
 
-- `fgx backends` lists the backend catalog and marks `c` as available
-- `fgx backends --json` emits the stable `forgentex.backends.v1` schema
-- `fgx ir <project>` emits human-readable FGIR using the `forgentex.backend_ir.v1` schema
-- `fgx ir <project> --json` emits machine-readable FGIR for backend experiments
-- `fgx ir <project> --contract-json` emits the `forgentex.frontend_contract.v1` schema with canonical AST hash, type diagnostics, and effect analysis
+- `fgx backends` lists the backend catalog and marks `interp`, `c`, and `zig` as available
+- `fgx backends --json` emits the stable `forgentex.backend_info.v1` schema with feature and dependency status
+- `fgx ir <project|file>` emits human-readable FGIR using the `forgentex.backend_ir.v1` schema
+- `fgx ir <project|file> --json` emits machine-readable FGIR for backend experiments
+- `fgx ir <project|file> --contract-json` emits the `forgentex.frontend_contract.v1` schema with canonical AST hash, type diagnostics, and effect analysis
 - `fgx build <project> --backend c` continues to use the C backend as the reference transpiler
 - `zig` is available as a source backend that emits generated `.zig` artifacts
 - planned `cranelift`, `llvm`, and `mlir` backends fail explicitly instead of pretending to generate native artifacts
+- optional native backend feature scaffolds are off by default and link no Rust dependencies in the default build
 - backend catalog metadata covers x86_64, ARMv7/ARM, AArch64, RISC-V 32-bit, and RISC-V 64-bit target families
 - backend choice must not alter frontend AST, type-checking, effect, patch, target, or ABI/layout semantics
 

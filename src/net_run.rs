@@ -7,7 +7,8 @@
 //! agent-to-agent transport substrate with runtime-enforced reach.
 
 use crate::ast::Program;
-use crate::interp::{run_entry_with_net, NetOp, Value};
+use crate::backend::BackendIr;
+use crate::interp::{run_entry_with_net, run_entry_with_net_with_ir, NetOp, Value};
 use crate::json;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -52,8 +53,33 @@ pub fn run(
     args: Vec<String>,
     allow: Vec<String>,
 ) -> NetRunReport {
+    run_impl(file, program, None, entry, args, allow)
+}
+
+pub fn run_with_ir(
+    file: &str,
+    program: &Program,
+    ir: &BackendIr,
+    entry: &str,
+    args: Vec<String>,
+    allow: Vec<String>,
+) -> NetRunReport {
+    run_impl(file, program, Some(ir), entry, args, allow)
+}
+
+fn run_impl(
+    file: &str,
+    program: &Program,
+    ir: Option<&BackendIr>,
+    entry: &str,
+    args: Vec<String>,
+    allow: Vec<String>,
+) -> NetRunReport {
     let values = args.into_iter().map(Value::String).collect();
-    let (value, ops, error) = run_entry_with_net(program, entry, values, allow.clone());
+    let (value, ops, error) = match ir {
+        Some(ir) => run_entry_with_net_with_ir(program, ir, entry, values, allow.clone()),
+        None => run_entry_with_net(program, entry, values, allow.clone()),
+    };
 
     let bytes_out = ops
         .iter()

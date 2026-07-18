@@ -24,7 +24,13 @@ pub fn analyze_contracts(program: &Program) -> Vec<LifetimeContract> {
         .iter()
         .filter_map(|item| match item {
             Item::Function(function) => Some(lifetime_contract(function, &functions)),
-            Item::Struct(_) | Item::Test(_) | Item::Capsule(_) | Item::Share(_) => None,
+            Item::Struct(_)
+            | Item::Enum(_)
+            | Item::Trait(_)
+            | Item::TraitImpl(_)
+            | Item::Test(_)
+            | Item::Capsule(_)
+            | Item::Share(_) => None,
         })
         .collect()
 }
@@ -96,17 +102,23 @@ fn returned_borrow_param_indices_from_body(
                 return Ok(returned);
             }
             Stmt::Return(None) => return Err(()),
-            Stmt::If { then_body, .. } => {
-                let mut branch_aliases = aliases.clone();
-                let branch_returns = returned_borrow_param_indices_from_body(
-                    then_body,
-                    &mut branch_aliases,
-                    functions,
-                    visiting,
-                )?;
-                returned.extend(branch_returns);
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                for branch in [then_body, else_body] {
+                    let mut branch_aliases = aliases.clone();
+                    let branch_returns = returned_borrow_param_indices_from_body(
+                        branch,
+                        &mut branch_aliases,
+                        functions,
+                        visiting,
+                    )?;
+                    returned.extend(branch_returns);
+                }
             }
-            Stmt::For { body, .. } => {
+            Stmt::For { body, .. } | Stmt::While { body, .. } => {
                 let mut loop_aliases = aliases.clone();
                 let loop_returns = returned_borrow_param_indices_from_body(
                     body,
@@ -116,7 +128,24 @@ fn returned_borrow_param_indices_from_body(
                 )?;
                 returned.extend(loop_returns);
             }
-            Stmt::Require(_) | Stmt::Assign { .. } | Stmt::Expr(_) | Stmt::Asm(_) => {}
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    let mut arm_aliases = aliases.clone();
+                    let arm_returns = returned_borrow_param_indices_from_body(
+                        &arm.body,
+                        &mut arm_aliases,
+                        functions,
+                        visiting,
+                    )?;
+                    returned.extend(arm_returns);
+                }
+            }
+            Stmt::Require(_)
+            | Stmt::Assign { .. }
+            | Stmt::Expr(_)
+            | Stmt::Asm(_)
+            | Stmt::Break
+            | Stmt::Continue => {}
         }
     }
     Ok(returned)
@@ -179,10 +208,16 @@ fn collect_mutations_from_stmt(
         Stmt::Return(Some(expr)) | Stmt::Require(expr) | Stmt::Expr(expr) => {
             collect_mutations_from_expr(expr, aliases, functions, visiting, out);
         }
-        Stmt::If { cond, then_body } => {
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
             collect_mutations_from_expr(cond, aliases, functions, visiting, out);
-            let mut branch_aliases = aliases.clone();
-            collect_mutations_from_body(then_body, &mut branch_aliases, functions, visiting, out);
+            for branch in [then_body, else_body] {
+                let mut branch_aliases = aliases.clone();
+                collect_mutations_from_body(branch, &mut branch_aliases, functions, visiting, out);
+            }
         }
         Stmt::For {
             start, end, body, ..
@@ -192,7 +227,19 @@ fn collect_mutations_from_stmt(
             let mut loop_aliases = aliases.clone();
             collect_mutations_from_body(body, &mut loop_aliases, functions, visiting, out);
         }
-        Stmt::Return(None) | Stmt::Asm(_) => {}
+        Stmt::While { cond, body } => {
+            collect_mutations_from_expr(cond, aliases, functions, visiting, out);
+            let mut loop_aliases = aliases.clone();
+            collect_mutations_from_body(body, &mut loop_aliases, functions, visiting, out);
+        }
+        Stmt::Match { scrutinee, arms } => {
+            collect_mutations_from_expr(scrutinee, aliases, functions, visiting, out);
+            for arm in arms {
+                let mut arm_aliases = aliases.clone();
+                collect_mutations_from_body(&arm.body, &mut arm_aliases, functions, visiting, out);
+            }
+        }
+        Stmt::Return(None) | Stmt::Asm(_) | Stmt::Break | Stmt::Continue => {}
     }
 }
 
@@ -230,6 +277,9 @@ fn collect_mutations_from_expr(
     out: &mut BTreeSet<usize>,
 ) {
     match expr {
+        Expr::Lambda { body, .. } => {
+            collect_mutations_from_expr(body, aliases, functions, visiting, out)
+        }
         Expr::Call { name, args } => {
             if let Some(callee) = functions.get(name) {
                 let mutated = mutated_borrow_param_indices_inner(callee, functions, visiting);
@@ -261,7 +311,12 @@ fn collect_mutations_from_expr(
             collect_mutations_from_expr(base, aliases, functions, visiting, out);
             collect_mutations_from_expr(index, aliases, functions, visiting, out);
         }
-        Expr::Var(_) | Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::String(_) => {}
+        Expr::Var(_)
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::String(_)
+        | Expr::TraitConst { .. } => {}
     }
 }
 
@@ -286,6 +341,7 @@ fn borrow_param_indices_for_expr(
     visiting: &mut Vec<String>,
 ) -> Option<BTreeSet<usize>> {
     match expr {
+        Expr::Lambda { .. } => None,
         Expr::Var(name) => aliases.get(name).cloned(),
         Expr::Call { name, args } => {
             let callee = functions.get(name)?;
@@ -307,6 +363,7 @@ fn borrow_param_indices_for_expr(
             borrow_param_indices_for_expr(expr, aliases, functions, visiting)
         }
         Expr::Int(_)
+        | Expr::TraitConst { .. }
         | Expr::Float(_)
         | Expr::Bool(_)
         | Expr::String(_)
@@ -356,7 +413,13 @@ fn function_index(program: &Program) -> HashMap<String, &FunctionDecl> {
         .iter()
         .filter_map(|item| match item {
             Item::Function(function) => Some((function.name.clone(), function)),
-            Item::Struct(_) | Item::Test(_) | Item::Capsule(_) | Item::Share(_) => None,
+            Item::Struct(_)
+            | Item::Enum(_)
+            | Item::Trait(_)
+            | Item::TraitImpl(_)
+            | Item::Test(_)
+            | Item::Capsule(_)
+            | Item::Share(_) => None,
         })
         .collect()
 }

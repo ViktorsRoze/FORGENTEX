@@ -15,6 +15,359 @@ use crate::ast::{Capsule, CapsuleValue, Program};
 use crate::diag::Diagnostic;
 use crate::json;
 
+pub const MAX_NATIVE_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArtifactPolicy {
+    pub media_type: String,
+    pub max_bytes: usize,
+    pub path: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenderPolicy {
+    pub profile: String,
+    pub seed_field: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EncodePolicy {
+    pub profile: String,
+}
+
+/// Parse the first governed image-encoder policy. Encoders consume an
+/// immutable owned-byte handoff and publish one image artifact; the pipeline
+/// binds input and output hashes in a separate receipt.
+pub fn encode_policy(capsule: &Capsule) -> Result<Option<EncodePolicy>, String> {
+    let mut profile = None;
+    let mut saw_encode_rule = false;
+    for rule in &capsule.sandbox {
+        let Some((key, value)) = rule.trim().split_once(char::is_whitespace) else {
+            if rule.starts_with("encode.") {
+                return Err(format!("encode rule '{rule}' requires a value"));
+            }
+            continue;
+        };
+        let value = value.trim();
+        match key {
+            "encode.profile" => {
+                saw_encode_rule = true;
+                if profile.replace(value.to_string()).is_some() {
+                    return Err("encode.profile may be declared only once".to_string());
+                }
+            }
+            other if other.starts_with("encode.") => {
+                return Err(format!("unknown encode policy '{other}'"));
+            }
+            _ => {}
+        }
+    }
+    if !saw_encode_rule {
+        return Ok(None);
+    }
+    let profile = profile.ok_or_else(|| "encode policy requires encode.profile".to_string())?;
+    if profile != "ppm" {
+        return Err("encode.profile must be 'ppm' in this slice".to_string());
+    }
+    let reads_bytes = matches!(
+        capsule.inputs.as_slice(),
+        [binding]
+            if matches!(&binding.ty, crate::ast::Type::Slice { mutable: false, elem }
+                if matches!(elem.as_ref(), crate::ast::Type::Primitive(element) if element == "u8"))
+    );
+    if !reads_bytes {
+        return Err("encode policy requires exactly one immutable &[u8] input".to_string());
+    }
+    let owns_bytes = matches!(
+        capsule.outputs.as_slice(),
+        [binding]
+            if matches!(&binding.ty, crate::ast::Type::Generic { name, args }
+                if name == "Vec"
+                    && matches!(args.as_slice(), [crate::ast::Type::Primitive(element)] if element == "u8"))
+    );
+    if !owns_bytes {
+        return Err("encode policy requires exactly one owned Vec[u8] output".to_string());
+    }
+    if capsule.risk_class() != "native" {
+        return Err("encode policy requires a native capsule".to_string());
+    }
+    if capsule
+        .sandbox
+        .iter()
+        .any(|rule| rule.trim().starts_with("audit.redact"))
+    {
+        return Err("encode policy cannot hash a redacted input".to_string());
+    }
+    let artifact = artifact_policy(capsule)?
+        .ok_or_else(|| "encode policy requires an image artifact policy".to_string())?;
+    if !artifact.media_type.starts_with("image/") {
+        return Err("encoded artifact media type must start with image/".to_string());
+    }
+    if artifact.path.is_none() {
+        return Err("encoder requires governed artifact.path persistence".to_string());
+    }
+    if !capsule
+        .effects
+        .iter()
+        .any(|effect| effect == "media.encode")
+    {
+        return Err("encode policy requires the media.encode effect".to_string());
+    }
+    for required in ["wall_ms", "cpu_ms", "mem_mb"] {
+        let expected = format!("limit.{required}");
+        let declared = capsule.sandbox.iter().any(|rule| {
+            rule.trim()
+                .split_once(char::is_whitespace)
+                .is_some_and(|(key, value)| key == expected && value.trim().parse::<u64>().is_ok())
+        });
+        if !declared {
+            return Err(format!("encode policy requires limit.{required}"));
+        }
+    }
+    Ok(Some(EncodePolicy { profile }))
+}
+
+/// Parse the first governed render policy. This slice supports preview images
+/// and raw-RGB handoffs produced from one named scene struct. The scene field
+/// is resolved by the pipeline before dispatch, so a receipt can never invent
+/// a seed that was not part of the renderer input.
+pub fn render_policy(capsule: &Capsule) -> Result<Option<RenderPolicy>, String> {
+    let mut profile = None;
+    let mut seed_field = None;
+    let mut saw_render_rule = false;
+    for rule in &capsule.sandbox {
+        let Some((key, value)) = rule.trim().split_once(char::is_whitespace) else {
+            if rule.starts_with("render.") {
+                return Err(format!("render rule '{rule}' requires a value"));
+            }
+            continue;
+        };
+        let value = value.trim();
+        match key {
+            "render.profile" => {
+                saw_render_rule = true;
+                if profile.replace(value.to_string()).is_some() {
+                    return Err("render.profile may be declared only once".to_string());
+                }
+            }
+            "render.seed_field" => {
+                saw_render_rule = true;
+                if seed_field.replace(value.to_string()).is_some() {
+                    return Err("render.seed_field may be declared only once".to_string());
+                }
+            }
+            other if other.starts_with("render.") => {
+                return Err(format!("unknown render policy '{other}'"));
+            }
+            _ => {}
+        }
+    }
+    if !saw_render_rule {
+        return Ok(None);
+    }
+    let profile = profile.ok_or_else(|| "render policy requires render.profile".to_string())?;
+    if profile != "preview" {
+        return Err("render.profile must be 'preview' in this slice".to_string());
+    }
+    let seed_field =
+        seed_field.ok_or_else(|| "render policy requires render.seed_field".to_string())?;
+    if seed_field.is_empty()
+        || !seed_field.chars().enumerate().all(|(index, ch)| {
+            ch == '_' || ch.is_ascii_alphanumeric() && (index > 0 || !ch.is_ascii_digit())
+        })
+    {
+        return Err("render.seed_field must be an identifier".to_string());
+    }
+    if !matches!(capsule.inputs.as_slice(), [binding] if matches!(binding.ty, crate::ast::Type::Named(_)))
+    {
+        return Err("render policy requires exactly one named scene-struct input".to_string());
+    }
+    let owns_bytes = matches!(
+        capsule.outputs.as_slice(),
+        [binding]
+            if matches!(&binding.ty, crate::ast::Type::Generic { name, args }
+                if name == "Vec"
+                    && matches!(args.as_slice(), [crate::ast::Type::Primitive(element)] if element == "u8"))
+    );
+    if !owns_bytes {
+        return Err("render policy requires exactly one owned Vec[u8] output".to_string());
+    }
+    if capsule.risk_class() != "native" {
+        return Err("render policy requires a native capsule".to_string());
+    }
+    if capsule
+        .sandbox
+        .iter()
+        .any(|rule| rule.trim().starts_with("audit.redact"))
+    {
+        return Err("render policy cannot disclose a seed from a redacted input".to_string());
+    }
+    let artifact = artifact_policy(capsule)?
+        .ok_or_else(|| "render policy requires an image artifact policy".to_string())?;
+    let is_image = artifact.media_type.starts_with("image/");
+    let is_raw_frame = artifact.media_type == "application/x-forgentex-rgb";
+    if !is_image && !is_raw_frame {
+        return Err(
+            "render artifact must be an image/* or application/x-forgentex-rgb".to_string(),
+        );
+    }
+    if is_image && artifact.path.is_none() {
+        return Err("rendered image requires governed artifact.path persistence".to_string());
+    }
+    if !capsule
+        .effects
+        .iter()
+        .any(|effect| matches!(effect.as_str(), "cpu.render" | "gpu.render"))
+    {
+        return Err("render policy requires the cpu.render or gpu.render effect".to_string());
+    }
+    for required in ["wall_ms", "cpu_ms", "mem_mb"] {
+        let declared = capsule.sandbox.iter().any(|rule| {
+            rule.trim()
+                .split_once(char::is_whitespace)
+                .is_some_and(|(key, value)| {
+                    key == format!("limit.{required}") && value.trim().parse::<u64>().is_ok()
+                })
+        });
+        if !declared {
+            return Err(format!("render policy requires limit.{required}"));
+        }
+    }
+    Ok(Some(RenderPolicy {
+        profile,
+        seed_field,
+    }))
+}
+
+/// Parse the optional artifact contract carried by a capsule's sandbox rules.
+/// Artifact metadata is meaningful only for the single owned `Vec[u8]`
+/// boundary; requiring both fields prevents a receipt from claiming an
+/// unbounded or untyped artifact after the native call has run.
+pub fn artifact_policy(capsule: &Capsule) -> Result<Option<ArtifactPolicy>, String> {
+    let mut media_type = None;
+    let mut max_bytes = None;
+    let mut path = None;
+    let mut saw_artifact_rule = false;
+    for rule in &capsule.sandbox {
+        let Some((key, value)) = rule.trim().split_once(char::is_whitespace) else {
+            if rule.starts_with("artifact.") {
+                return Err(format!("artifact rule '{rule}' requires a value"));
+            }
+            continue;
+        };
+        let value = value.trim();
+        match key {
+            "artifact.media_type" => {
+                saw_artifact_rule = true;
+                if media_type.replace(value.to_string()).is_some() {
+                    return Err("artifact.media_type may be declared only once".to_string());
+                }
+            }
+            "artifact.max_bytes" => {
+                saw_artifact_rule = true;
+                let parsed = value
+                    .parse::<usize>()
+                    .map_err(|_| "artifact.max_bytes must be a positive integer".to_string())?;
+                if max_bytes.replace(parsed).is_some() {
+                    return Err("artifact.max_bytes may be declared only once".to_string());
+                }
+            }
+            "artifact.path" => {
+                saw_artifact_rule = true;
+                if path.replace(value.to_string()).is_some() {
+                    return Err("artifact.path may be declared only once".to_string());
+                }
+            }
+            other if other.starts_with("artifact.") => {
+                return Err(format!("unknown artifact policy '{other}'"));
+            }
+            _ => {}
+        }
+    }
+    if !saw_artifact_rule {
+        return Ok(None);
+    }
+    let media_type =
+        media_type.ok_or_else(|| "artifact policy requires artifact.media_type".to_string())?;
+    let valid_media_type = media_type.split_once('/').is_some_and(|(kind, subtype)| {
+        !kind.is_empty()
+            && !subtype.is_empty()
+            && !subtype.contains('/')
+            && media_type
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"!#$&^_.+-/".contains(&byte))
+    });
+    if !valid_media_type {
+        return Err("artifact.media_type must be a valid type/subtype token".to_string());
+    }
+    let max_bytes =
+        max_bytes.ok_or_else(|| "artifact policy requires artifact.max_bytes".to_string())?;
+    if max_bytes == 0 || max_bytes > MAX_NATIVE_ARTIFACT_BYTES {
+        return Err(format!(
+            "artifact.max_bytes must be between 1 and {MAX_NATIVE_ARTIFACT_BYTES}"
+        ));
+    }
+    let owns_bytes = matches!(
+        capsule.outputs.as_slice(),
+        [binding]
+            if matches!(&binding.ty, crate::ast::Type::Generic { name, args }
+                if name == "Vec"
+                    && matches!(args.as_slice(), [crate::ast::Type::Primitive(element)] if element == "u8"))
+    );
+    if !owns_bytes {
+        return Err(
+            "artifact policy requires exactly one owned Vec[u8] capsule output".to_string(),
+        );
+    }
+    if let Some(path) = &path {
+        let artifact_path = std::path::Path::new(path);
+        let safe_relative_path = !path.is_empty()
+            && !artifact_path.is_absolute()
+            && artifact_path.components().all(|component| {
+                matches!(
+                    component,
+                    std::path::Component::Normal(_) | std::path::Component::CurDir
+                )
+            });
+        if !safe_relative_path {
+            return Err(
+                "artifact.path must be a non-empty relative path without parent traversal"
+                    .to_string(),
+            );
+        }
+        if !capsule.effects.iter().any(|effect| effect == "fs.write") {
+            return Err("artifact.path persistence requires the fs.write effect".to_string());
+        }
+        let covered = capsule.sandbox.iter().any(|rule| {
+            rule.trim()
+                .split_once(char::is_whitespace)
+                .filter(|(capability, _)| *capability == "fs.write")
+                .is_some_and(|(_, scope)| {
+                    let scope = std::path::Path::new(scope.trim());
+                    !scope.as_os_str().is_empty()
+                        && !scope.is_absolute()
+                        && scope.components().all(|component| {
+                            matches!(
+                                component,
+                                std::path::Component::Normal(_) | std::path::Component::CurDir
+                            )
+                        })
+                        && artifact_path.starts_with(scope)
+                })
+        });
+        if !covered {
+            return Err(
+                "artifact.path must be contained by a relative fs.write sandbox scope".to_string(),
+            );
+        }
+    }
+    Ok(Some(ArtifactPolicy {
+        media_type,
+        max_bytes,
+        path,
+    }))
+}
+
 /// Contract diagnostics for every capsule in the program. These are
 /// blocking: a project that contains an invalid capsule fails `fgx check`.
 pub fn validate(program: &Program) -> Vec<Diagnostic> {
@@ -26,6 +379,42 @@ pub fn validate(program: &Program) -> Vec<Diagnostic> {
 }
 
 fn validate_capsule(capsule: &Capsule, out: &mut Vec<Diagnostic>) {
+    if let Err(message) = artifact_policy(capsule) {
+        out.push(
+            Diagnostic::new(
+                "capsule_invalid_artifact_policy",
+                &capsule.id,
+                format!("capsule '{}' has invalid artifact policy: {message}", capsule.name),
+            )
+            .suggest(
+                "declare media type and size rules on one Vec[u8] output; persistence additionally needs artifact.path, an fs.write effect, and a covering fs.write scope",
+            ),
+        );
+    }
+    if let Err(message) = render_policy(capsule) {
+        out.push(
+            Diagnostic::new(
+                "capsule_invalid_render_policy",
+                &capsule.id,
+                format!("capsule '{}' has invalid render policy: {message}", capsule.name),
+            )
+            .suggest(
+                "declare a preview profile, seed field, image artifact path, render effect, and wall/CPU/memory limits",
+            ),
+        );
+    }
+    if let Err(message) = encode_policy(capsule) {
+        out.push(
+            Diagnostic::new(
+                "capsule_invalid_encode_policy",
+                &capsule.id,
+                format!("capsule '{}' has invalid encode policy: {message}", capsule.name),
+            )
+            .suggest(
+                "declare a PPM profile, immutable byte input, image artifact path, media.encode effect, and wall/CPU/memory limits",
+            ),
+        );
+    }
     if capsule.version.trim().is_empty() {
         out.push(
             Diagnostic::new(
