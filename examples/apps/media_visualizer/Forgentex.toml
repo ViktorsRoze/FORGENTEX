@@ -1,0 +1,49 @@
+[package]
+name = "media-visualizer"
+version = "0.1.0"
+root = "src"
+
+[application]
+forgentex = "0.1"
+entry = "visualizer"
+runtime = "pipeline"
+effects = ["alloc", "cpu", "cpu.render", "fs.write", "media.encode"]
+
+[application.limits]
+max_write_bytes = 32768
+
+[application.artifact.preview]
+root = "output"
+media_type = "image/x-portable-pixmap"
+max_bytes = 32768
+required = true
+publication = "create_new"
+
+[application.pipeline]
+schedule = "source"
+inputs = ["preview_seed"]
+output_share = "encoded_preview"
+output_path = "output/visualizer.ppm"
+
+[application.pipeline.limits]
+max_stages = 3
+max_wall_ms = 5000
+max_cpu_ms = 2500
+max_memory_bytes = 67108864
+max_owned_bytes = 65536
+
+[security]
+trust = "untrusted"
+signed_by = "agent-public-demo"
+signature_algorithm = "Ed25519"
+signature = "mock-sig-media-visualizer"
+reproducible = true
+
+[permissions]
+fs.write = ["output"]
+
+[sandbox]
+build_scripts = "deny"
+codegen = "deny"
+tests = "sandboxed"
+agent_tools = "deny"

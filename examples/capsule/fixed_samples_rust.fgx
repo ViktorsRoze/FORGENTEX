@@ -1,0 +1,29 @@
+# Native data boundaries: a fixed-size scalar array field crosses Rust by value.
+
+@repr(C)
+struct SampleWindow:
+    id: i32
+    samples: [i16; 4]
+
+foreign fixed_samples_rust rust version "2021":
+    input window: SampleWindow
+    output adjusted: SampleWindow
+    sandbox "fs.none"
+    code:
+        #[repr(C)]
+        pub struct SampleWindow {
+            pub id: i32,
+            pub samples: [i16; 4],
+        }
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn fixed_samples_rust(mut window: SampleWindow) -> SampleWindow {
+            window.samples[0] += 1;
+            window.samples[1] += 2;
+            window.samples[2] += 3;
+            window.samples[3] += 4;
+            window
+        }
+
+fn adjust_samples(window: SampleWindow) -> SampleWindow:
+    return fixed_samples_rust(window)

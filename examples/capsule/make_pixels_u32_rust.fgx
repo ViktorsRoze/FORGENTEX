@@ -1,0 +1,41 @@
+# Native data boundaries: Rust returns an owned Vec[u32] with values above i32 range.
+
+foreign make_pixels_u32_rust rust version "2021" effects [alloc]:
+    input count: i32
+    output pixels: Vec[u32]
+    sandbox "fs.none"
+    code:
+        #[repr(C)]
+        pub struct FgxOwnedU32 {
+            pub ptr: *mut u32,
+            pub len: usize,
+            pub capacity: usize,
+        }
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn make_pixels_u32_rust(count: i32) -> FgxOwnedU32 {
+            let mut values: Vec<u32> = (0..count.max(0))
+                .map(|index| 3_000_000_000u32 + index as u32)
+                .collect();
+            let result = FgxOwnedU32 {
+                ptr: values.as_mut_ptr(),
+                len: values.len(),
+                capacity: values.capacity(),
+            };
+            std::mem::forget(values);
+            result
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn make_pixels_u32_rust_free(
+            ptr: *mut u32,
+            len: usize,
+            capacity: usize,
+        ) {
+            if capacity > 0 {
+                drop(unsafe { Vec::from_raw_parts(ptr, len, capacity) });
+            }
+        }
+
+fn pixels_from_rust(count: i32) -> Vec[u32] effects [alloc]:
+    return make_pixels_u32_rust(count)

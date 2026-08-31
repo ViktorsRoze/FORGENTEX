@@ -1,0 +1,52 @@
+# Extended immutable pipeline buffer handoff: a reviewed owned `Vec[u32]`
+# producer feeds a matching read-only slice consumer.
+
+share count: i32 = 3
+share u32_values: Vec[u32]
+share i64_sum: i64 = 0
+
+foreign make_large_u32_values c version "c11" effects [alloc]:
+    input count: i32
+    output u32_values: Vec[u32]
+    sandbox "fs.none"
+    bind count read
+    bind u32_values rw
+    code:
+        #include "types.h"
+        #include <stdint.h>
+        #include <stdlib.h>
+
+        FgxOwnedU32 make_large_u32_values(int32_t count) {
+            FgxOwnedU32 result = { NULL, 0, 0 };
+            if (count <= 0) return result;
+            result.ptr = (uint32_t *)malloc((size_t)count * sizeof(uint32_t));
+            if (result.ptr == NULL) return result;
+            result.len = (size_t)count;
+            result.capacity = (size_t)count;
+            result.ptr[0] = 3000000000u;
+            if (count > 1) result.ptr[1] = 2000000000u;
+            if (count > 2) result.ptr[2] = 1000000000u;
+            return result;
+        }
+
+        void make_large_u32_values_free(uint32_t *ptr, size_t len, size_t capacity) {
+            (void)len;
+            (void)capacity;
+            free(ptr);
+        }
+
+foreign sum_u32_as_i64 c version "c11" effects [cpu]:
+    input buf: &[u32]
+    output sum: i64
+    sandbox "fs.none"
+    bind u32_values read
+    bind i64_sum rw
+    code:
+        #include <stddef.h>
+        #include <stdint.h>
+
+        int64_t sum_u32_as_i64(const uint32_t *buf, size_t buf_len) {
+            int64_t sum = 0;
+            for (size_t i = 0; i < buf_len; ++i) sum += buf[i];
+            return sum;
+        }

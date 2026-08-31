@@ -17,22 +17,78 @@ use crate::json;
 
 pub const MAX_NATIVE_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
 
+fn is_render_pass(value: &str) -> bool {
+    matches!(value, "beauty" | "depth" | "normal" | "object_id")
+}
+
+fn is_artifact_token(value: &str) -> bool {
+    (1..=64).contains(&value.len())
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
+        })
+        && value
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && value
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_alphanumeric)
+}
+
+fn is_core_version(value: &str) -> bool {
+    let parts = value.split('.').collect::<Vec<_>>();
+    parts.len() == 3
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && part.bytes().all(|byte| byte.is_ascii_digit())
+                && (part.len() == 1 || !part.starts_with('0'))
+                && part.parse::<u32>().is_ok()
+        })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArtifactPolicy {
     pub media_type: String,
     pub max_bytes: usize,
     pub path: Option<String>,
+    pub publisher: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RenderPolicy {
     pub profile: String,
+    pub color_space: Option<String>,
+    pub device: Option<String>,
+    pub render_pass: Option<String>,
+    pub engine: Option<String>,
+    pub engine_version: Option<String>,
+    pub sequence_id: Option<String>,
     pub seed_field: String,
+    pub frame_index_field: Option<String>,
+    pub frame_count_field: Option<String>,
+    pub frames_per_second: Option<u32>,
+    pub samples_field: Option<String>,
+    pub shutter_q16_field: Option<String>,
+    pub adaptive_min_samples_field: Option<String>,
+    pub adaptive_noise_q16_field: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EncodePolicy {
     pub profile: String,
+    pub color_space: Option<String>,
+    pub input_pass: Option<String>,
+    pub engine: Option<String>,
+    pub engine_version: Option<String>,
+    pub compression: Option<String>,
+    pub compression_level: Option<u32>,
+    pub pixel_format: Option<String>,
+    pub interlace: Option<String>,
+    pub scanline_filter: Option<String>,
+    pub chunk_checksum: Option<String>,
+    pub stream_checksum: Option<String>,
+    pub chunk_order: Option<String>,
 }
 
 /// Parse the first governed image-encoder policy. Encoders consume an
@@ -40,6 +96,18 @@ pub struct EncodePolicy {
 /// binds input and output hashes in a separate receipt.
 pub fn encode_policy(capsule: &Capsule) -> Result<Option<EncodePolicy>, String> {
     let mut profile = None;
+    let mut color_space = None;
+    let mut input_pass = None;
+    let mut engine = None;
+    let mut engine_version = None;
+    let mut compression = None;
+    let mut compression_level = None;
+    let mut pixel_format = None;
+    let mut interlace = None;
+    let mut scanline_filter = None;
+    let mut chunk_checksum = None;
+    let mut stream_checksum = None;
+    let mut chunk_order = None;
     let mut saw_encode_rule = false;
     for rule in &capsule.sandbox {
         let Some((key, value)) = rule.trim().split_once(char::is_whitespace) else {
@@ -56,6 +124,78 @@ pub fn encode_policy(capsule: &Capsule) -> Result<Option<EncodePolicy>, String> 
                     return Err("encode.profile may be declared only once".to_string());
                 }
             }
+            "encode.color_space" => {
+                saw_encode_rule = true;
+                if color_space.replace(value.to_string()).is_some() {
+                    return Err("encode.color_space may be declared only once".to_string());
+                }
+            }
+            "encode.input_pass" => {
+                saw_encode_rule = true;
+                if input_pass.replace(value.to_string()).is_some() {
+                    return Err("encode.input_pass may be declared only once".to_string());
+                }
+            }
+            "encode.engine" => {
+                saw_encode_rule = true;
+                if engine.replace(value.to_string()).is_some() {
+                    return Err("encode.engine may be declared only once".to_string());
+                }
+            }
+            "encode.engine_version" => {
+                saw_encode_rule = true;
+                if engine_version.replace(value.to_string()).is_some() {
+                    return Err("encode.engine_version may be declared only once".to_string());
+                }
+            }
+            "encode.compression" => {
+                saw_encode_rule = true;
+                if compression.replace(value.to_string()).is_some() {
+                    return Err("encode.compression may be declared only once".to_string());
+                }
+            }
+            "encode.compression_level" => {
+                saw_encode_rule = true;
+                if compression_level.replace(value.to_string()).is_some() {
+                    return Err("encode.compression_level may be declared only once".to_string());
+                }
+            }
+            "encode.pixel_format" => {
+                saw_encode_rule = true;
+                if pixel_format.replace(value.to_string()).is_some() {
+                    return Err("encode.pixel_format may be declared only once".to_string());
+                }
+            }
+            "encode.interlace" => {
+                saw_encode_rule = true;
+                if interlace.replace(value.to_string()).is_some() {
+                    return Err("encode.interlace may be declared only once".to_string());
+                }
+            }
+            "encode.scanline_filter" => {
+                saw_encode_rule = true;
+                if scanline_filter.replace(value.to_string()).is_some() {
+                    return Err("encode.scanline_filter may be declared only once".to_string());
+                }
+            }
+            "encode.chunk_checksum" => {
+                saw_encode_rule = true;
+                if chunk_checksum.replace(value.to_string()).is_some() {
+                    return Err("encode.chunk_checksum may be declared only once".to_string());
+                }
+            }
+            "encode.stream_checksum" => {
+                saw_encode_rule = true;
+                if stream_checksum.replace(value.to_string()).is_some() {
+                    return Err("encode.stream_checksum may be declared only once".to_string());
+                }
+            }
+            "encode.chunk_order" => {
+                saw_encode_rule = true;
+                if chunk_order.replace(value.to_string()).is_some() {
+                    return Err("encode.chunk_order may be declared only once".to_string());
+                }
+            }
             other if other.starts_with("encode.") => {
                 return Err(format!("unknown encode policy '{other}'"));
             }
@@ -66,9 +206,142 @@ pub fn encode_policy(capsule: &Capsule) -> Result<Option<EncodePolicy>, String> 
         return Ok(None);
     }
     let profile = profile.ok_or_else(|| "encode policy requires encode.profile".to_string())?;
-    if profile != "ppm" {
-        return Err("encode.profile must be 'ppm' in this slice".to_string());
+    let expected_media_type = match profile.as_str() {
+        "ppm" => "image/x-portable-pixmap",
+        "png" => "image/png",
+        _ => return Err("encode.profile must be 'ppm' or 'png'".to_string()),
+    };
+    if color_space.as_deref().is_some_and(|value| value != "srgb") {
+        return Err("encode.color_space must be 'srgb'".to_string());
     }
+    if input_pass
+        .as_deref()
+        .is_some_and(|value| !is_render_pass(value))
+    {
+        return Err(
+            "encode.input_pass must be 'beauty', 'depth', 'normal', or 'object_id'".to_string(),
+        );
+    }
+    match (engine.as_deref(), engine_version.as_deref()) {
+        (None, None) => {}
+        (Some(engine), Some(version)) => {
+            if !is_artifact_token(engine) {
+                return Err(
+                    "encode.engine must be a lowercase 1-64 character artifact token".to_string(),
+                );
+            }
+            if !is_core_version(version) {
+                return Err(
+                    "encode.engine_version must be an exact major.minor.patch core version"
+                        .to_string(),
+                );
+            }
+        }
+        _ => {
+            return Err(
+                "encode engine manifest requires engine and engine_version together".to_string(),
+            );
+        }
+    }
+    let compression_mode = compression.as_deref();
+    let compression_level_text = compression_level.as_deref();
+    let (compression, compression_level) = match (compression_mode, compression_level_text) {
+        (None, None) => (None, None),
+        (Some(mode), Some(level)) => {
+            if profile != "png" {
+                return Err("encode compression manifest requires encode.profile 'png'".to_string());
+            }
+            if mode != "stored_deflate" {
+                return Err("encode.compression must be 'stored_deflate'".to_string());
+            }
+            let parsed = level.parse::<u32>().ok();
+            if parsed != Some(0) || level != "0" {
+                return Err(
+                    "encode.compression_level must be the exact integer 0 for stored_deflate"
+                        .to_string(),
+                );
+            }
+            (Some(mode.to_string()), parsed)
+        }
+        _ => {
+            return Err(
+                "encode compression manifest requires compression and compression_level together"
+                    .to_string(),
+            );
+        }
+    };
+    let (pixel_format, interlace) = match (pixel_format.as_deref(), interlace.as_deref()) {
+        (None, None) => (None, None),
+        (Some(pixel_format), Some(interlace)) => {
+            if profile != "png" {
+                return Err("encode PNG layout manifest requires encode.profile 'png'".to_string());
+            }
+            if pixel_format != "rgb8" {
+                return Err("encode.pixel_format must be 'rgb8'".to_string());
+            }
+            if interlace != "none" {
+                return Err("encode.interlace must be 'none'".to_string());
+            }
+            (Some(pixel_format.to_string()), Some(interlace.to_string()))
+        }
+        _ => {
+            return Err(
+                "encode PNG layout manifest requires pixel_format and interlace together"
+                    .to_string(),
+            );
+        }
+    };
+    let scanline_filter = match scanline_filter.as_deref() {
+        None => None,
+        Some(scanline_filter) => {
+            if profile != "png" {
+                return Err("encode.scanline_filter requires encode.profile 'png'".to_string());
+            }
+            if scanline_filter != "none" {
+                return Err("encode.scanline_filter must be 'none'".to_string());
+            }
+            Some(scanline_filter.to_string())
+        }
+    };
+    let (chunk_checksum, stream_checksum) =
+        match (chunk_checksum.as_deref(), stream_checksum.as_deref()) {
+            (None, None) => (None, None),
+            (Some(chunk_checksum), Some(stream_checksum)) => {
+                if profile != "png" {
+                    return Err(
+                        "encode checksum manifest requires encode.profile 'png'".to_string()
+                    );
+                }
+                if chunk_checksum != "crc32" {
+                    return Err("encode.chunk_checksum must be 'crc32'".to_string());
+                }
+                if stream_checksum != "adler32" {
+                    return Err("encode.stream_checksum must be 'adler32'".to_string());
+                }
+                (
+                    Some(chunk_checksum.to_string()),
+                    Some(stream_checksum.to_string()),
+                )
+            }
+            _ => {
+                return Err(
+                    "encode checksum manifest requires chunk_checksum and stream_checksum together"
+                        .to_string(),
+                );
+            }
+        };
+    let chunk_order = match chunk_order.as_deref() {
+        None => None,
+        Some(chunk_order) => {
+            if profile != "png" {
+                return Err("encode.chunk_order requires encode.profile 'png'".to_string());
+            }
+            if chunk_order != "ihdr_srgb_idat_iend" {
+                return Err("encode.chunk_order must be 'ihdr_srgb_idat_iend'".to_string());
+            }
+            Some(chunk_order.to_string())
+        }
+    };
     let reads_bytes = matches!(
         capsule.inputs.as_slice(),
         [binding]
@@ -100,11 +373,16 @@ pub fn encode_policy(capsule: &Capsule) -> Result<Option<EncodePolicy>, String> 
     }
     let artifact = artifact_policy(capsule)?
         .ok_or_else(|| "encode policy requires an image artifact policy".to_string())?;
-    if !artifact.media_type.starts_with("image/") {
-        return Err("encoded artifact media type must start with image/".to_string());
+    if artifact.media_type != expected_media_type {
+        return Err(format!(
+            "encode.profile '{profile}' requires artifact.media_type '{expected_media_type}'"
+        ));
     }
-    if artifact.path.is_none() {
-        return Err("encoder requires governed artifact.path persistence".to_string());
+    if artifact.path.is_none() && artifact.publisher.as_deref() != Some("host") {
+        return Err(
+            "encoder requires governed artifact.path persistence or artifact.publisher host"
+                .to_string(),
+        );
     }
     if !capsule
         .effects
@@ -124,16 +402,43 @@ pub fn encode_policy(capsule: &Capsule) -> Result<Option<EncodePolicy>, String> 
             return Err(format!("encode policy requires limit.{required}"));
         }
     }
-    Ok(Some(EncodePolicy { profile }))
+    Ok(Some(EncodePolicy {
+        profile,
+        color_space,
+        input_pass,
+        engine,
+        engine_version,
+        compression,
+        compression_level,
+        pixel_format,
+        interlace,
+        scanline_filter,
+        chunk_checksum,
+        stream_checksum,
+        chunk_order,
+    }))
 }
 
 /// Parse the first governed render policy. This slice supports preview images
-/// and raw-RGB handoffs produced from one named scene struct. The scene field
-/// is resolved by the pipeline before dispatch, so a receipt can never invent
-/// a seed that was not part of the renderer input.
+/// and raw-RGB handoffs produced from one named scene struct. Seed plus optional
+/// frame and quality manifest fields are resolved before dispatch, so a receipt
+/// cannot invent authored render identity or settings absent from its input.
 pub fn render_policy(capsule: &Capsule) -> Result<Option<RenderPolicy>, String> {
     let mut profile = None;
+    let mut color_space = None;
+    let mut device = None;
+    let mut render_pass = None;
+    let mut engine = None;
+    let mut engine_version = None;
+    let mut sequence_id = None;
     let mut seed_field = None;
+    let mut frame_index_field = None;
+    let mut frame_count_field = None;
+    let mut frames_per_second = None;
+    let mut samples_field = None;
+    let mut shutter_q16_field = None;
+    let mut adaptive_min_samples_field = None;
+    let mut adaptive_noise_q16_field = None;
     let mut saw_render_rule = false;
     for rule in &capsule.sandbox {
         let Some((key, value)) = rule.trim().split_once(char::is_whitespace) else {
@@ -150,10 +455,101 @@ pub fn render_policy(capsule: &Capsule) -> Result<Option<RenderPolicy>, String> 
                     return Err("render.profile may be declared only once".to_string());
                 }
             }
+            "render.color_space" => {
+                saw_render_rule = true;
+                if color_space.replace(value.to_string()).is_some() {
+                    return Err("render.color_space may be declared only once".to_string());
+                }
+            }
+            "render.device" => {
+                saw_render_rule = true;
+                if device.replace(value.to_string()).is_some() {
+                    return Err("render.device may be declared only once".to_string());
+                }
+            }
+            "render.pass" => {
+                saw_render_rule = true;
+                if render_pass.replace(value.to_string()).is_some() {
+                    return Err("render.pass may be declared only once".to_string());
+                }
+            }
+            "render.engine" => {
+                saw_render_rule = true;
+                if engine.replace(value.to_string()).is_some() {
+                    return Err("render.engine may be declared only once".to_string());
+                }
+            }
+            "render.engine_version" => {
+                saw_render_rule = true;
+                if engine_version.replace(value.to_string()).is_some() {
+                    return Err("render.engine_version may be declared only once".to_string());
+                }
+            }
+            "render.sequence_id" => {
+                saw_render_rule = true;
+                if sequence_id.replace(value.to_string()).is_some() {
+                    return Err("render.sequence_id may be declared only once".to_string());
+                }
+            }
             "render.seed_field" => {
                 saw_render_rule = true;
                 if seed_field.replace(value.to_string()).is_some() {
                     return Err("render.seed_field may be declared only once".to_string());
+                }
+            }
+            "render.frame_index_field" => {
+                saw_render_rule = true;
+                if frame_index_field.replace(value.to_string()).is_some() {
+                    return Err("render.frame_index_field may be declared only once".to_string());
+                }
+            }
+            "render.frame_count_field" => {
+                saw_render_rule = true;
+                if frame_count_field.replace(value.to_string()).is_some() {
+                    return Err("render.frame_count_field may be declared only once".to_string());
+                }
+            }
+            "render.frames_per_second" => {
+                saw_render_rule = true;
+                let parsed = value.parse::<u32>().map_err(|_| {
+                    "render.frames_per_second must be an integer from 1 through 240".to_string()
+                })?;
+                if frames_per_second.replace(parsed).is_some() {
+                    return Err("render.frames_per_second may be declared only once".to_string());
+                }
+            }
+            "render.samples_field" => {
+                saw_render_rule = true;
+                if samples_field.replace(value.to_string()).is_some() {
+                    return Err("render.samples_field may be declared only once".to_string());
+                }
+            }
+            "render.shutter_q16_field" => {
+                saw_render_rule = true;
+                if shutter_q16_field.replace(value.to_string()).is_some() {
+                    return Err("render.shutter_q16_field may be declared only once".to_string());
+                }
+            }
+            "render.adaptive_min_samples_field" => {
+                saw_render_rule = true;
+                if adaptive_min_samples_field
+                    .replace(value.to_string())
+                    .is_some()
+                {
+                    return Err(
+                        "render.adaptive_min_samples_field may be declared only once".to_string(),
+                    );
+                }
+            }
+            "render.adaptive_noise_q16_field" => {
+                saw_render_rule = true;
+                if adaptive_noise_q16_field
+                    .replace(value.to_string())
+                    .is_some()
+                {
+                    return Err(
+                        "render.adaptive_noise_q16_field may be declared only once".to_string()
+                    );
                 }
             }
             other if other.starts_with("render.") => {
@@ -166,17 +562,166 @@ pub fn render_policy(capsule: &Capsule) -> Result<Option<RenderPolicy>, String> 
         return Ok(None);
     }
     let profile = profile.ok_or_else(|| "render policy requires render.profile".to_string())?;
-    if profile != "preview" {
-        return Err("render.profile must be 'preview' in this slice".to_string());
+    if !matches!(profile.as_str(), "preview" | "final") {
+        return Err("render.profile must be 'preview' or 'final'".to_string());
+    }
+    if color_space.as_deref().is_some_and(|value| value != "srgb") {
+        return Err("render.color_space must be 'srgb'".to_string());
+    }
+    if device
+        .as_deref()
+        .is_some_and(|value| !matches!(value, "cpu" | "gpu"))
+    {
+        return Err("render.device must be 'cpu' or 'gpu'".to_string());
+    }
+    if render_pass
+        .as_deref()
+        .is_some_and(|value| !is_render_pass(value))
+    {
+        return Err("render.pass must be 'beauty', 'depth', 'normal', or 'object_id'".to_string());
+    }
+    match (engine.as_deref(), engine_version.as_deref()) {
+        (None, None) => {}
+        (Some(engine), Some(version)) => {
+            if !is_artifact_token(engine) {
+                return Err(
+                    "render.engine must be a lowercase 1-64 character artifact token".to_string(),
+                );
+            }
+            if !is_core_version(version) {
+                return Err(
+                    "render.engine_version must be an exact major.minor.patch core version"
+                        .to_string(),
+                );
+            }
+        }
+        _ => {
+            return Err(
+                "render engine manifest requires engine and engine_version together".to_string(),
+            );
+        }
+    }
+    if let Some(sequence_id) = sequence_id.as_deref() {
+        if !is_artifact_token(sequence_id) {
+            return Err(
+                "render.sequence_id must be a lowercase 1-64 character artifact token".to_string(),
+            );
+        }
+        if frame_index_field.is_none() {
+            return Err("render.sequence_id requires the render frame manifest".to_string());
+        }
     }
     let seed_field =
         seed_field.ok_or_else(|| "render policy requires render.seed_field".to_string())?;
-    if seed_field.is_empty()
-        || !seed_field.chars().enumerate().all(|(index, ch)| {
-            ch == '_' || ch.is_ascii_alphanumeric() && (index > 0 || !ch.is_ascii_digit())
-        })
-    {
+    let valid_identifier = |field: &str| {
+        !field.is_empty()
+            && field.chars().enumerate().all(|(index, ch)| {
+                ch == '_' || ch.is_ascii_alphanumeric() && (index > 0 || !ch.is_ascii_digit())
+            })
+    };
+    if !valid_identifier(&seed_field) {
         return Err("render.seed_field must be an identifier".to_string());
+    }
+    match (
+        frame_index_field.as_deref(),
+        frame_count_field.as_deref(),
+        frames_per_second,
+    ) {
+        (None, None, None) => {}
+        (Some(index), Some(count), Some(fps)) => {
+            if !valid_identifier(index) || !valid_identifier(count) {
+                return Err("render frame fields must be identifiers".to_string());
+            }
+            if index == count
+                || [index, count]
+                    .iter()
+                    .any(|field| matches!(*field, "width" | "height") || *field == seed_field)
+            {
+                return Err(
+                    "render frame fields must be distinct from each other, seed, width, and height"
+                        .to_string(),
+                );
+            }
+            if !(1..=240).contains(&fps) {
+                return Err(
+                    "render.frames_per_second must be an integer from 1 through 240".to_string(),
+                );
+            }
+        }
+        _ => {
+            return Err(
+                "render frame manifest requires frame_index_field, frame_count_field, and frames_per_second together"
+                    .to_string(),
+            );
+        }
+    }
+    match (samples_field.as_deref(), shutter_q16_field.as_deref()) {
+        (None, None) => {}
+        (Some(samples), Some(shutter)) => {
+            if !valid_identifier(samples) || !valid_identifier(shutter) {
+                return Err("render quality fields must be identifiers".to_string());
+            }
+            let collides_with_identity = |field: &str| {
+                matches!(field, "width" | "height")
+                    || field == seed_field
+                    || frame_index_field.as_deref() == Some(field)
+                    || frame_count_field.as_deref() == Some(field)
+            };
+            if samples == shutter
+                || collides_with_identity(samples)
+                || collides_with_identity(shutter)
+            {
+                return Err(
+                    "render quality fields must be distinct from each other and identity fields"
+                        .to_string(),
+                );
+            }
+        }
+        _ => {
+            return Err(
+                "render quality manifest requires samples_field and shutter_q16_field together"
+                    .to_string(),
+            );
+        }
+    }
+    match (
+        adaptive_min_samples_field.as_deref(),
+        adaptive_noise_q16_field.as_deref(),
+    ) {
+        (None, None) => {}
+        (Some(min_samples), Some(noise_q16)) => {
+            if samples_field.is_none() {
+                return Err(
+                    "render adaptive manifest requires the render quality manifest".to_string(),
+                );
+            }
+            if !valid_identifier(min_samples) || !valid_identifier(noise_q16) {
+                return Err("render adaptive fields must be identifiers".to_string());
+            }
+            let collides_with_existing = |field: &str| {
+                matches!(field, "width" | "height")
+                    || field == seed_field
+                    || frame_index_field.as_deref() == Some(field)
+                    || frame_count_field.as_deref() == Some(field)
+                    || samples_field.as_deref() == Some(field)
+                    || shutter_q16_field.as_deref() == Some(field)
+            };
+            if min_samples == noise_q16
+                || collides_with_existing(min_samples)
+                || collides_with_existing(noise_q16)
+            {
+                return Err(
+                    "render adaptive fields must be distinct from each other and existing render fields"
+                        .to_string(),
+                );
+            }
+        }
+        _ => {
+            return Err(
+                "render adaptive manifest requires adaptive_min_samples_field and adaptive_noise_q16_field together"
+                    .to_string(),
+            );
+        }
     }
     if !matches!(capsule.inputs.as_slice(), [binding] if matches!(binding.ty, crate::ast::Type::Named(_)))
     {
@@ -211,15 +756,28 @@ pub fn render_policy(capsule: &Capsule) -> Result<Option<RenderPolicy>, String> 
             "render artifact must be an image/* or application/x-forgentex-rgb".to_string(),
         );
     }
-    if is_image && artifact.path.is_none() {
-        return Err("rendered image requires governed artifact.path persistence".to_string());
+    if is_image && artifact.path.is_none() && artifact.publisher.as_deref() != Some("host") {
+        return Err(
+            "rendered image requires governed artifact.path persistence or artifact.publisher host"
+                .to_string(),
+        );
     }
-    if !capsule
-        .effects
-        .iter()
-        .any(|effect| matches!(effect.as_str(), "cpu.render" | "gpu.render"))
-    {
+    let has_cpu_render = capsule.effects.iter().any(|effect| effect == "cpu.render");
+    let has_gpu_render = capsule.effects.iter().any(|effect| effect == "gpu.render");
+    if !has_cpu_render && !has_gpu_render {
         return Err("render policy requires the cpu.render or gpu.render effect".to_string());
+    }
+    if let Some(device) = device.as_deref() {
+        let exact_effect = match device {
+            "cpu" => has_cpu_render && !has_gpu_render,
+            "gpu" => has_gpu_render && !has_cpu_render,
+            _ => unreachable!("render device validated above"),
+        };
+        if !exact_effect {
+            return Err(format!(
+                "render.device '{device}' requires exactly the matching {device}.render effect"
+            ));
+        }
     }
     for required in ["wall_ms", "cpu_ms", "mem_mb"] {
         let declared = capsule.sandbox.iter().any(|rule| {
@@ -235,7 +793,20 @@ pub fn render_policy(capsule: &Capsule) -> Result<Option<RenderPolicy>, String> 
     }
     Ok(Some(RenderPolicy {
         profile,
+        color_space,
+        device,
+        render_pass,
+        engine,
+        engine_version,
+        sequence_id,
         seed_field,
+        frame_index_field,
+        frame_count_field,
+        frames_per_second,
+        samples_field,
+        shutter_q16_field,
+        adaptive_min_samples_field,
+        adaptive_noise_q16_field,
     }))
 }
 
@@ -247,6 +818,7 @@ pub fn artifact_policy(capsule: &Capsule) -> Result<Option<ArtifactPolicy>, Stri
     let mut media_type = None;
     let mut max_bytes = None;
     let mut path = None;
+    let mut publisher = None;
     let mut saw_artifact_rule = false;
     for rule in &capsule.sandbox {
         let Some((key, value)) = rule.trim().split_once(char::is_whitespace) else {
@@ -276,6 +848,12 @@ pub fn artifact_policy(capsule: &Capsule) -> Result<Option<ArtifactPolicy>, Stri
                 saw_artifact_rule = true;
                 if path.replace(value.to_string()).is_some() {
                     return Err("artifact.path may be declared only once".to_string());
+                }
+            }
+            "artifact.publisher" => {
+                saw_artifact_rule = true;
+                if publisher.replace(value.to_string()).is_some() {
+                    return Err("artifact.publisher may be declared only once".to_string());
                 }
             }
             other if other.starts_with("artifact.") => {
@@ -318,6 +896,31 @@ pub fn artifact_policy(capsule: &Capsule) -> Result<Option<ArtifactPolicy>, Stri
         return Err(
             "artifact policy requires exactly one owned Vec[u8] capsule output".to_string(),
         );
+    }
+    if let Some(publisher) = publisher.as_deref() {
+        if !matches!(publisher, "native" | "host") {
+            return Err("artifact.publisher must be 'native' or 'host'".to_string());
+        }
+        if publisher == "native" && path.is_none() {
+            return Err("artifact.publisher native requires artifact.path".to_string());
+        }
+        if publisher == "host" {
+            if path.is_some() {
+                return Err("artifact.publisher host cannot declare artifact.path".to_string());
+            }
+            if capsule.effects.iter().any(|effect| effect == "fs.write")
+                || capsule.sandbox.iter().any(|rule| {
+                    rule.trim()
+                        .split_once(char::is_whitespace)
+                        .is_some_and(|(capability, _)| capability == "fs.write")
+                })
+            {
+                return Err(
+                    "artifact.publisher host cannot grant the capsule fs.write authority"
+                        .to_string(),
+                );
+            }
+        }
     }
     if let Some(path) = &path {
         let artifact_path = std::path::Path::new(path);
@@ -365,6 +968,7 @@ pub fn artifact_policy(capsule: &Capsule) -> Result<Option<ArtifactPolicy>, Stri
         media_type,
         max_bytes,
         path,
+        publisher,
     }))
 }
 
@@ -399,7 +1003,7 @@ fn validate_capsule(capsule: &Capsule, out: &mut Vec<Diagnostic>) {
                 format!("capsule '{}' has invalid render policy: {message}", capsule.name),
             )
             .suggest(
-                "declare a preview profile, seed field, image artifact path, render effect, and wall/CPU/memory limits",
+                "declare a preview or final profile, seed field, image artifact path, render effect, and wall/CPU/memory limits",
             ),
         );
     }
@@ -411,7 +1015,7 @@ fn validate_capsule(capsule: &Capsule, out: &mut Vec<Diagnostic>) {
                 format!("capsule '{}' has invalid encode policy: {message}", capsule.name),
             )
             .suggest(
-                "declare a PPM profile, immutable byte input, image artifact path, media.encode effect, and wall/CPU/memory limits",
+                "declare a PPM or PNG profile, matching image media type, immutable byte input, image artifact path, media.encode effect, and wall/CPU/memory limits",
             ),
         );
     }

@@ -59,6 +59,7 @@ fn ast_success_and_failure() {
 #[test]
 fn diagnose_success_and_failure() {
     let out = assert_success(fgx(&["diagnose", "examples/hello.fgx", "--json"]));
+    assert!(out.contains("\"schema\": \"forgentex.diagnose.v1\""));
     assert!(out.contains("\"tokens\":"));
     assert!(out.contains("\"source_map\":"));
     assert!(out.contains("\"canonical_ast\":"));
@@ -156,14 +157,105 @@ fn roundtrip_success_and_failure() {
 #[test]
 fn check_success_and_failure() {
     let out = assert_success(fgx(&["check", "examples/media/audio_mix.fgx", "--json"]));
+    assert!(out.contains("\"schema\": \"forgentex.diagnostics.v1\""));
     assert!(out.contains("\"diagnostics\": ["));
 
     let project = assert_success(fgx(&["check", "--project", "--json"]));
+    assert!(project.contains("\"schema\": \"forgentex.diagnostics.v1\""));
     assert!(project.contains("\"diagnostics\": ["));
     assert!(!project.contains("unresolved_import"));
 
     let err = assert_failure(fgx(&["check", "examples/missing.fgx", "--json"]));
     assert!(err.contains("failed to read"));
+}
+
+#[test]
+fn public_0_1_versioned_reports_match_the_frozen_top_level_shapes() {
+    let cases: &[(&str, &[&str])] = &[
+        (
+            "forgentex.ast.v1",
+            &["ast", "examples/hello.fgx", "--canonical"],
+        ),
+        (
+            "forgentex.diagnose.v1",
+            &["diagnose", "examples/hello.fgx", "--json"],
+        ),
+        (
+            "forgentex.diagnostics.v1",
+            &["check", "examples/hello.fgx", "--json"],
+        ),
+        (
+            "forgentex.diagnostic_catalog.v1",
+            &["diagnostics", "list", "--json"],
+        ),
+        (
+            "forgentex.diagnostic_explain.v1",
+            &["explain", "TYP001", "--json"],
+        ),
+        (
+            "forgentex.effects.v1",
+            &["effects", "examples/hello.fgx", "--json"],
+        ),
+        (
+            "forgentex.test_report.v1",
+            &["test", "examples/smoke/inline_tests.fgx", "--json"],
+        ),
+        (
+            "forgentex.run_result.v1",
+            &[
+                "run",
+                "examples/media/audio_mix.fgx",
+                "--entry",
+                "mix_samples",
+                "--json-input",
+                "examples/run/audio_mix.json",
+            ],
+        ),
+        (
+            "forgentex.agent_context.v1",
+            &[
+                "context",
+                "@function.mix_samples",
+                "--deps",
+                "types,effects,tests",
+                "--json",
+            ],
+        ),
+        (
+            "forgentex.agent_review.v1",
+            &[
+                "review",
+                "patches/add_fast_path.fgp",
+                "--source",
+                "examples/media/audio_mix.fgx",
+                "--json",
+            ],
+        ),
+        (
+            "forgentex.release_check.v1",
+            &["release-check", "--target", "0.1", "--json"],
+        ),
+    ];
+
+    for (schema_id, args) in cases {
+        let output = assert_success(fgx(args));
+        let schema = forgentex::public_compat::PUBLIC_JSON_SCHEMAS
+            .iter()
+            .find(|schema| schema.id == *schema_id)
+            .unwrap();
+        assert!(
+            output.contains(&format!("\"schema\": \"{schema_id}\"")),
+            "{} did not emit {schema_id}:\n{output}",
+            args.join(" ")
+        );
+        for field in schema.required_fields {
+            assert!(
+                output.contains(&format!("\"{field}\":")),
+                "{} omitted required field {schema_id}.{field}:\n{output}",
+                args.join(" ")
+            );
+        }
+    }
 }
 
 #[test]
@@ -201,8 +293,10 @@ fn borrow_conformance_command_is_available() {
     assert!(json.contains("\"schema\": \"forgentex.borrow_conformance.v1\""));
     assert!(json.contains("\"status\": \"pass\""));
     assert!(json.contains("\"failed\": 0"));
-    assert!(json.contains("\"persisted_regression_generated\": 4"));
+    assert!(json.contains("\"persisted_regression_generated\": 8"));
+    assert!(json.contains("\"persisted_acceptance_generated\": 4"));
     assert!(json.contains("\"persisted_regression_mismatched\": 0"));
+    assert!(json.contains("\"persisted_acceptance_mismatched\": 0"));
     assert!(json.contains("\"id\": \"moves.use_after_move\""));
     assert!(json.contains("\"id\": \"loops.loop_carried_alias_rejected\""));
     assert!(json.contains("\"id\": \"branches.conditional_alias_reassign_rejected\""));
@@ -223,7 +317,7 @@ fn borrow_conformance_command_is_available() {
         "--json",
     ]));
     assert!(custom.contains("\"campaign_seed\": \"0x0000000000000007\""));
-    assert!(custom.contains("\"campaign_generated\": 4"));
+    assert!(custom.contains("\"campaign_generated\": 6"));
     assert!(custom.contains("reference.campaign.v1.0000000000000007.moves.0000"));
 
     let failure_dir = temp_file("borrow_campaign_failures");
@@ -412,6 +506,10 @@ fn build_c_backend_success_and_failure() {
     assert!(out.contains("forgentex.backend_build.json"));
     let header = fs::read_to_string(out_dir.join("forgentex_demo_media.h")).unwrap();
     assert!(header.contains("void mix_samples(fgx_slice_i16 dst"));
+    assert!(header
+        .contains("typedef struct { uint8_t *data; size_t len; size_t capacity; } fgx_vec_u8;"));
+    assert!(header
+        .contains("typedef struct { int16_t *data; size_t len; size_t capacity; } fgx_vec_i16;"));
     let receipt = fs::read_to_string(out_dir.join("forgentex.backend_build.json")).unwrap();
     assert!(receipt.contains("\"backend\": \"c\""));
     assert!(receipt.contains("\"fir_schema\": \"forgentex.backend_ir.v1\""));
@@ -442,6 +540,8 @@ fn build_zig_backend_success() {
     let source = fs::read_to_string(out_dir.join("forgentex_demo_media.zig")).unwrap();
     assert!(source.contains("pub fn mix_samples(dst: []i16"));
     assert!(source.contains("fgx_bounds_index(i, dst.len)"));
+    assert!(source.contains("const FgxVecU8 = struct"));
+    assert!(source.contains("const FgxVecI16 = struct"));
     let receipt = fs::read_to_string(out_dir.join("forgentex.backend_build.json")).unwrap();
     assert!(receipt.contains("\"backend\": \"zig\""));
     let _ = fs::remove_dir_all(out_dir);
@@ -720,6 +820,17 @@ fn run_success_and_failure() {
     assert!(json.contains("\"entry\": \"mix_samples\""));
     assert!(json.contains("\"status\": \"pass\""));
     assert!(json.contains("\"dst\": [5500, 0, -12000, 17000]"));
+    assert!(!json.contains("\"concurrency\""));
+
+    let concurrency = assert_success(fgx(&[
+        "run",
+        "examples/async/structured_task_group.fgx",
+        "--entry",
+        "structured_scores",
+    ]));
+    assert!(concurrency.contains("\"schema\": \"forgentex.concurrency_receipt.v1\""));
+    assert!(concurrency.contains("\"operation\":\"task_group.await_all\""));
+    assert!(concurrency.contains("\"decision\":\"completed\""));
 
     let backend_json = assert_success(fgx(&[
         "run",
@@ -843,6 +954,151 @@ fn io_and_net_run_commands_use_fir_backed_helpers() {
 }
 
 #[test]
+fn forgepack_build_and_verify_commands_are_reproducible() {
+    let first = manifest_dir().join("examples/apps/forgepack/output/cli-first.fpk");
+    let second = manifest_dir().join("examples/apps/forgepack/output/cli-second.fpk");
+    let _ = fs::remove_file(&first);
+    let _ = fs::remove_file(&second);
+
+    let built = assert_success(fgx(&[
+        "forgepack",
+        "build",
+        "examples/apps/forgepack/build.json",
+        "output/cli-first.fpk",
+        "--json",
+    ]));
+    assert!(built.contains("\"schema\":\"forgentex.forgepack_build.v1\""));
+    assert!(built.contains("\"entries\":2"));
+    let inspected = assert_success(fgx(&[
+        "forgepack",
+        "inspect",
+        "examples/apps/forgepack/output/cli-first.fpk",
+        "--json",
+    ]));
+    assert!(inspected.contains("\"schema\":\"forgentex.forgepack_inspect.v1\""));
+    assert!(inspected.contains("\"structure_valid\":true"));
+    assert!(inspected.contains("\"hashes_verified\":false"));
+    assert!(inspected.contains("\"path\":\"docs/readme.txt\""));
+    let verified = assert_success(fgx(&[
+        "forgepack",
+        "verify",
+        "examples/apps/forgepack/output/cli-first.fpk",
+        "--json",
+    ]));
+    assert!(verified.contains("\"schema\":\"forgentex.forgepack_verify.v1\""));
+    assert!(verified.contains("\"hashes_verified\":2"));
+
+    let extract_root = manifest_dir().join("examples/apps/forgepack/output/cli-extracted");
+    let _ = fs::remove_dir_all(&extract_root);
+    fs::create_dir(&extract_root).unwrap();
+    let extracted = assert_success(fgx(&[
+        "forgepack",
+        "extract",
+        "examples/apps/forgepack/output/cli-first.fpk",
+        "examples/apps/forgepack/output/cli-extracted",
+        "--json",
+    ]));
+    assert!(extracted.contains("\"schema\":\"forgentex.forgepack_extract.v1\""));
+    assert!(extracted.contains("\"publication\":\"create_new\""));
+    assert_eq!(
+        fs::read(extract_root.join("docs/readme.txt")).unwrap(),
+        b"Forgentex forgepack command example.\n"
+    );
+
+    assert_success(fgx(&[
+        "forgepack",
+        "build",
+        "examples/apps/forgepack/build.json",
+        "output/cli-second.fpk",
+    ]));
+    assert_eq!(fs::read(&first).unwrap(), fs::read(&second).unwrap());
+
+    let refusal = assert_failure(fgx(&[
+        "forgepack",
+        "build",
+        "examples/apps/forgepack/build.json",
+        "output/cli-first.fpk",
+    ]));
+    assert!(refusal.contains("forgepack_publish"), "{refusal}");
+    let evidence = assert_success(fgx(&["forgepack", "evidence", "--strict", "--json"]));
+    assert!(evidence.contains("\"schema\":\"forgentex.forgepack_evidence.v1\""));
+    assert!(evidence.contains("\"status\":\"pass\""));
+    assert!(evidence.contains("\"checks_fail\":0"));
+    fs::remove_dir_all(extract_root).unwrap();
+    fs::remove_file(first).unwrap();
+    fs::remove_file(second).unwrap();
+}
+
+#[test]
+fn app_run_uses_manifest_entry_scopes_and_byte_budgets() {
+    let root = temp_file("cli_application");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::create_dir_all(root.join("input")).unwrap();
+    fs::write(
+        root.join("Forgentex.toml"),
+        "[package]\nname = \"cli-application\"\nversion = \"0.1.0\"\nroot = \"src\"\n\n[application]\nforgentex = \"0.1\"\nentry = \"read_text\"\nruntime = \"hosted_io\"\neffects = [\"fs.read\"]\n\n[application.limits]\nmax_read_bytes = 1024\n\n[permissions]\nfs.read = [\"input\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src").join("main.fgx"),
+        "fn read_text(path: str) -> str effects [fs.read]:\n    return core_io_read_file(path)\n",
+    )
+    .unwrap();
+    fs::write(root.join("input").join("data.txt"), "application payload").unwrap();
+
+    let root_text = root.to_string_lossy().to_string();
+    let report = assert_success(fgx(&[
+        "app-run",
+        &root_text,
+        "--arg",
+        "input/data.txt",
+        "--json",
+    ]));
+    assert!(report.contains("\"schema\":\"forgentex.application_run.v1\""));
+    assert!(report.contains("\"forgentex_required\":\"0.1\""));
+    assert!(report.contains("\"forgentex_version\":\"0.1.0\""));
+    assert!(report.contains("\"forgentex_compatibility\":\"compatible\""));
+    assert!(report.contains("\"status\":\"ok\""));
+    assert!(report.contains("\"result\":{\"type\":\"str\",\"value\":\"application payload\"}"));
+    assert!(report.contains("\"error\":null"));
+    assert!(report.contains("\"max_read_bytes\":1024"));
+    assert!(report.contains("\"artifact_declarations\":[]"));
+    assert!(report.contains("\"artifacts\":[]"));
+    let manifest_path = root.join("Forgentex.toml");
+    let incompatible = fs::read_to_string(&manifest_path)
+        .unwrap()
+        .replace("forgentex = \"0.1\"", "forgentex = \"99.0\"");
+    fs::write(&manifest_path, &incompatible).unwrap();
+    let refusal = assert_failure(fgx(&[
+        "app-run",
+        &root_text,
+        "--arg",
+        "input/data.txt",
+        "--json",
+    ]));
+    assert!(
+        refusal.contains("application_version_incompatible"),
+        "{refusal}"
+    );
+    assert!(refusal.contains("\"schema\":\"forgentex.application_error.v1\""));
+    assert!(refusal.contains("\"phase\":\"compatibility\""));
+    let typed_manifest = incompatible
+        .replace("forgentex = \"99.0\"", "forgentex = \"0.1\"")
+        .replace("entry = \"read_text\"", "entry = \"echo_number\"");
+    fs::write(&manifest_path, typed_manifest).unwrap();
+    fs::write(
+        root.join("src").join("main.fgx"),
+        "fn echo_number(value: i16) -> i16:\n    return value\n",
+    )
+    .unwrap();
+    let typed = assert_success(fgx(&["app-run", &root_text, "--arg", "-17", "--json"]));
+    assert!(typed.contains("\"status\":\"ok\""));
+    assert!(typed.contains("\"result\":{\"type\":\"i16\",\"value\":-17}"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn inline_test_command_is_available() {
     let json = assert_success(fgx(&[
         "test",
@@ -947,6 +1203,53 @@ fn context_and_review_workbench_commands_are_available() {
     assert!(context.contains("\"symbol_source\":"));
     assert!(context.contains("examples/run/audio_mix.json"));
     assert!(context.contains("\"token_estimate\":"));
+    assert!(context.contains("\"tokenizer\": \"heuristic-v1\""));
+    assert!(context.contains("\"reason\": \"focused_symbol_only\""));
+
+    let bounded = assert_success(fgx(&[
+        "context",
+        "@function.mix_samples",
+        "--deps",
+        "types,effects,tests",
+        "--max-tokens",
+        "100000",
+        "--json",
+    ]));
+    assert!(bounded.contains("\"max_tokens\": 100000"));
+    assert!(bounded.contains("\"decision\": \"within_budget\""));
+
+    let full_packet = temp_file("context_full.json");
+    let delta_packet = temp_file("context_delta.json");
+    let full_path = full_packet.to_string_lossy().to_string();
+    let delta_path = delta_packet.to_string_lossy().to_string();
+    let written = assert_success(fgx(&[
+        "context",
+        "@function.mix_samples",
+        "--deps",
+        "types,effects,tests",
+        "--out",
+        &full_path,
+    ]));
+    assert!(written.contains("wrote"));
+    assert!(fs::read_to_string(&full_packet)
+        .unwrap()
+        .contains("\"mode\": \"full\""));
+    assert_success(fgx(&[
+        "context",
+        "@function.mix_samples",
+        "--deps",
+        "types,effects,tests",
+        "--since",
+        &full_path,
+        "--out",
+        &delta_path,
+    ]));
+    let delta = fs::read_to_string(&delta_packet).unwrap();
+    assert!(delta.contains("\"mode\": \"delta\""));
+    assert!(delta.contains("\"elided_sections\":"));
+    assert!(!delta.contains("\n  \"symbol_source\":"));
+    let _ = fs::remove_file(full_packet);
+    let _ = fs::remove_file(delta_packet);
 
     let review = assert_success(fgx(&[
         "review",
@@ -960,6 +1263,22 @@ fn context_and_review_workbench_commands_are_available() {
 
     let err = assert_failure(fgx(&["context", "@function.nope", "--json"]));
     assert!(err.contains("symbol not found in project context"));
+
+    let bad_budget = assert_failure(fgx(&[
+        "context",
+        "@function.mix_samples",
+        "--max-tokens",
+        "0",
+    ]));
+    assert!(bad_budget.contains("needs a positive integer"));
+
+    let bad_dep = assert_failure(fgx(&[
+        "context",
+        "@function.mix_samples",
+        "--deps",
+        "types,secrets",
+    ]));
+    assert!(bad_dep.contains("unknown context dependency 'secrets'"));
 }
 
 #[test]
@@ -1167,6 +1486,311 @@ fn capsule_run_command_is_available() {
         "7",
     ]));
     assert!(miss.contains("no_matching_fixture"));
+}
+
+#[test]
+fn pipeline_run_exposes_pipeline_wide_budget_controls() {
+    let exhausted = assert_failure(fgx(&[
+        "pipeline-run",
+        "examples/pipeline/music_preview.fgx",
+        "--max-stages",
+        "1",
+        "--schedule",
+        "graph",
+        "--json",
+    ]));
+    assert!(exhausted.contains("\"schema\":\"forgentex.pipeline_run.v1\""));
+    assert!(exhausted.contains("\"schema\":\"forgentex.pipeline_budget.v1\""));
+    assert!(exhausted.contains("\"status\":\"budget_exhausted\""));
+    assert!(exhausted.contains("\"max_stages\":1"));
+    assert!(exhausted.contains("planned stage count 2"));
+
+    let invalid = assert_failure(fgx(&[
+        "pipeline-run",
+        "examples/pipeline/music_preview.fgx",
+        "--max-wall-ms",
+        "0",
+    ]));
+    assert!(invalid.contains("--max-wall-ms needs a positive integer"));
+
+    let invalid_cpu = assert_failure(fgx(&[
+        "pipeline-run",
+        "examples/pipeline/music_preview.fgx",
+        "--max-cpu-ms",
+        "0",
+    ]));
+    assert!(invalid_cpu.contains("--max-cpu-ms needs a positive integer"));
+
+    let invalid_memory = assert_failure(fgx(&[
+        "pipeline-run",
+        "examples/pipeline/music_preview.fgx",
+        "--max-memory-bytes",
+        "0",
+    ]));
+    assert!(invalid_memory.contains("--max-memory-bytes needs a positive integer"));
+
+    let invalid_fs = assert_failure(fgx(&[
+        "pipeline-run",
+        "examples/pipeline/music_preview.fgx",
+        "--max-fs-bytes",
+        "0",
+    ]));
+    assert!(invalid_fs.contains("--max-fs-bytes needs a positive integer"));
+
+    let invalid_net = assert_failure(fgx(&[
+        "pipeline-run",
+        "examples/pipeline/music_preview.fgx",
+        "--max-net-bytes",
+        "0",
+    ]));
+    assert!(invalid_net.contains("--max-net-bytes needs a positive integer"));
+
+    let unavailable_net = assert_failure(fgx(&[
+        "pipeline-run",
+        "examples/pipeline/music_preview.fgx",
+        "--max-net-bytes",
+        "1",
+        "--json",
+    ]));
+    assert!(unavailable_net.contains("aggregate network accounting"));
+    assert!(unavailable_net.contains("\"stages\":[]"));
+    assert!(unavailable_net.contains("\"max_net_bytes\":1"));
+    assert!(unavailable_net.contains("\"used_net_bytes\":null"));
+
+    let invalid_stop = assert_failure(fgx(&[
+        "pipeline-run",
+        "examples/pipeline/music_preview.fgx",
+        "--stop-after-stages",
+        "0",
+    ]));
+    assert!(invalid_stop.contains("--stop-after-stages needs a positive integer"));
+
+    let stopped = assert_failure(fgx(&[
+        "pipeline-run",
+        "examples/pipeline/music_preview.fgx",
+        "--stop-after-stages",
+        "1",
+        "--allow-effects",
+        "cpu",
+        "--json",
+    ]));
+    assert!(stopped.contains("\"status\":\"cancelled\""));
+    assert!(stopped.contains("\"schema\":\"forgentex.pipeline_cancellation.v1\""));
+    assert!(stopped.contains("\"source\":\"stage_limit\""));
+    assert!(stopped.contains("\"committed_stages\":1"));
+
+    let schedule = assert_failure(fgx(&[
+        "pipeline-run",
+        "examples/pipeline/music_preview.fgx",
+        "--schedule",
+        "random",
+    ]));
+    assert!(schedule.contains("must be declaration, graph, or source"));
+
+    let source_graph = assert_success(fgx(&[
+        "pipeline-run",
+        "examples/pipeline/source_graph.fgx",
+        "--schedule",
+        "source",
+        "--allow-effects",
+        "cpu",
+        "--json",
+    ]));
+    assert!(source_graph.contains("\"mode\":\"deterministic_source_graph\""));
+    assert!(source_graph.contains("\"origin\":\"source_declaration\""));
+    assert!(source_graph.contains("\"declaration\":\"preview\""));
+
+    let move_handoff = assert_success(fgx(&[
+        "pipeline-run",
+        "examples/pipeline/move_handoff.fgx",
+        "--schedule",
+        "graph",
+        "--allow-effects",
+        "alloc,cpu",
+        "--json",
+    ]));
+    assert!(move_handoff.contains("\"move_sources\":[\"samples\"]"));
+    assert!(move_handoff.contains("\"handoff_committed\":true"));
+    assert!(!move_handoff.contains("\"name\":\"samples\",\"type\""));
+
+    let update_handoff = assert_success(fgx(&[
+        "pipeline-run",
+        "examples/pipeline/update_handoff.fgx",
+        "--schedule",
+        "graph",
+        "--allow-effects",
+        "alloc,cpu",
+        "--json",
+    ]));
+    assert!(update_handoff.contains("\"update_sources\":[\"samples\"]"));
+    assert!(update_handoff.contains("\"handoff_committed\":true"));
+    assert!(update_handoff.contains("\"before_sha256\""));
+    assert!(update_handoff.contains("\"after_sha256\""));
+    assert!(update_handoff.contains("\"name\":\"sample_sum\",\"type\":\"i32\",\"value\":-400"));
+}
+
+#[test]
+fn pipeline_run_reuses_an_explicit_persistent_cache_directory() {
+    let cache_dir = temp_file("persistent_pipeline_cache");
+    let _ = fs::remove_dir_all(&cache_dir);
+    fs::create_dir(&cache_dir).unwrap();
+    let cache_dir_text = cache_dir.to_str().unwrap();
+    let args = [
+        "pipeline-run",
+        "examples/pipeline/music_preview.fgx",
+        "--allow-effects",
+        "cpu",
+        "--cache-dir",
+        cache_dir_text,
+        "--json",
+    ];
+    let first = assert_success(fgx(&args));
+    assert!(first.contains("stored_process_local_and_integrity_checked_file"));
+    assert_eq!(fs::read_dir(&cache_dir).unwrap().count(), 2);
+
+    let second = assert_success(fgx(&args));
+    assert!(second.contains("\"decision\":\"cache_hit\""));
+    assert!(second.contains("\"storage\":\"integrity_checked_content_addressed_file\""));
+
+    fs::remove_dir_all(&cache_dir).unwrap();
+    let missing = assert_failure(fgx(&args));
+    assert!(missing.contains("pipeline cache directory"));
+    assert!(missing.contains("is unavailable"));
+}
+
+#[test]
+fn pipeline_run_authenticates_persistent_cache_across_processes() {
+    let cache_dir = temp_file("authenticated_pipeline_cache");
+    let key_file = temp_file("authenticated_pipeline_cache.key");
+    let wrong_key_file = temp_file("authenticated_pipeline_cache_wrong.key");
+    let short_key_file = temp_file("authenticated_pipeline_cache_short.key");
+    let _ = fs::remove_dir_all(&cache_dir);
+    let _ = fs::remove_file(&key_file);
+    let _ = fs::remove_file(&wrong_key_file);
+    let _ = fs::remove_file(&short_key_file);
+    fs::create_dir(&cache_dir).unwrap();
+    fs::write(&key_file, b"forgentex-authenticated-cache-key-01").unwrap();
+    fs::write(&wrong_key_file, b"forgentex-authenticated-cache-key-02").unwrap();
+    fs::write(&short_key_file, b"short").unwrap();
+    let cache_dir_text = cache_dir.to_str().unwrap();
+    let key_file_text = key_file.to_str().unwrap();
+    let args = [
+        "pipeline-run",
+        "examples/pipeline/music_preview.fgx",
+        "--allow-effects",
+        "cpu",
+        "--cache-dir",
+        cache_dir_text,
+        "--cache-key-file",
+        key_file_text,
+        "--json",
+    ];
+    let first = assert_success(fgx(&args));
+    assert!(first.contains("stored_process_local_and_authenticated_file"));
+    assert!(!first.contains("forgentex-authenticated-cache-key"));
+
+    let second = assert_success(fgx(&args));
+    assert!(second.contains("\"decision\":\"cache_hit\""));
+    assert!(second.contains("\"storage\":\"authenticated_hmac_sha256_content_addressed_file\""));
+
+    let artifact_args = [
+        "pipeline-run",
+        "examples/pipeline/artifact_preview.fgx",
+        "--allow-effects",
+        "alloc,cpu",
+        "--cache-dir",
+        cache_dir_text,
+        "--cache-key-file",
+        key_file_text,
+        "--json",
+    ];
+    let artifact_first = assert_success(fgx(&artifact_args));
+    assert!(artifact_first.contains("forgentex.native_artifact.v1"));
+    assert!(!artifact_first.contains("\"decision\":\"cache_hit\""));
+    let artifact_second = assert_success(fgx(&artifact_args));
+    assert!(artifact_second.contains("\"decision\":\"cache_hit\""));
+    assert!(artifact_second.contains(
+        "\"artifact\":{\"schema\":\"forgentex.native_artifact.v1\",\"media_type\":\"application/octet-stream\",\"bytes\":4"
+    ));
+
+    let wrong_args = [
+        "pipeline-run",
+        "examples/pipeline/music_preview.fgx",
+        "--allow-effects",
+        "cpu",
+        "--cache-dir",
+        cache_dir_text,
+        "--cache-key-file",
+        wrong_key_file.to_str().unwrap(),
+        "--json",
+    ];
+    let wrong = assert_success(fgx(&wrong_args));
+    assert!(!wrong.contains("\"decision\":\"cache_hit\""));
+    assert!(wrong.contains("\"native\":true"));
+
+    let missing_root = assert_failure(fgx(&[
+        "pipeline-run",
+        "examples/pipeline/music_preview.fgx",
+        "--cache-key-file",
+        key_file_text,
+    ]));
+    assert!(missing_root.contains("--cache-key-file requires --cache-dir"));
+    let short = assert_failure(fgx(&[
+        "pipeline-run",
+        "examples/pipeline/music_preview.fgx",
+        "--cache-dir",
+        cache_dir_text,
+        "--cache-key-file",
+        short_key_file.to_str().unwrap(),
+    ]));
+    assert!(short.contains("between 32 and 4096 bytes"));
+
+    let link_key_file = temp_file("authenticated_pipeline_cache_link.key");
+    let _ = fs::remove_file(&link_key_file);
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&key_file, &link_key_file).unwrap();
+        let linked = assert_failure(fgx(&[
+            "pipeline-run",
+            "examples/pipeline/music_preview.fgx",
+            "--cache-dir",
+            cache_dir_text,
+            "--cache-key-file",
+            link_key_file.to_str().unwrap(),
+        ]));
+        assert!(linked.contains("must be a non-symlink regular file"));
+        fs::remove_file(&link_key_file).unwrap();
+    }
+    #[cfg(windows)]
+    if std::os::windows::fs::symlink_file(&key_file, &link_key_file).is_ok() {
+        let linked = assert_failure(fgx(&[
+            "pipeline-run",
+            "examples/pipeline/music_preview.fgx",
+            "--cache-dir",
+            cache_dir_text,
+            "--cache-key-file",
+            link_key_file.to_str().unwrap(),
+        ]));
+        assert!(linked.contains("must be a non-symlink regular file"));
+        fs::remove_file(&link_key_file).unwrap();
+    }
+
+    let inside_key = cache_dir.join("inside.key");
+    fs::write(&inside_key, b"forgentex-authenticated-cache-key-03").unwrap();
+    let inside = assert_failure(fgx(&[
+        "pipeline-run",
+        "examples/pipeline/music_preview.fgx",
+        "--cache-dir",
+        cache_dir_text,
+        "--cache-key-file",
+        inside_key.to_str().unwrap(),
+    ]));
+    assert!(inside.contains("must be outside the cache directory"));
+
+    fs::remove_dir_all(cache_dir).unwrap();
+    fs::remove_file(key_file).unwrap();
+    fs::remove_file(wrong_key_file).unwrap();
+    fs::remove_file(short_key_file).unwrap();
 }
 
 #[test]
@@ -1385,12 +2009,24 @@ fn release_check_command_is_available() {
 
     let strict = assert_success(fgx(&["release-check", "--strict"]));
     assert!(strict.contains("decision=v1_ready"));
+
+    let public = assert_success(fgx(&["release-check", "--target", "0.1", "--json"]));
+    assert!(public.contains("\"current_track\": \"public-0.1-stabilization\""));
+    assert!(public.contains("\"decision\": \"public_0_1_not_ready\""));
+    assert!(public.contains("\"id\": \"public_0_1_profile\""));
+    assert!(public.contains("\"id\": \"public_0_1_distribution\""));
+
+    let public_strict = assert_failure(fgx(&["release-check", "--target", "0.1", "--strict"]));
+    assert!(public_strict.contains("decision=public_0_1_not_ready"));
+    assert!(public_strict.contains("release target '0.1' is not ready"));
 }
 
 #[test]
 fn help_and_unknown_command_are_covered() {
     let out = assert_success(fgx(&["help"]));
     assert!(out.contains("Forgentex demo CLI"));
+    assert!(out.contains("fgx --version"));
+    assert!(out.contains("fgx doctor [--json] [--strict]"));
     assert!(out.contains("fgx diagnose <file> --json"));
     assert!(out.contains("fgx diagnostics list"));
     assert!(out.contains("fgx explain <diagnostic-code>"));
@@ -1431,4 +2067,548 @@ fn help_and_unknown_command_are_covered() {
 
     let err = assert_failure(fgx(&["wat"]));
     assert!(err.contains("unknown command"));
+}
+
+#[test]
+fn version_and_doctor_commands_are_available() {
+    let version = assert_success(fgx(&["--version"]));
+    assert_eq!(version.trim(), concat!("fgx ", env!("CARGO_PKG_VERSION")));
+
+    let text = assert_success(fgx(&["doctor"]));
+    assert!(text.contains("Forgentex doctor"));
+    assert!(text.contains("interpreter=ready"));
+
+    let json = assert_success(fgx(&["doctor", "--json"]));
+    assert!(json.contains("\"schema\": \"forgentex.doctor.v1\""));
+    assert!(json.contains("\"host\":"));
+    assert!(json.contains("\"tools\":"));
+
+    let error = assert_failure(fgx(&["doctor", "--wat"]));
+    assert!(error.contains("unknown doctor option '--wat'"));
+}
+
+#[test]
+fn media_visualizer_application_publishes_a_governed_frame() {
+    let root = temp_file("media_visualizer_application");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::create_dir_all(root.join("output")).unwrap();
+    fs::copy(
+        manifest_dir().join("examples/apps/media_visualizer/Forgentex.toml"),
+        root.join("Forgentex.toml"),
+    )
+    .unwrap();
+    fs::copy(
+        manifest_dir().join("examples/apps/media_visualizer/src/main.fgx"),
+        root.join("src/main.fgx"),
+    )
+    .unwrap();
+    let root_text = root.to_string_lossy().to_string();
+
+    let out = assert_success(fgx(&["app-run", &root_text, "--arg", "11", "--json"]));
+    assert!(out.contains("\"schema\":\"forgentex.pipeline_application_run.v1\""));
+    assert!(out.contains("\"origin\":\"source_declaration\""));
+    assert!(out.contains("\"declaration\":\"visualizer\""));
+    assert!(out.contains("\"decision\":\"within_budget\""));
+    assert!(out.contains("\"op\":\"publish_pipeline_artifact\""));
+    assert!(out.contains("\"media_type\":\"image/x-portable-pixmap\""));
+
+    let artifact = fs::read(root.join("output/visualizer.ppm")).unwrap();
+    assert_eq!(&artifact[..13], b"P6\n64 36\n255\n");
+    assert_eq!(artifact.len(), 6925);
+
+    let denied = assert_failure(fgx(&["app-run", &root_text, "--arg", "11", "--json"]));
+    assert!(denied.contains("\"code\":\"io_target_exists\""));
+    assert_eq!(
+        fs::read(root.join("output/visualizer.ppm")).unwrap(),
+        artifact
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn scaffolded_application_template_runs_without_further_edits() {
+    let root = temp_file("new_application_template");
+    let _ = fs::remove_dir_all(&root);
+    let root_text = root.to_string_lossy().to_string();
+
+    let created = assert_success(fgx(&[
+        "new",
+        &root_text,
+        "--name",
+        "greeter",
+        "--template",
+        "app",
+    ]));
+    assert!(created.contains("Forgentex.toml"));
+    assert!(created.contains("main.fgx"));
+    assert!(created.contains("run: fgx app-run"));
+
+    assert!(assert_success(fgx(&["check", "--project", &root_text])).contains("ok"));
+
+    // The scaffold must run end to end with no manual edits.
+    let out = assert_success(fgx(&[
+        "app-run",
+        &root_text,
+        "--arg",
+        "hello from forgentex",
+        "--json",
+    ]));
+    assert!(out.contains("\"schema\":\"forgentex.application_run.v1\""));
+    assert!(out.contains("\"status\":\"ok\""));
+    assert!(out.contains("\"entry\":\"greet\""));
+    assert!(out.contains("\"op\":\"publish_artifact_text\""));
+    assert!(out.contains("\"media_type\":\"text/plain\""));
+    assert_eq!(
+        fs::read_to_string(root.join("output/greeting.txt")).unwrap(),
+        "hello from forgentex"
+    );
+
+    // create_new publication still refuses to clobber on a rerun.
+    let denied = assert_failure(fgx(&[
+        "app-run",
+        &root_text,
+        "--arg",
+        "second run",
+        "--json",
+    ]));
+    assert!(denied.contains("\"code\":\"io_target_exists\""));
+    assert_eq!(
+        fs::read_to_string(root.join("output/greeting.txt")).unwrap(),
+        "hello from forgentex"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn wav_waveform_application_renders_a_real_pcm_envelope() {
+    let root = temp_file("wav_waveform_application");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::create_dir_all(root.join("input")).unwrap();
+    fs::create_dir_all(root.join("output")).unwrap();
+    let source_root = manifest_dir().join("examples/apps/wav_waveform");
+    fs::copy(
+        source_root.join("Forgentex.toml"),
+        root.join("Forgentex.toml"),
+    )
+    .unwrap();
+    fs::copy(source_root.join("src/main.fgx"), root.join("src/main.fgx")).unwrap();
+    fs::copy(
+        source_root.join("input/loop_8bars_128bpm.wav"),
+        root.join("input/loop.wav"),
+    )
+    .unwrap();
+    let root_text = root.to_string_lossy().to_string();
+
+    let out = assert_success(fgx(&[
+        "app-run",
+        &root_text,
+        "--arg",
+        "input/loop.wav",
+        "--json",
+    ]));
+    assert!(out.contains("\"status\":\"ok\""));
+    // 2.6 MB of PCM crosses the governed read boundary and is accounted.
+    assert!(out.contains("\"read_bytes\":2649628"));
+    assert!(out.contains("\"media_type\":\"image/x-portable-pixmap\""));
+
+    let image = fs::read(root.join("output/waveform.ppm")).unwrap();
+    assert_eq!(&image[..13], b"P6\n64 36\n255\n");
+    assert_eq!(image.len(), 6925);
+
+    // The envelope must track the audio, not be flat: 8 bars at 128 BPM is 32
+    // beats across 64 columns, so on-beat and off-beat columns differ.
+    let mut heights = Vec::new();
+    for x in 0..64usize {
+        let mut lit = 0;
+        for y in 0..36usize {
+            if image[13 + ((y * 64) + x) * 3] == 64 {
+                lit += 1;
+            }
+        }
+        heights.push(lit);
+    }
+    let low = heights.iter().min().copied().unwrap();
+    let high = heights.iter().max().copied().unwrap();
+    assert!(
+        low < high,
+        "waveform envelope is flat: {heights:?} (expected real amplitude variation)"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn new_rejects_an_unknown_template() {
+    let root = temp_file("new_unknown_template");
+    let _ = fs::remove_dir_all(&root);
+    let out = assert_failure(fgx(&[
+        "new",
+        &root.to_string_lossy(),
+        "--template",
+        "service",
+    ]));
+    assert!(out.contains("expected 'lib' or 'app'"));
+    assert!(!root.exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn project_codebook_build_check_measure_and_stats_are_available() {
+    let path = temp_file("waveform.codebook.json");
+    let path_text = path.to_string_lossy().to_string();
+    let project = "examples/apps/wav_waveform";
+
+    let built = assert_success(fgx(&[
+        "codebook", "build", project, "--out", &path_text, "--budget", "1024", "--json",
+    ]));
+    assert!(built.contains("\"schema\": \"forgentex.codebook.v1\""));
+    assert!(built.contains("\"tier\": \"semantic\""));
+    assert!(built.contains("\"break_even_interactions\":"));
+    assert!(built.contains("\"generation\": 1"));
+    assert!(path.exists());
+
+    let unchanged = temp_file("waveform.unchanged.codebook.json");
+    let unchanged_text = unchanged.to_string_lossy().to_string();
+    assert_success(fgx(&[
+        "codebook",
+        "build",
+        project,
+        "--previous",
+        &path_text,
+        "--out",
+        &unchanged_text,
+        "--budget",
+        "1024",
+    ]));
+    assert_eq!(
+        fs::read_to_string(&unchanged).unwrap(),
+        fs::read_to_string(&path).unwrap()
+    );
+
+    let checked = assert_success(fgx(&[
+        "codebook",
+        "check",
+        project,
+        "--codebook",
+        &path_text,
+        "--json",
+    ]));
+    assert!(checked.contains("\"status\":\"pass\""));
+
+    let measured = assert_success(fgx(&[
+        "codebook",
+        "measure",
+        project,
+        "--codebook",
+        &path_text,
+        "--json",
+    ]));
+    assert!(measured.contains("\"schema\":\"forgentex.codebook_measure.v1\""));
+    assert!(measured.contains("\"status\":\"current\""));
+
+    let stats = assert_success(fgx(&["codebook", "stats", "--codebook", &path_text]));
+    assert!(stats.contains("Forgentex project codebook"));
+    assert!(stats.contains("break_even_interactions="));
+
+    let guarded_map = temp_file("waveform.guarded.fgmap");
+    let encoded_map = temp_file("waveform.encoded.fgmap");
+    let decoded_map = temp_file("waveform.decoded.fgmap");
+    let guarded_map_text = guarded_map.to_string_lossy().to_string();
+    let encoded_map_text = encoded_map.to_string_lossy().to_string();
+    let decoded_map_text = decoded_map.to_string_lossy().to_string();
+    let guarded = assert_success(fgx(&[
+        "map",
+        "--project",
+        project,
+        "--codebook",
+        &path_text,
+        "--out",
+        &guarded_map_text,
+    ]));
+    assert!(guarded.contains("codebook=skipped_not_smaller"));
+    assert!(!fs::read_to_string(&guarded_map)
+        .unwrap()
+        .starts_with("#FGCB"));
+    assert_success(fgx(&[
+        "map",
+        "--project",
+        project,
+        "--codebook",
+        &path_text,
+        "--force-codebook",
+        "--out",
+        &encoded_map_text,
+    ]));
+    assert!(fs::read_to_string(&encoded_map)
+        .unwrap()
+        .starts_with("#FGCB v1 hash="));
+    assert_success(fgx(&[
+        "codebook",
+        "decode",
+        &encoded_map_text,
+        "--codebook",
+        &path_text,
+        "--out",
+        &decoded_map_text,
+    ]));
+    assert!(fs::read_to_string(&decoded_map)
+        .unwrap()
+        .contains("render_waveform"));
+
+    let guarded_context = assert_success(fgx(&[
+        "context",
+        "@function.render_waveform",
+        "--project",
+        project,
+        "--deps",
+        "types,effects,tests",
+        "--codebook",
+        &path_text,
+        "--json",
+    ]));
+    assert!(guarded_context.contains("\"codebook_ref\": \""));
+    assert!(guarded_context.contains('§'));
+
+    let encoded_context = assert_success(fgx(&[
+        "context",
+        "@function.render_waveform",
+        "--project",
+        project,
+        "--deps",
+        "types,effects,tests",
+        "--codebook",
+        &path_text,
+        "--force-codebook",
+        "--json",
+    ]));
+    assert!(encoded_context.contains("\"codebook_ref\": \""));
+    assert!(encoded_context.contains('§'));
+    assert!(encoded_context.contains("\"saved_by_codebook\":"));
+
+    let patch = temp_file("waveform.codebook_source.fgp");
+    let guarded_patch = temp_file("waveform.codebook_guarded.fgp");
+    let encoded_patch = temp_file("waveform.codebook_encoded.fgp");
+    let patch_text = patch.to_string_lossy().to_string();
+    let guarded_patch_text = guarded_patch.to_string_lossy().to_string();
+    let encoded_patch_text = encoded_patch.to_string_lossy().to_string();
+    fs::write(
+        &patch,
+        "VERSION 1\nTARGET @function.render_waveform\nPRECONDITION NODE_EXISTS @function.render_waveform\nREVIEW helper=read_u32_le\nOP ADD_EFFECT effect=io.write\n",
+    )
+    .unwrap();
+    let guarded_patch_receipt = assert_success(fgx(&[
+        "codebook",
+        "encode",
+        &patch_text,
+        "--codebook",
+        &path_text,
+        "--out",
+        &guarded_patch_text,
+    ]));
+    assert!(guarded_patch_receipt.contains("codebook=skipped_not_smaller"));
+    assert!(!fs::read_to_string(&guarded_patch)
+        .unwrap()
+        .starts_with("#FGCB"));
+    assert_success(fgx(&[
+        "codebook",
+        "encode",
+        &patch_text,
+        "--codebook",
+        &path_text,
+        "--force-codebook",
+        "--out",
+        &encoded_patch_text,
+    ]));
+    assert!(fs::read_to_string(&encoded_patch)
+        .unwrap()
+        .starts_with("#FGCB v1 hash="));
+    let patched = assert_success(fgx(&[
+        "patch",
+        "examples/apps/wav_waveform/src/main.fgx",
+        &encoded_patch_text,
+        "--project",
+        project,
+        "--codebook",
+        &path_text,
+        "--check-only",
+    ]));
+    assert!(patched.contains("Type check after patch: ok"));
+    let reviewed = assert_success(fgx(&[
+        "review",
+        &encoded_patch_text,
+        "--source",
+        "examples/apps/wav_waveform/src/main.fgx",
+        "--project",
+        project,
+        "--codebook",
+        &path_text,
+        "--json",
+    ]));
+    assert!(reviewed.contains("\"codebook_ref\": \""));
+    assert!(reviewed.contains("ADD_EFFECT @function.render_waveform io.write"));
+
+    let bad_budget = assert_failure(fgx(&["codebook", "build", project, "--budget", "1"]));
+    assert!(bad_budget.contains("budget must be between"));
+    let _ = fs::remove_file(path);
+    let _ = fs::remove_file(unchanged);
+    let _ = fs::remove_file(guarded_map);
+    let _ = fs::remove_file(encoded_map);
+    let _ = fs::remove_file(decoded_map);
+    let _ = fs::remove_file(patch);
+    let _ = fs::remove_file(guarded_patch);
+    let _ = fs::remove_file(encoded_patch);
+}
+
+/// The VS Code extension's grammars, snippets, and providers are validated by
+/// three Node scripts under `tools/vscode/forgentex/test`. They are run here so
+/// the extension cannot drift from the language without a failing build.
+///
+/// The snippet and smoke suites drive the real `fgx` binary, so they need a
+/// release build; the grammar suite is self-contained. Hosts without Node skip.
+#[test]
+fn vscode_extension_suites_pass() {
+    let node = if cfg!(windows) { "node.exe" } else { "node" };
+    let probe = std::process::Command::new(node).arg("--version").output();
+    if probe.map(|out| !out.status.success()).unwrap_or(true) {
+        eprintln!("skipping: node is not available on this host");
+        return;
+    }
+
+    let extension_dir = manifest_dir().join("tools/vscode/forgentex");
+    let release_fgx = manifest_dir()
+        .join("target/release")
+        .join(if cfg!(windows) { "fgx.exe" } else { "fgx" });
+
+    // Grammar coverage never shells out to fgx, so it always runs.
+    let mut suites = vec!["test/grammar-coverage.js"];
+    if release_fgx.exists() {
+        suites.push("test/snippet-check.js");
+        suites.push("test/extension-smoke.js");
+    } else {
+        eprintln!(
+            "skipping fgx-backed extension suites: {} not built",
+            release_fgx.display()
+        );
+    }
+
+    for suite in suites {
+        let mut command = std::process::Command::new(node);
+        command.arg(suite).current_dir(&extension_dir);
+        if release_fgx.exists() {
+            command.arg(&release_fgx);
+        }
+        let output = command
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run {suite}: {err}"));
+        assert!(
+            output.status.success(),
+            "{suite} failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// `fgx debug --interactive` drives a suspended session from stdin. The run
+/// blocks mid-execution on a real thread, so this also covers that the session
+/// resumes and terminates rather than deadlocking.
+#[test]
+fn interactive_debug_session_steps_and_evaluates() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let root = temp_file("interactive_debug");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let file = root.join("sess.fgx");
+    fs::write(
+        &file,
+        "fn helper(x: i32) -> i32:\n    let doubled: i32 = x * 2\n    return doubled\n\nfn run() -> i32:\n    let a: i32 = 21\n    let b: i32 = helper(a)\n    return b\n",
+    )
+    .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fgx"))
+        .args([
+            "debug",
+            &file.to_string_lossy(),
+            "--entry",
+            "run",
+            "--interactive",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn fgx debug --interactive");
+
+    // step, step (into helper), print in the callee's frame, step out, finish.
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"s\ns\np x * 2\no\nc\n")
+        .unwrap();
+    let out = child.wait_with_output().expect("session should terminate");
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Stepping in reaches the callee at depth 2.
+    assert!(
+        text.contains("@function.helper.stmt.0 (depth 2)"),
+        "step-in should reach the callee: {text}"
+    );
+    // Evaluation happens in the paused frame, where `x` is bound.
+    assert!(text.contains("x * 2 = 42"), "{text}");
+    // Step-out returns to the caller.
+    assert!(text.contains("@function.run.stmt.2"), "{text}");
+    assert!(text.contains("session completed"), "{text}");
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Drive `fgx dap` with a scripted Debug Adapter Protocol client.
+///
+/// This covers the whole bridge end to end — framing, the configuration
+/// handshake, line-to-node breakpoint resolution, stepping into a callee,
+/// variable inspection, and running to a breakpoint — against the real
+/// binary. Hosts without Python skip.
+#[test]
+fn dap_adapter_serves_a_full_debug_session() {
+    let python = if cfg!(windows) { "python" } else { "python3" };
+    let probe = std::process::Command::new(python).arg("--version").output();
+    if probe.map(|out| !out.status.success()).unwrap_or(true) {
+        eprintln!("skipping: python is not available on this host");
+        return;
+    }
+
+    let root = temp_file("dap_session");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let program = root.join("sess.fgx");
+    fs::write(
+        &program,
+        "fn helper(x: i32) -> i32:\n    let doubled: i32 = x * 2\n    return doubled\n\nfn run() -> i32:\n    let a: i32 = 21\n    let b: i32 = helper(a)\n    return b\n",
+    )
+    .unwrap();
+
+    let script = manifest_dir().join("tools/dap/session_check.py");
+    let output = std::process::Command::new(python)
+        .arg(&script)
+        .arg(env!("CARGO_BIN_EXE_fgx"))
+        .arg(&program)
+        .output()
+        .expect("dap session check should run");
+
+    assert!(
+        output.status.success(),
+        "dap session failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("DAP session OK"));
+    let _ = fs::remove_dir_all(root);
 }

@@ -15,7 +15,7 @@ Notation:
 
 ```text
 file        ::= blank_line* item (blank_line+ item)* blank_line*
-item        ::= attribute* (struct_decl | trait_decl | trait_impl | function_decl)
+item        ::= attribute* (struct_decl | trait_decl | trait_impl | function_decl | pipeline_decl)
 blank_line  ::= newline
 ```
 
@@ -50,7 +50,15 @@ param       ::= ident ":" type
 return_type ::= "->" type
 effects     ::= "effects" "[" effect ("," effect)* "]"
 effect      ::= ident ("." ident)*
+
+pipeline_decl ::= "pipeline" ident ":" newline indent pipeline_stage+ pipeline_edge* dedent
+pipeline_stage ::= "stage" ident newline
+pipeline_edge ::= "edge" ident "->" ident "via" ident newline
 ```
+
+A pipeline declaration is an authored deterministic graph manifest. Live
+execution requires its complete stage/edge set to match capsule share bindings;
+its stage order breaks ties between independent ready nodes.
 
 If `return_type` is omitted, the return type is `void`.
 
@@ -140,7 +148,7 @@ expr        ::= binary_expr
 binary_expr ::= unary_expr (binary_op unary_expr)*
 unary_expr  ::= unary_op unary_expr | postfix_expr
 postfix_expr ::= primary_expr postfix*
-postfix     ::= "." ident | "[" expr "]"
+postfix     ::= "." ident | "[" expr "]" | "[" expr ".." expr "]"
 primary_expr ::= literal
                | ident
                | call_expr
@@ -160,6 +168,9 @@ literal     ::= int_literal | float_literal | bool_literal | string_literal
 bool_literal ::= "true" | "false"
 const_expr  ::= literal | unary_op const_expr | primitive_type "(" const_expr ")"
 ```
+
+The range postfix is half-open and currently requires both bounds. It produces
+a borrowed slice; it is an expression, not an assignment target.
 
 ## Comments and Annotations
 

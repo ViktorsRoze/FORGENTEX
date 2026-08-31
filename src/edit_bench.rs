@@ -81,6 +81,13 @@ fn map_skeleton(program: &Program) -> String {
                 out.push_str(&format!("{} {} {}\n", c.id, c.name, c.language));
             }
             Item::Share(s) => out.push_str(&format!("{} {}\n", s.id, s.name)),
+            Item::Pipeline(p) => out.push_str(&format!(
+                "{} {} stages={} edges={}\n",
+                p.id,
+                p.name,
+                p.stages.len(),
+                p.edges.len()
+            )),
             Item::Test(t) => out.push_str(&format!("{} {}\n", t.id, t.name)),
         }
     }

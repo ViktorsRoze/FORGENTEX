@@ -15,10 +15,69 @@ pub struct ProjectManifest {
     pub name: String,
     pub version: String,
     pub source_root: PathBuf,
+    pub application: Option<ApplicationManifest>,
     pub dependencies: Vec<ManifestDependency>,
     pub targets: Vec<String>,
     pub profiles: Vec<BuildProfile>,
     pub security: ProjectSecurity,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApplicationManifest {
+    pub forgentex: String,
+    pub entry: String,
+    pub runtime: String,
+    pub effects: Vec<String>,
+    pub max_read_bytes: Option<usize>,
+    pub max_write_bytes: Option<usize>,
+    pub max_directory_entries: Option<usize>,
+    pub artifacts: Vec<ApplicationArtifactManifest>,
+    pub pipeline: Option<ApplicationPipelineManifest>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApplicationPipelineManifest {
+    pub schedule: String,
+    pub inputs: Vec<String>,
+    pub output_share: String,
+    pub output_path: String,
+    pub max_stages: Option<usize>,
+    pub max_wall_ms: Option<u128>,
+    pub max_cpu_ms: Option<u128>,
+    pub max_memory_bytes: Option<u64>,
+    pub max_owned_bytes: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ApplicationPipelineBuilder {
+    schedule: Option<String>,
+    inputs: Option<Vec<String>>,
+    output_share: Option<String>,
+    output_path: Option<String>,
+    max_stages: Option<usize>,
+    max_wall_ms: Option<u128>,
+    max_cpu_ms: Option<u128>,
+    max_memory_bytes: Option<u64>,
+    max_owned_bytes: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApplicationArtifactManifest {
+    pub name: String,
+    pub root: String,
+    pub media_type: String,
+    pub max_bytes: usize,
+    pub required: bool,
+    pub publication: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ApplicationArtifactBuilder {
+    root: Option<String>,
+    media_type: Option<String>,
+    max_bytes: Option<usize>,
+    required: Option<bool>,
+    publication: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -232,7 +291,7 @@ fn load_module_from_source(
         public_symbols,
         program,
         source_hash: source_hash(&source),
-        token_cost: source.split_whitespace().count(),
+        token_cost: crate::tokens::estimate(&source),
         dependency,
         standard,
     })
@@ -512,6 +571,15 @@ pub fn generate_project_map_with_options(
                         share.ty.to_agent()
                     ));
                 }
+                Item::Pipeline(pipeline) => {
+                    out.push_str(&format!(
+                        "  PIPELINE {} {} stages={} edges={}\n",
+                        pipeline.name,
+                        pipeline.id,
+                        pipeline.stages.len(),
+                        pipeline.edges.len()
+                    ));
+                }
             }
         }
     }
@@ -541,6 +609,17 @@ fn parse_manifest(source: &str, package_root: &Path) -> Result<ProjectManifest, 
     let mut targets = Vec::new();
     let mut profiles = BTreeMap::<String, BuildProfile>::new();
     let mut security = ProjectSecurity::default();
+    let mut application_forgentex = None;
+    let mut application_entry = None;
+    let mut application_runtime = "hosted_io".to_string();
+    let mut application_effects = Vec::new();
+    let mut application_max_read_bytes = None;
+    let mut application_max_write_bytes = None;
+    let mut application_max_directory_entries = None;
+    let mut application_artifacts = BTreeMap::<String, ApplicationArtifactBuilder>::new();
+    let mut application_pipeline = ApplicationPipelineBuilder::default();
+    let mut saw_application_pipeline = false;
+    let mut saw_application = false;
     let mut section = "package".to_string();
     for raw_line in source.lines() {
         let line = raw_line
@@ -594,6 +673,132 @@ fn parse_manifest(source: &str, package_root: &Path) -> Result<ProjectManifest, 
                     security.permissions.push(permission);
                 }
             }
+            "application" | "app" => {
+                saw_application = true;
+                match key {
+                    "forgentex" => {
+                        let requirement = unquote(value).to_string();
+                        parse_compatibility_line(&requirement)?;
+                        application_forgentex = Some(requirement);
+                    }
+                    "entry" => application_entry = Some(unquote(value).to_string()),
+                    "runtime" => application_runtime = unquote(value).to_string(),
+                    "effects" => application_effects.extend(parse_target_value(value)),
+                    _ => return Err(format!("unknown application manifest key '{key}'")),
+                }
+            }
+            "application.limits" | "app.limits" => {
+                saw_application = true;
+                match key {
+                    "max_read_bytes" => {
+                        application_max_read_bytes = Some(parse_application_byte_limit(key, value)?)
+                    }
+                    "max_write_bytes" => {
+                        application_max_write_bytes =
+                            Some(parse_application_byte_limit(key, value)?)
+                    }
+                    "max_directory_entries" => {
+                        application_max_directory_entries =
+                            Some(parse_application_entry_limit(key, value)?)
+                    }
+                    _ => return Err(format!("unknown application limit '{key}'")),
+                }
+            }
+            "application.pipeline" | "app.pipeline" => {
+                saw_application = true;
+                saw_application_pipeline = true;
+                match key {
+                    "schedule" => application_pipeline.schedule = Some(unquote(value).to_string()),
+                    "inputs" => application_pipeline.inputs = Some(parse_target_value(value)),
+                    "output_share" => {
+                        application_pipeline.output_share = Some(unquote(value).to_string())
+                    }
+                    "output_path" => {
+                        application_pipeline.output_path = Some(unquote(value).to_string())
+                    }
+                    _ => return Err(format!("unknown application pipeline key '{key}'")),
+                }
+            }
+            "application.pipeline.limits" | "app.pipeline.limits" => {
+                saw_application = true;
+                saw_application_pipeline = true;
+                match key {
+                    "max_stages" => {
+                        application_pipeline.max_stages =
+                            Some(parse_positive_limit::<usize>(key, value)?)
+                    }
+                    "max_wall_ms" => {
+                        application_pipeline.max_wall_ms =
+                            Some(parse_positive_limit::<u128>(key, value)?)
+                    }
+                    "max_cpu_ms" => {
+                        application_pipeline.max_cpu_ms =
+                            Some(parse_positive_limit::<u128>(key, value)?)
+                    }
+                    "max_memory_bytes" => {
+                        application_pipeline.max_memory_bytes =
+                            Some(parse_positive_limit::<u64>(key, value)?)
+                    }
+                    "max_owned_bytes" => {
+                        application_pipeline.max_owned_bytes =
+                            Some(parse_positive_limit::<usize>(key, value)?)
+                    }
+                    _ => return Err(format!("unknown application pipeline limit '{key}'")),
+                }
+            }
+            section
+                if section.starts_with("application.artifact.")
+                    || section.starts_with("app.artifact.") =>
+            {
+                saw_application = true;
+                let name = section
+                    .strip_prefix("application.artifact.")
+                    .or_else(|| section.strip_prefix("app.artifact."))
+                    .unwrap_or_default();
+                validate_artifact_name(name)?;
+                let artifact = application_artifacts.entry(name.to_string()).or_default();
+                match key {
+                    "root" => set_artifact_field(
+                        &mut artifact.root,
+                        unquote(value).to_string(),
+                        name,
+                        key,
+                    )?,
+                    "media_type" => set_artifact_field(
+                        &mut artifact.media_type,
+                        unquote(value).to_string(),
+                        name,
+                        key,
+                    )?,
+                    "max_bytes" => set_artifact_field(
+                        &mut artifact.max_bytes,
+                        parse_application_byte_limit(key, value)?,
+                        name,
+                        key,
+                    )?,
+                    "required" => set_artifact_field(
+                        &mut artifact.required,
+                        parse_bool(value).ok_or_else(|| {
+                            format!(
+                                "application artifact '{name}' field required must be true or false"
+                            )
+                        })?,
+                        name,
+                        key,
+                    )?,
+                    "publication" => set_artifact_field(
+                        &mut artifact.publication,
+                        unquote(value).to_string(),
+                        name,
+                        key,
+                    )?,
+                    _ => {
+                        return Err(format!(
+                            "unknown application artifact field '{key}' for '{name}'"
+                        ))
+                    }
+                }
+            }
             "sandbox" | "security.sandbox" => {
                 security.sandbox.set(key, unquote(value));
             }
@@ -635,11 +840,214 @@ fn parse_manifest(source: &str, package_root: &Path) -> Result<ProjectManifest, 
         .unwrap_or_else(|| "0.1.0".to_string());
     let root = values.remove("root").unwrap_or_else(|| ".".to_string());
     let source_root = PathBuf::from(root);
+    let application = if saw_application {
+        let forgentex = application_forgentex.ok_or_else(|| {
+            "application manifest requires forgentex = \"MAJOR.MINOR\"".to_string()
+        })?;
+        let entry = application_entry
+            .filter(|entry| !entry.trim().is_empty())
+            .ok_or_else(|| "application manifest requires a non-empty entry".to_string())?;
+        if application_runtime != "hosted_io" && application_runtime != "pipeline" {
+            return Err(format!(
+                "application runtime '{}' is unsupported; expected hosted_io or pipeline",
+                application_runtime
+            ));
+        }
+        application_effects.sort();
+        application_effects.dedup();
+        for effect in &application_effects {
+            if application_runtime == "hosted_io" {
+                // `alloc` is a pure in-process memory effect that grants no
+                // ambient authority, so a hosted entry may construct an owned
+                // buffer instead of only forwarding bytes it already read.
+                // Native-execution effects such as `cpu` stay rejected: this
+                // runtime cannot govern a native process tree.
+                if effect != "fs.read" && effect != "fs.write" && effect != "alloc" {
+                    return Err(format!(
+                        "application effect '{effect}' is unsupported by the hosted_io runtime"
+                    ));
+                }
+            } else if !valid_effect_name(effect) {
+                return Err(format!(
+                    "application pipeline effect '{effect}' must be a dotted lowercase ASCII capability name"
+                ));
+            }
+        }
+        if application_effects.iter().any(|effect| effect == "fs.read")
+            && application_max_read_bytes.is_none()
+        {
+            return Err(
+                "application effect fs.read requires application.limits.max_read_bytes".to_string(),
+            );
+        }
+        if application_effects
+            .iter()
+            .any(|effect| effect == "fs.write")
+            && application_max_write_bytes.is_none()
+        {
+            return Err(
+                "application effect fs.write requires application.limits.max_write_bytes"
+                    .to_string(),
+            );
+        }
+        if application_max_directory_entries.is_some()
+            && !application_effects.iter().any(|effect| effect == "fs.read")
+        {
+            return Err(
+                "application.limits.max_directory_entries requires the fs.read effect".to_string(),
+            );
+        }
+        if !application_artifacts.is_empty()
+            && !application_effects
+                .iter()
+                .any(|effect| effect == "fs.write")
+        {
+            return Err(
+                "application artifact declarations require the fs.write effect".to_string(),
+            );
+        }
+        let max_write_bytes = application_max_write_bytes;
+        let artifacts = application_artifacts
+            .into_iter()
+            .map(|(name, artifact)| {
+                let root = artifact.root.ok_or_else(|| {
+                    format!("application artifact '{name}' requires a root field")
+                })?;
+                let root = crate::interp::normalize_portable_path(&root).map_err(|error| {
+                    format!("application artifact '{name}' has invalid root: {error}")
+                })?;
+                let media_type = artifact.media_type.ok_or_else(|| {
+                    format!("application artifact '{name}' requires a media_type field")
+                })?;
+                validate_artifact_media_type(&name, &media_type)?;
+                let max_bytes = artifact.max_bytes.ok_or_else(|| {
+                    format!("application artifact '{name}' requires a max_bytes field")
+                })?;
+                if let Some(run_limit) = max_write_bytes {
+                    if max_bytes > run_limit {
+                        return Err(format!(
+                            "application artifact '{name}' max_bytes {max_bytes} exceeds application.limits.max_write_bytes {run_limit}"
+                        ));
+                    }
+                }
+                let publication = artifact
+                    .publication
+                    .unwrap_or_else(|| "create_new".to_string());
+                if publication != "create_new" {
+                    return Err(format!(
+                        "application artifact '{name}' publication '{publication}' is unsupported; expected create_new"
+                    ));
+                }
+                Ok(ApplicationArtifactManifest {
+                    name,
+                    root,
+                    media_type,
+                    max_bytes,
+                    required: artifact.required.unwrap_or(true),
+                    publication,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let pipeline = if application_runtime == "pipeline" {
+            if !saw_application_pipeline {
+                return Err(
+                    "application runtime pipeline requires [application.pipeline]".to_string(),
+                );
+            }
+            if artifacts.len() != 1 {
+                return Err(
+                    "application runtime pipeline requires exactly one [application.artifact.<name>] declaration"
+                        .to_string(),
+                );
+            }
+            let schedule = application_pipeline
+                .schedule
+                .unwrap_or_else(|| "source".to_string());
+            if schedule != "source" {
+                return Err(format!(
+                    "application pipeline schedule '{schedule}' is unsupported; expected source"
+                ));
+            }
+            let inputs = application_pipeline.inputs.unwrap_or_default();
+            let mut distinct_inputs = BTreeSet::new();
+            for input in &inputs {
+                if !valid_manifest_identifier(input) {
+                    return Err(format!(
+                        "application pipeline input '{input}' is not a valid shared-value name"
+                    ));
+                }
+                if !distinct_inputs.insert(input.clone()) {
+                    return Err(format!(
+                        "application pipeline input '{input}' is declared more than once"
+                    ));
+                }
+            }
+            let output_share = application_pipeline
+                .output_share
+                .filter(|value| valid_manifest_identifier(value))
+                .ok_or_else(|| "application pipeline requires a valid output_share".to_string())?;
+            let output_path = application_pipeline
+                .output_path
+                .ok_or_else(|| "application pipeline requires an output_path".to_string())?;
+            let output_path = crate::interp::normalize_portable_path(&output_path)
+                .map_err(|error| format!("application pipeline output_path is invalid: {error}"))?;
+            let max_stages = application_pipeline.max_stages.ok_or_else(|| {
+                "application pipeline requires application.pipeline.limits.max_stages".to_string()
+            })?;
+            let max_wall_ms = application_pipeline.max_wall_ms.ok_or_else(|| {
+                "application pipeline requires application.pipeline.limits.max_wall_ms".to_string()
+            })?;
+            let max_cpu_ms = application_pipeline.max_cpu_ms.ok_or_else(|| {
+                "application pipeline requires application.pipeline.limits.max_cpu_ms".to_string()
+            })?;
+            let max_memory_bytes = application_pipeline.max_memory_bytes.ok_or_else(|| {
+                "application pipeline requires application.pipeline.limits.max_memory_bytes"
+                    .to_string()
+            })?;
+            let max_owned_bytes = application_pipeline.max_owned_bytes.ok_or_else(|| {
+                "application pipeline requires application.pipeline.limits.max_owned_bytes"
+                    .to_string()
+            })?;
+            Some(ApplicationPipelineManifest {
+                schedule,
+                inputs,
+                output_share,
+                output_path,
+                max_stages: Some(max_stages),
+                max_wall_ms: Some(max_wall_ms),
+                max_cpu_ms: Some(max_cpu_ms),
+                max_memory_bytes: Some(max_memory_bytes),
+                max_owned_bytes: Some(max_owned_bytes),
+            })
+        } else {
+            if saw_application_pipeline {
+                return Err(
+                    "[application.pipeline] requires application runtime = \"pipeline\""
+                        .to_string(),
+                );
+            }
+            None
+        };
+        Some(ApplicationManifest {
+            forgentex,
+            entry,
+            runtime: application_runtime,
+            effects: application_effects,
+            max_read_bytes: application_max_read_bytes,
+            max_write_bytes: application_max_write_bytes,
+            max_directory_entries: application_max_directory_entries,
+            artifacts,
+            pipeline,
+        })
+    } else {
+        None
+    };
     if absolutize(package_root, &source_root).exists() {
         Ok(ProjectManifest {
             name,
             version,
             source_root,
+            application,
             dependencies,
             targets,
             profiles: profiles.into_values().collect(),
@@ -649,6 +1057,152 @@ fn parse_manifest(source: &str, package_root: &Path) -> Result<ProjectManifest, 
         Err(format!(
             "manifest source root does not exist: {}",
             source_root.display()
+        ))
+    }
+}
+
+fn parse_positive_limit<T>(key: &str, value: &str) -> Result<T, String>
+where
+    T: std::str::FromStr + PartialEq + Default,
+{
+    let parsed = unquote(value)
+        .parse::<T>()
+        .map_err(|_| format!("application pipeline limit '{key}' must be a positive integer"))?;
+    if parsed == T::default() {
+        return Err(format!(
+            "application pipeline limit '{key}' must be a positive integer"
+        ));
+    }
+    Ok(parsed)
+}
+
+fn valid_effect_name(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 64 && value.split('.').all(valid_manifest_identifier)
+}
+
+fn valid_manifest_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+pub fn parse_compatibility_line(value: &str) -> Result<(u64, u64), String> {
+    let Some((major, minor)) = value.split_once('.') else {
+        return Err(format!(
+            "application Forgentex compatibility '{value}' is invalid; expected MAJOR.MINOR"
+        ));
+    };
+    if major.is_empty()
+        || minor.is_empty()
+        || minor.contains('.')
+        || !major.bytes().all(|byte| byte.is_ascii_digit())
+        || !minor.bytes().all(|byte| byte.is_ascii_digit())
+        || (major.len() > 1 && major.starts_with('0'))
+        || (minor.len() > 1 && minor.starts_with('0'))
+    {
+        return Err(format!(
+            "application Forgentex compatibility '{value}' is invalid; expected canonical MAJOR.MINOR"
+        ));
+    }
+    let major = major.parse::<u64>().map_err(|_| {
+        format!("application Forgentex compatibility '{value}' has an out-of-range major version")
+    })?;
+    let minor = minor.parse::<u64>().map_err(|_| {
+        format!("application Forgentex compatibility '{value}' has an out-of-range minor version")
+    })?;
+    Ok((major, minor))
+}
+
+fn parse_application_byte_limit(key: &str, value: &str) -> Result<usize, String> {
+    const MAX_APPLICATION_IO_BYTES: usize = 1_073_741_824;
+    let parsed = unquote(value)
+        .parse::<usize>()
+        .map_err(|_| format!("application limit '{key}' must be a positive integer"))?;
+    if !(1..=MAX_APPLICATION_IO_BYTES).contains(&parsed) {
+        return Err(format!(
+            "application limit '{key}' must be between 1 and {MAX_APPLICATION_IO_BYTES}"
+        ));
+    }
+    Ok(parsed)
+}
+
+fn parse_application_entry_limit(key: &str, value: &str) -> Result<usize, String> {
+    const MAX_APPLICATION_DIRECTORY_ENTRIES: usize = 1_000_000;
+    let parsed = unquote(value)
+        .parse::<usize>()
+        .map_err(|_| format!("application limit '{key}' must be a positive integer"))?;
+    if !(1..=MAX_APPLICATION_DIRECTORY_ENTRIES).contains(&parsed) {
+        return Err(format!(
+            "application limit '{key}' must be between 1 and {MAX_APPLICATION_DIRECTORY_ENTRIES}"
+        ));
+    }
+    Ok(parsed)
+}
+
+fn set_artifact_field<T>(
+    slot: &mut Option<T>,
+    value: T,
+    artifact: &str,
+    field: &str,
+) -> Result<(), String> {
+    if slot.replace(value).is_some() {
+        return Err(format!(
+            "application artifact '{artifact}' declares '{field}' more than once"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_artifact_name(name: &str) -> Result<(), String> {
+    let valid = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'));
+    if valid {
+        Ok(())
+    } else {
+        Err(format!(
+            "application artifact name '{name}' must start with an ASCII letter and contain at most 64 ASCII letters, digits, '_' or '-'"
+        ))
+    }
+}
+
+fn validate_artifact_media_type(name: &str, media_type: &str) -> Result<(), String> {
+    let Some((type_name, subtype)) = media_type.split_once('/') else {
+        return Err(format!(
+            "application artifact '{name}' media_type '{media_type}' must contain type/subtype"
+        ));
+    };
+    let token = |value: &str| {
+        !value.is_empty()
+            && value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(
+                        byte,
+                        b'!' | b'#' | b'$' | b'&' | b'^' | b'_' | b'.' | b'+' | b'-'
+                    )
+            })
+    };
+    if media_type.len() <= 127
+        && media_type.bytes().all(|byte| !byte.is_ascii_uppercase())
+        && token(type_name)
+        && token(subtype)
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "application artifact '{name}' media_type '{media_type}' must be a lowercase ASCII type/subtype token of at most 127 bytes"
         ))
     }
 }
@@ -769,6 +1323,9 @@ fn duplicate_symbol_diagnostics(project: &Project) -> Vec<Diagnostic> {
                 }
                 Item::Capsule(capsule) => ("capsule", capsule.name.as_str(), capsule.id.as_str()),
                 Item::Share(share) => ("share", share.name.as_str(), share.id.as_str()),
+                Item::Pipeline(pipeline) => {
+                    ("pipeline", pipeline.name.as_str(), pipeline.id.as_str())
+                }
                 Item::Test(_) => continue,
             };
             let key = format!("{kind}:{name}");

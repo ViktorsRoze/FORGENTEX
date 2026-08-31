@@ -1,0 +1,38 @@
+# Native data boundary: Rust transfers a finite owned Vec[f32].
+
+foreign make_gains_f32_rust rust version "2021" effects [alloc]:
+    output gains: Vec[f32]
+    sandbox "fs.none"
+    code:
+        #[repr(C)]
+        pub struct FgxOwnedF32 {
+            pub ptr: *mut f32,
+            pub len: usize,
+            pub capacity: usize,
+        }
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn make_gains_f32_rust() -> FgxOwnedF32 {
+            let mut gains = vec![0.1_f32, -1.5_f32, 1.25_f32, 3.5_f32];
+            let result = FgxOwnedF32 {
+                ptr: gains.as_mut_ptr(),
+                len: gains.len(),
+                capacity: gains.capacity(),
+            };
+            std::mem::forget(gains);
+            result
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn make_gains_f32_rust_free(
+            ptr: *mut f32,
+            len: usize,
+            capacity: usize,
+        ) {
+            if capacity > 0 {
+                drop(unsafe { Vec::from_raw_parts(ptr, len, capacity) });
+            }
+        }
+
+fn gains_from_rust() -> Vec[f32] effects [alloc]:
+    return make_gains_f32_rust()

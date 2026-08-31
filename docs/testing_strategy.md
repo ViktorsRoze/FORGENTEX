@@ -195,7 +195,41 @@ Project-map tests:
 Package manager and build-system tests:
 
 - `fgx new <path> --name <package>` creates `Forgentex.toml` and `src/main.fgx`.
+- `fgx new <path> --template app` additionally scaffolds the `[application]`
+  contract and `output/` artifact root, and the scaffold is asserted to run
+  through `fgx app-run` with no manual edits.
 - Local path dependencies load into project graphs and lock reports.
+- Project codebook tests assert deterministic bounded semantic-tier builds,
+  exact serialized token accounting, parse round trips, mnemonic/cryptic mode
+  separation, stale-corpus detection, malformed-entry rejection, and CLI
+  build/check/measure/stats workflows.
+- Codebook exchange tests cover collision-safe text round trips, artifact-hash
+  mismatch refusal, reversible `#FGCB` project maps, current-corpus enforcement,
+  codebook-aware context, canonical state hashes, and explicit codebook savings.
+- Whole-payload admission tests prove the negative waveform map stays plain,
+  the positive waveform context uses its codebook, context fallback is
+  byte-identical to ordinary no-codebook JSON, and force mode remains reversible
+  for conformance diagnostics.
+- Encoded patch tests cover never-larger admission, forced artifact-bound
+  transport, current-project enforcement, wrong-codebook refusal, decode before
+  target/precondition handling, checker equivalence, and review token evidence.
+- Multi-generation codebook tests prove unchanged builds are byte-identical,
+  changed corpora bind the parent artifact, surviving codes remain stable,
+  retired codes persist across generations, restored identifiers receive fresh
+  codes, and incompatible modes cannot join one lineage.
+- Semantic-tier tests prove whole mutable-slice/owned-vector type shapes and
+  complete effect sets are learned from AST declarations, encoded before
+  identifier aliases, decoded exactly, and inherited through stable lineage.
+- Exact-pattern tests prove repeated formatter-derived expressions and leaf
+  statements are selected before nested semantic/identifier entries, remain
+  byte-reversible, and cross whole-context admission only when final JSON wins.
+- Naming-morphology tests prove delimiter-bounded prefixes/suffixes use
+  self-delimiting handles, compress unseen identifiers following the learned
+  scheme, reject malformed artifacts, and decode exactly.
+- Parameterized-pattern tests prove formatter-derived expression and statement
+  templates encode one or two unseen atomic arguments, preserve ordered slots
+  even when argument text contains `$1`, use canonical byte-length framing,
+  round-trip UTF-8 strings, reject malformed frames, and remain never-larger.
 - `fgx lock <project> --json` emits `forgentex.lock.v1` with deterministic
   package order, manifest checksums, dependency names, and target matrices.
 - `fgx test --project <path> --all-targets --json` checks x86_64, AArch64, and
@@ -251,6 +285,14 @@ Release criteria tests:
   release review.
 - `fgx release-check --strict` fails when the requested release target is not
   ready.
+- `fgx release-check --target 0.1 --json` adds the public profile, execution,
+  compatibility, standard-foundation, distribution, and examples/evidence
+  gates. It currently reports `public_0_1_not_ready` with concrete gaps;
+  `--strict` must fail until all public gates pass.
+- `docs/public_0_1_compatibility.md` and `src/public_compat.rs` freeze the exact
+  49-code public diagnostic catalog, 11 versioned report identifiers and their
+  required top-level fields, plus the 0.1.x deprecation window. Checker,
+  diagnose, and interpreter JSON carry explicit schema identifiers.
 - v0.24 hardening checks cover strict release gating, gate evidence
   completeness, diagnostic shape freeze, borrow escape-hatch conformance, and
   target decision consistency.
@@ -436,6 +478,16 @@ v2 foreign capsule tests:
   repositories, and permission risks.
 - Native backends reject, stub, or explicitly bridge foreign capsules with
   stable diagnostics instead of silently lowering them.
+- Native C/C++/Rust/Zig `str` inputs derive the same read-only pointer-length
+  ABI and round-trip Unicode, embedded NUL, and newline bytes through bounded
+  private framing without ownership transfer.
+- Oversized borrowed strings fail before compiler lookup; successful native
+  receipts expose only `borrowed_input_bytes`, never the payload.
+- Contained native stdout and stderr are drained concurrently under one byte
+  budget, so pipe saturation cannot deadlock a call.
+- `limit.output_bytes` overflow kills the native process tree, emits the stable
+  `native_capsule_output_limit` failure receipt, and leaves a cached compiled
+  runner reusable by the next call.
 
 Standard library tests:
 
@@ -480,25 +532,48 @@ CLI tests:
   conditional alias call rejection, and conditional alias last-use acceptance
   cases.
 - safe.1 adds `forgentex.borrow_reference.v1`: an implementation-independent
-  move-availability model generates 510 owned root/field programs across linear
-  flow, branch joins, and two-iteration loops. `fgx borrow-conformance` and
-  strict release checks require all 510 results to match the production checker.
-- Its independent alias/liveness model generates 277 cases across descendant
+  move-availability model generates 526 programs across owned root/field flow
+  and recursively normalized copy/owned associated-type projections.
+  `fgx borrow-conformance` and strict release checks require all 526 results to
+  match the production checker.
+- Its independent alias/liveness model generates 610 cases across descendant
   loans, shallow and nested fields, branch joins, loop-carried aliases,
-  constant/dynamic index pairs, and conditional target joins inside loops.
-  Only differing constant indices prove disjointness; all dynamic pairs remain
+  constant/dynamic index pairs, conditional target joins inside loops, and
+  exhaustive two-, three-, and four-level nested-loop target joins in both
+  write orders, plus constant/dynamic half-open range pairs, range-versus-index
+  checks, 16 concrete mutable-borrow instantiations through generic wrapper
+  chains, and 16 recursively normalized associated-type borrow shapes.
+  Only concrete non-overlap proves range disjointness; all dynamic pairs remain
   conservatively overlapping.
-- Its independent lifetime lattice generates 132 parameter/unproven provenance
+- Its independent lifetime lattice generates 292 parameter/unproven provenance
   cases across direct/control-flow/helper/wrapper returns, field/index
-  projections, and self/mutual recursive cycles. Selective helper contracts
-  prove that unreturned projection arguments do not taint a result.
-- safe.1 runtime campaigns accept a bounded caller seed and case count, run 128
-  cases by default, and emit minimized source plus replay metadata if a
-  differential mismatch survives model-equivalent shrinking.
+  projections, deep selective wrapper chains, and self/mutual recursive cycles
+  receiving projected inputs, plus recursive Vec/array borrow carriers and
+  generic identity/wrapper chains. A 72-case combined matrix crosses collection
+  kind, carrier depth one to three, wrapper depth one to three, direct/aliased
+  traversal, and parameter/unproven origins. Selective helper contracts prove
+  that unreturned projection arguments do not taint a result. Sixteen
+  associated-type cases additionally cover one-to-four recursive projection
+  layers with direct/aliased parameter or unproven origins.
+- Curated closure ownership cases require named owned free-variable captures to
+  consume their complete outer root, reject capture-after-move, keep primitive
+  and immutable-borrow captures copyable, reject mutable-borrow captures from
+  copyable `Fn`, and honor lambda-parameter shadowing.
+- Its independent affine-closure model generates 38 cases: every one-to-four
+  operation sequence over `FnOnce` call/transfer, plus mutable/shared,
+  direct/aliased capture roots with and without outer use. Invocation, transfer,
+  and task spawn consume one-shot callables; mutable capture roots move into the
+  explicitly typed affine environment. Strict release requires zero closure
+  mismatches.
+- safe.1 runtime campaigns accept a bounded caller seed and case count, run 192
+  cases across six families by default, and emit minimized source plus replay
+  metadata if a differential mismatch survives model-equivalent shrinking. The
+  affine-closure family balances valid and invalid eight-to-24-step traces over
+  call, transfer, task spawn, and reinitialization.
 - `--failure-dir <path>` persists mismatch source and
   `forgentex.borrow_regression.v1` metadata; four checked-in minimal fixtures
-  replay on every run. Weekly CI covers four seeds at 64 cases per family and
-  retains any minimized failure artifacts.
+  replay on every run. Weekly CI covers eight seeds at 96 cases per family
+  (4,608 generated programs total) and retains any minimized failure artifacts.
 - `fgx effects <file> --json` reports declared, inferred, missing, invalid, and capability effects.
 - `fgx check --project --json`, `fgx api --public`, and `fgx map --project` cover Stage 8 project workflows.
 - `fgx run <file> --entry <function> --json-input <file> --backend interp` covers Stage 9 interpreter workflows through the v3.0/v3.1 backend boundary.

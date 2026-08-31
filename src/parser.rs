@@ -3,9 +3,10 @@ use std::path::Path;
 use crate::ast::{
     is_primitive_name, AsmBinding, AsmBlock, Attribute, Capsule, CapsuleBinding, CapsuleDep,
     CapsuleFixture, CapsuleShareBinding, CapsuleValue, EnumDecl, EnumVariant, Expr, Field,
-    FunctionDecl, Item, MatchArm, Param, Pattern, Program, ShareDecl, ShareMode, Stmt, StructDecl,
-    TestDecl, TestExpectation, TraitConstDecl, TraitConstImpl, TraitDecl, TraitImplDecl,
-    TraitMethodDecl, TraitMethodImpl, TraitTypeDecl, TraitTypeImpl, Type, TypeParamBound,
+    FunctionDecl, Item, MatchArm, Param, Pattern, PipelineDecl, PipelineEdgeDecl, Program,
+    ShareDecl, ShareMode, Stmt, StructDecl, TestDecl, TestExpectation, TraitConstDecl,
+    TraitConstImpl, TraitDecl, TraitImplDecl, TraitMethodDecl, TraitMethodImpl, TraitTypeDecl,
+    TraitTypeImpl, Type, TypeParamBound,
 };
 use crate::lexer::{lex, Comment, Token};
 use crate::span::{ParseDiagnostic, SourceMap, SourceSpan};
@@ -348,6 +349,27 @@ pub fn parse_human(source: &str) -> Result<Program, String> {
             index += 1;
             continue;
         }
+        if let Some(name) = item_text
+            .strip_prefix("pipeline ")
+            .and_then(|text| text.strip_suffix(':'))
+        {
+            let mut pipeline = PipelineDecl::new(name.trim().to_string());
+            pipeline.attrs = std::mem::take(&mut pending_attrs);
+            index += 1;
+            while index < lines.len() && lines[index].indent > 0 {
+                let entry = lines[index].text.trim();
+                if let Some(stage) = entry.strip_prefix("stage ") {
+                    pipeline.stages.push(stage.trim().to_string());
+                } else if let Some(edge) = entry.strip_prefix("edge ") {
+                    pipeline.edges.push(parse_pipeline_edge(edge, false)?);
+                } else if !entry.is_empty() {
+                    return Err(format!("unknown pipeline entry: {entry}"));
+                }
+                index += 1;
+            }
+            program.items.push(Item::Pipeline(pipeline));
+            continue;
+        }
         return Err(format!("unknown top-level item: {}", item_text));
     }
     Ok(program)
@@ -578,6 +600,30 @@ fn parse_share_decl(rest: &str, agent: bool) -> Result<ShareDecl, String> {
     ))
 }
 
+fn parse_pipeline_edge(rest: &str, agent: bool) -> Result<PipelineEdgeDecl, String> {
+    let (nodes, share) = if agent {
+        rest.split_once(" VIA ")
+            .ok_or_else(|| format!("pipeline edge needs 'VIA share': {rest}"))?
+    } else {
+        rest.split_once(" via ")
+            .ok_or_else(|| format!("pipeline edge needs 'via share': {rest}"))?
+    };
+    let (from, to) = nodes
+        .split_once(" -> ")
+        .ok_or_else(|| format!("pipeline edge needs 'from -> to': {rest}"))?;
+    let from = from.trim();
+    let to = to.trim();
+    let share = share.trim();
+    if from.is_empty() || to.is_empty() || share.is_empty() {
+        return Err(format!("pipeline edge names must not be empty: {rest}"));
+    }
+    Ok(PipelineEdgeDecl {
+        from: from.to_string(),
+        to: to.to_string(),
+        share: share.to_string(),
+    })
+}
+
 fn parse_capsule_share_binding(content: &str) -> Result<CapsuleShareBinding, String> {
     let mut parts = content.split_whitespace();
     let name = parts
@@ -586,9 +632,15 @@ fn parse_capsule_share_binding(content: &str) -> Result<CapsuleShareBinding, Str
         .to_string();
     let mode_text = parts
         .next()
-        .ok_or_else(|| format!("capsule bind needs a mode (read|rw): {content}"))?;
+        .ok_or_else(|| format!("capsule bind needs a mode (read|move|update|rw): {content}"))?;
     let mode = ShareMode::parse(mode_text)
         .ok_or_else(|| format!("unknown capsule bind mode '{mode_text}'"))?;
+    crate::ast::split_share_reference(&name)?;
+    if parts.next().is_some() {
+        return Err(format!(
+            "capsule bind has unexpected trailing fields: {content}"
+        ));
+    }
     Ok(CapsuleShareBinding { name, mode })
 }
 
@@ -904,6 +956,27 @@ pub fn parse_agent(source: &str) -> Result<Program, String> {
             index += 1;
             continue;
         }
+        if let Some(name) = line.strip_prefix("PIPELINE ") {
+            let mut pipeline = PipelineDecl::new(name.trim().to_string());
+            pipeline.attrs = std::mem::take(&mut pending_attrs);
+            index += 1;
+            while index < lines.len() && lines[index] != "ENDPIPELINE" {
+                if let Some(stage) = lines[index].strip_prefix("STAGE ") {
+                    pipeline.stages.push(stage.trim().to_string());
+                } else if let Some(edge) = lines[index].strip_prefix("EDGE ") {
+                    pipeline.edges.push(parse_pipeline_edge(edge, true)?);
+                } else {
+                    return Err(format!("unknown pipeline entry: {}", lines[index]));
+                }
+                index += 1;
+            }
+            if index >= lines.len() {
+                return Err(format!("unterminated pipeline {}", pipeline.name));
+            }
+            program.items.push(Item::Pipeline(pipeline));
+            index += 1;
+            continue;
+        }
         return Err(format!("unknown agent item: {line}"));
     }
     Ok(program)
@@ -964,7 +1037,32 @@ fn map_human_source(file: &str, source: &str, program: &Program, map: &mut Sourc
                     }
                 }
             }
-            Item::Enum(_) => {}
+            Item::Enum(decl) => {
+                // Enums were previously skipped entirely, so no enum or variant
+                // had a source position: `fgx check` could report one and the
+                // editor had nothing to anchor it to.
+                let Some(header_idx) = find_line_from(&lines, index, |line| {
+                    strip_visibility_marker(&line.text) == format!("enum {}:", decl.name)
+                }) else {
+                    continue;
+                };
+                index = header_idx + 1;
+                map.add(&decl.id, line_span(file, &lines[header_idx]));
+                for variant in &decl.variants {
+                    if let Some(variant_idx) = find_line_from(&lines, index, |line| {
+                        let text = line.text.trim();
+                        line.indent > 0
+                            && (text == variant.name
+                                || text.starts_with(&format!("{}(", variant.name)))
+                    }) {
+                        map.add(
+                            format!("{}.variant.{}", decl.id, variant.name),
+                            line_span(file, &lines[variant_idx]),
+                        );
+                        index = variant_idx + 1;
+                    }
+                }
+            }
             Item::Trait(decl) => {
                 if let Some(line_idx) = find_line_from(&lines, index, |line| {
                     strip_visibility_marker(&line.text) == format!("trait {}:", decl.name)
@@ -1049,6 +1147,14 @@ fn map_human_source(file: &str, source: &str, program: &Program, map: &mut Sourc
                     map.add(&share.id, line_span(file, &lines[line_idx]));
                 }
             }
+            Item::Pipeline(pipeline) => {
+                if let Some(line_idx) = find_line_from(&lines, index, |line| {
+                    line.text == format!("pipeline {}:", pipeline.name)
+                }) {
+                    index = line_idx + 1;
+                    map.add(&pipeline.id, line_span(file, &lines[line_idx]));
+                }
+            }
         }
     }
 }
@@ -1070,42 +1176,127 @@ fn map_human_stmt_spans(
         let id = format!("{prefix}.stmt.{stmt_idx}");
         let span = line_span(file, &lines[line_idx]);
         map_stmt_and_expr_spans(stmt, &id, span.clone(), map);
-        match stmt {
-            Stmt::If { then_body, .. } => {
-                map_human_nested_stmt_spans(
-                    file,
-                    lines,
-                    index,
-                    indent + 4,
-                    then_body,
-                    &format!("{id}.then"),
-                    map,
-                );
-            }
-            Stmt::For { body, .. } => {
-                map_human_nested_stmt_spans(
-                    file,
-                    lines,
-                    index,
-                    indent + 4,
-                    body,
-                    &format!("{id}.body"),
-                    map,
-                );
-            }
-            Stmt::Asm(_) => {
-                while *index < lines.len()
-                    && (lines[*index].text.is_empty()
-                        || (lines[*index].indent >= indent + 4 && !lines[*index].text.is_empty()))
-                {
-                    if !lines[*index].text.is_empty() && lines[*index].indent < indent + 4 {
-                        break;
-                    }
-                    *index += 1;
+        map_human_child_bodies(file, lines, index, indent, stmt, &id, map);
+        if matches!(stmt, Stmt::Asm(_)) {
+            // An assembly block's lines are opaque; skip past its whole body.
+            while *index < lines.len()
+                && (lines[*index].text.is_empty()
+                    || (lines[*index].indent >= indent + 4 && !lines[*index].text.is_empty()))
+            {
+                if !lines[*index].text.is_empty() && lines[*index].indent < indent + 4 {
+                    break;
                 }
+                *index += 1;
             }
-            _ => {}
         }
+    }
+}
+
+/// Map the nested bodies of a compound statement, using the same id scheme the
+/// interpreter walks: `.then`/`.else` for a branch, `.body` for a loop, and
+/// `.arm.<n>` for a match arm. Every branch is covered here so a nested
+/// statement is never left without a source position — `while` bodies, `else`
+/// bodies, and match arms previously had none, which left a debugger step
+/// inside a loop with no line to open.
+fn map_human_child_bodies(
+    file: &str,
+    lines: &[SourceLine],
+    index: &mut usize,
+    indent: usize,
+    stmt: &Stmt,
+    id: &str,
+    map: &mut SourceMap,
+) {
+    match stmt {
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            map_human_nested_stmt_spans(
+                file,
+                lines,
+                index,
+                indent + 4,
+                then_body,
+                &format!("{id}.then"),
+                map,
+            );
+            if !else_body.is_empty() {
+                // `else:` sits at the `if`'s own indent, so the scanner would
+                // otherwise hand it to the next sibling statement — which
+                // silently gave that statement the `else:` line as its
+                // position.
+                skip_block_header(lines, index, indent, "else:");
+                map_human_nested_stmt_spans(
+                    file,
+                    lines,
+                    index,
+                    indent + 4,
+                    else_body,
+                    &format!("{id}.else"),
+                    map,
+                );
+            }
+        }
+        Stmt::For { body, .. } | Stmt::While { body, .. } => map_human_nested_stmt_spans(
+            file,
+            lines,
+            index,
+            indent + 4,
+            body,
+            &format!("{id}.body"),
+            map,
+        ),
+        Stmt::Match { arms, .. } => {
+            for (arm_idx, arm) in arms.iter().enumerate() {
+                // Each `case ...:` header sits at the match's body indent.
+                skip_case_header(lines, index, indent + 4);
+                map_human_nested_stmt_spans(
+                    file,
+                    lines,
+                    index,
+                    indent + 8,
+                    &arm.body,
+                    &format!("{id}.arm.{arm_idx}"),
+                    map,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Advance past a block header (`else:`) sitting at `indent`, so it is not
+/// mistaken for the next statement at that level.
+fn skip_block_header(lines: &[SourceLine], index: &mut usize, indent: usize, header: &str) {
+    let mut probe = *index;
+    while probe < lines.len() {
+        let line = &lines[probe];
+        if line.text.is_empty() {
+            probe += 1;
+            continue;
+        }
+        if line.indent == indent && line.text.trim() == header {
+            *index = probe + 1;
+        }
+        return;
+    }
+}
+
+/// Advance past a `case ...:` arm header sitting at `indent`.
+fn skip_case_header(lines: &[SourceLine], index: &mut usize, indent: usize) {
+    let mut probe = *index;
+    while probe < lines.len() {
+        let line = &lines[probe];
+        if line.text.is_empty() {
+            probe += 1;
+            continue;
+        }
+        if line.indent == indent && line.text.trim_start().starts_with("case ") {
+            *index = probe + 1;
+        }
+        return;
     }
 }
 
@@ -1126,27 +1317,7 @@ fn map_human_nested_stmt_spans(
         let id = format!("{prefix}.{stmt_idx}");
         let span = line_span(file, &lines[line_idx]);
         map_stmt_and_expr_spans(stmt, &id, span.clone(), map);
-        match stmt {
-            Stmt::If { then_body, .. } => map_human_nested_stmt_spans(
-                file,
-                lines,
-                index,
-                indent + 4,
-                then_body,
-                &format!("{id}.then"),
-                map,
-            ),
-            Stmt::For { body, .. } => map_human_nested_stmt_spans(
-                file,
-                lines,
-                index,
-                indent + 4,
-                body,
-                &format!("{id}.body"),
-                map,
-            ),
-            _ => {}
-        }
+        map_human_child_bodies(file, lines, index, indent, stmt, &id, map);
     }
 }
 
@@ -1169,7 +1340,24 @@ fn map_agent_source(file: &str, source: &str, program: &Program, map: &mut Sourc
                     map.add(format!("{}.field.{}", decl.id, field.name), span.clone());
                 }
             }
-            Item::Enum(_) => {}
+            Item::Enum(decl) => {
+                // The agent view writes an enum as `EN Name { A; B }`, so the
+                // header and every variant share one line span.
+                if let Some(line_idx) = find_line_from(&lines, index, |line| {
+                    strip_agent_visibility_marker(&line.text)
+                        .starts_with(&format!("EN {}", decl.name))
+                }) {
+                    let span = line_span(file, &lines[line_idx]);
+                    map.add(&decl.id, span.clone());
+                    for variant in &decl.variants {
+                        map.add(
+                            format!("{}.variant.{}", decl.id, variant.name),
+                            span.clone(),
+                        );
+                    }
+                    index = line_idx + 1;
+                }
+            }
             Item::Trait(decl) => {
                 if let Some(line_idx) = find_line_from(&lines, index, |line| {
                     strip_agent_visibility_marker(&line.text)
@@ -1249,6 +1437,14 @@ fn map_agent_source(file: &str, source: &str, program: &Program, map: &mut Sourc
                 }) {
                     index = line_idx + 1;
                     map.add(&share.id, line_span(file, &lines[line_idx]));
+                }
+            }
+            Item::Pipeline(pipeline) => {
+                if let Some(line_idx) = find_line_from(&lines, index, |line| {
+                    line.text == format!("PIPELINE {}", pipeline.name)
+                }) {
+                    index = line_idx + 1;
+                    map.add(&pipeline.id, line_span(file, &lines[line_idx]));
                 }
             }
         }
@@ -1384,6 +1580,11 @@ fn map_expr_spans(expr: &Expr, id: &str, span: SourceSpan, map: &mut SourceMap) 
         Expr::Index { base, index } => {
             map_expr_spans(base, &format!("{id}.base"), span.clone(), map);
             map_expr_spans(index, &format!("{id}.index"), span, map);
+        }
+        Expr::SliceRange { base, start, end } => {
+            map_expr_spans(base, &format!("{id}.base"), span.clone(), map);
+            map_expr_spans(start, &format!("{id}.start"), span.clone(), map);
+            map_expr_spans(end, &format!("{id}.end"), span, map);
         }
         Expr::Int(_)
         | Expr::Float(_)
@@ -2795,11 +2996,21 @@ impl ExprParser {
                 continue;
             }
             if self.consume("[") {
-                let index = self.parse_min_prec(0)?;
+                let first = self.parse_min_prec(0)?;
+                if self.consume("..") {
+                    let end = self.parse_min_prec(0)?;
+                    self.expect("]")?;
+                    expr = Expr::SliceRange {
+                        base: Box::new(expr),
+                        start: Box::new(first),
+                        end: Box::new(end),
+                    };
+                    continue;
+                }
                 self.expect("]")?;
                 expr = Expr::Index {
                     base: Box::new(expr),
-                    index: Box::new(index),
+                    index: Box::new(first),
                 };
                 continue;
             }

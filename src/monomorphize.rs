@@ -160,7 +160,11 @@ impl Engine {
                     Item::TraitImpl(decl) => {
                         engine.trait_impls.push(decl.clone());
                     }
-                    Item::Enum(_) | Item::Test(_) | Item::Capsule(_) | Item::Share(_) => {}
+                    Item::Enum(_)
+                    | Item::Test(_)
+                    | Item::Capsule(_)
+                    | Item::Share(_)
+                    | Item::Pipeline(_) => {}
                 }
             }
         }
@@ -255,6 +259,11 @@ impl Engine {
             Expr::Index { base, index } => {
                 self.normalize_expr_types(base);
                 self.normalize_expr_types(index);
+            }
+            Expr::SliceRange { base, start, end } => {
+                self.normalize_expr_types(base);
+                self.normalize_expr_types(start);
+                self.normalize_expr_types(end);
             }
             Expr::Lambda { params, body } => {
                 for param in params {
@@ -565,6 +574,19 @@ impl Engine {
                 self.rewrite_expr(base, locals, None)
                     .element_type()
                     .unwrap_or(Type::Unknown)
+            }
+            Expr::SliceRange { base, start, end } => {
+                let index_type = Type::Primitive("usize".to_string());
+                self.rewrite_expr(start, locals, Some(&index_type));
+                self.rewrite_expr(end, locals, Some(&index_type));
+                match self.rewrite_expr(base, locals, None) {
+                    Type::Slice { mutable, elem } => Type::Slice { mutable, elem },
+                    Type::Array { elem, .. } => Type::Slice {
+                        mutable: false,
+                        elem,
+                    },
+                    _ => Type::Unknown,
+                }
             }
         }
     }
@@ -901,6 +923,11 @@ fn substitute_expr_types(
         Expr::Index { base, index } => {
             substitute_expr_types(base, type_params, bindings);
             substitute_expr_types(index, type_params, bindings);
+        }
+        Expr::SliceRange { base, start, end } => {
+            substitute_expr_types(base, type_params, bindings);
+            substitute_expr_types(start, type_params, bindings);
+            substitute_expr_types(end, type_params, bindings);
         }
         Expr::Lambda { params, body } => {
             for param in params {

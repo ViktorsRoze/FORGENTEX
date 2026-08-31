@@ -40,21 +40,29 @@ pub struct ReleaseHardeningCheck {
 }
 
 pub fn release_check(target: &str) -> ReleaseReport {
-    let gates = release_gates();
+    let mut gates = release_gates();
+    if is_public_0_1_target(target) {
+        gates.extend(public_0_1_gates());
+    }
     let hardening = release_hardening_checks(target, &gates);
     let ready = gates.iter().all(|gate| gate.status == "pass")
         && hardening.iter().all(|check| check.status == "pass");
-    let decision = if target == "v1.0" && ready {
-        "v1_ready"
-    } else if target == "v1.0" {
-        "not_v1_ready"
+    let decision = match (target, ready) {
+        ("v1.0", true) => "v1_ready",
+        ("v1.0", false) => "not_v1_ready",
+        (_, true) if is_public_0_1_target(target) => "public_0_1_ready",
+        (_, false) if is_public_0_1_target(target) => "public_0_1_not_ready",
+        _ => "criteria_report",
+    };
+    let current_track = if is_public_0_1_target(target) {
+        "public-0.1-stabilization"
     } else {
-        "criteria_report"
+        "v1.0-cfg-dataflow-borrowck"
     };
     ReleaseReport {
         schema: "forgentex.release_check.v1".to_string(),
         target: target.to_string(),
-        current_track: "v1.0-cfg-dataflow-borrowck".to_string(),
+        current_track: current_track.to_string(),
         decision: decision.to_string(),
         gates,
         hardening,
@@ -64,6 +72,8 @@ pub fn release_check(target: &str) -> ReleaseReport {
                 .to_string(),
             "Use cargo fmt, clippy, cargo test, scripts/demo.ps1, fuzz, diff-test, borrow-conformance, and release-check before release tags."
                 .to_string(),
+            "The public 0.1 target is separate from historical internal v0.x/v1.0 development labels."
+                .to_string(),
         ],
     }
 }
@@ -71,6 +81,10 @@ pub fn release_check(target: &str) -> ReleaseReport {
 impl ReleaseReport {
     pub fn is_v1_ready(&self) -> bool {
         self.decision == "v1_ready"
+    }
+
+    pub fn is_target_ready(&self) -> bool {
+        matches!(self.decision.as_str(), "v1_ready" | "public_0_1_ready")
     }
 
     pub fn passed(&self) -> usize {
@@ -447,6 +461,121 @@ fn release_gates() -> Vec<ReleaseGate> {
     ]
 }
 
+fn public_0_1_gates() -> Vec<ReleaseGate> {
+    let compatibility_gaps = crate::public_compat::compatibility_gaps();
+    let compatibility_status = partial_if_gaps(&compatibility_gaps);
+    let foundation_gaps = crate::public_compat::standard_foundation_gaps();
+    let foundation_status = partial_if_gaps(&foundation_gaps);
+    let evidence_gaps = crate::public_compat::examples_evidence_gaps();
+    let evidence_status = partial_if_gaps(&evidence_gaps);
+    let distribution_gaps = crate::distribution::distribution_gaps();
+    let distribution_status = partial_if_gaps(&distribution_gaps);
+    vec![
+        gate(
+            "public_0_1_profile",
+            "Public 0.1 Language Profile",
+            "pass",
+            "The first public release has a bounded, documented interpreter-first language and toolchain profile with explicit exclusions.",
+            &[
+                "docs/public_0_1_profile.md",
+                "README.md#the-road-to-forgentex-01",
+                "fgx release-check --target 0.1 --json",
+            ],
+            &[],
+        ),
+        gate(
+            "public_0_1_execution_contract",
+            "Public 0.1 Execution Contract",
+            "pass",
+            "The checker, formatter, interpreter, and primary distributable build path agree on every feature promised by the public profile.",
+            &[
+                "docs/public_0_1_execution_matrix.md",
+                "examples/public_0_1/portable_core.fgx",
+                "examples/public_0_1/arrays_and_borrows.fgx",
+                "examples/public_0_1/collections.fgx",
+                "src/tests/public_profile.rs",
+                "fgx roundtrip",
+                "fgx check",
+                "fgx run --backend interp",
+                "fgx build --backend c",
+            ],
+            &[],
+        ),
+        gate(
+            "public_0_1_compatibility",
+            "Public 0.1 Compatibility Contract",
+            compatibility_status,
+            "Public grammar, AST, diagnostics, CLI JSON schemas, and deprecation rules have explicit compatibility promises.",
+            &[
+                "docs/public_0_1_profile.md",
+                "docs/public_0_1_compatibility.md",
+                "docs/ast_schema_v1.md",
+                "docs/diagnostics.md",
+                "docs/v0_compatibility.md",
+                "src/public_compat.rs",
+                "src/tests/public_compatibility.rs",
+            ],
+            &compatibility_gaps.iter().map(String::as_str).collect::<Vec<_>>(),
+        ),
+        gate(
+            "public_0_1_standard_foundation",
+            "Public 0.1 Standard Foundation",
+            foundation_status,
+            "The public profile includes a small documented standard foundation sufficient for useful interpreter-first programs.",
+            &[
+                "docs/standard_library_v0.md",
+                "docs/public_0_1_profile.md#standard-foundation",
+                "src/public_compat.rs",
+                "src/tests/public_compatibility.rs",
+                "fgx stdlib --json",
+            ],
+            &foundation_gaps.iter().map(String::as_str).collect::<Vec<_>>(),
+        ),
+        gate(
+            "public_0_1_distribution",
+            "Public 0.1 Distribution",
+            distribution_status,
+            "Users can install a versioned fgx toolchain and reproduce its supported host/backend matrix.",
+            &[
+                "README.md#installation",
+                ".github/workflows/ci.yml",
+                "src/distribution.rs",
+                "src/tests/distribution.rs",
+                "fgx dist-manifest --json",
+                "forgentex.distribution.v1",
+            ],
+            &distribution_gaps.iter().map(String::as_str).collect::<Vec<_>>(),
+        ),
+        gate(
+            "public_0_1_examples_evidence",
+            "Public 0.1 Examples And Evidence",
+            evidence_status,
+            "End-to-end examples, limits, tests, and token/runtime benchmarks reproduce every public 0.1 claim.",
+            &[
+                "examples/public_0_1/",
+                "docs/public_0_1_execution_matrix.md",
+                "docs/testing_strategy.md",
+                "src/tests/public_profile.rs",
+                "fgx release-evidence --json",
+                "forgentex.public_0_1_evidence.v1",
+            ],
+            &evidence_gaps.iter().map(String::as_str).collect::<Vec<_>>(),
+        ),
+    ]
+}
+
+fn partial_if_gaps(gaps: &[String]) -> &'static str {
+    if gaps.is_empty() {
+        "pass"
+    } else {
+        "partial"
+    }
+}
+
+fn is_public_0_1_target(target: &str) -> bool {
+    matches!(target, "0.1" | "public-0.1")
+}
+
 fn release_hardening_checks(target: &str, gates: &[ReleaseGate]) -> Vec<ReleaseHardeningCheck> {
     vec![
         hardening(
@@ -563,22 +692,28 @@ fn borrow_escape_hatch_check(gates: &[ReleaseGate]) -> ReleaseHardeningCheck {
             conformance.failed
         ));
     }
-    if conformance.reference_model.move_generated < 510 {
+    if conformance.reference_model.move_generated < 526 {
         gaps.push(format!(
-            "independent move reference generated only {} cases; require at least 510",
+            "independent move reference generated only {} cases; require at least 526",
             conformance.reference_model.move_generated
         ));
     }
-    if conformance.reference_model.alias_generated < 277 {
+    if conformance.reference_model.alias_generated < 610 {
         gaps.push(format!(
-            "independent alias reference generated only {} cases; require at least 277",
+            "independent alias reference generated only {} cases; require at least 610",
             conformance.reference_model.alias_generated
         ));
     }
-    if conformance.reference_model.lifetime_generated < 132 {
+    if conformance.reference_model.lifetime_generated < 292 {
         gaps.push(format!(
-            "independent lifetime reference generated only {} cases; require at least 132",
+            "independent lifetime reference generated only {} cases; require at least 292",
             conformance.reference_model.lifetime_generated
+        ));
+    }
+    if conformance.reference_model.closure_generated < 38 {
+        gaps.push(format!(
+            "independent affine closure reference generated only {} cases; require at least 38",
+            conformance.reference_model.closure_generated
         ));
     }
     if conformance.reference_model.property_generated < 256 {
@@ -587,16 +722,28 @@ fn borrow_escape_hatch_check(gates: &[ReleaseGate]) -> ReleaseHardeningCheck {
             conformance.reference_model.property_generated
         ));
     }
-    if conformance.reference_model.persisted_regression_generated < 4 {
+    if conformance.reference_model.persisted_regression_generated < 8 {
         gaps.push(format!(
-            "persisted borrow regression corpus contains only {} cases; require at least 4",
+            "persisted borrow regression corpus contains only {} cases; require at least 8",
             conformance.reference_model.persisted_regression_generated
         ));
     }
-    if conformance.reference_model.campaign_generated < 128 {
+    if conformance.reference_model.persisted_acceptance_generated < 4 {
         gaps.push(format!(
-            "runtime-seeded safety campaign produced only {} cases; require at least 128",
+            "persisted borrow acceptance corpus contains only {} cases; require at least 4",
+            conformance.reference_model.persisted_acceptance_generated
+        ));
+    }
+    if conformance.reference_model.campaign_generated < 192 {
+        gaps.push(format!(
+            "runtime-seeded safety campaign produced only {} cases; require at least 192",
             conformance.reference_model.campaign_generated
+        ));
+    }
+    if conformance.reference_model.campaign_closure_generated < 32 {
+        gaps.push(format!(
+            "runtime-seeded affine closure campaign produced only {} cases; require at least 32",
+            conformance.reference_model.campaign_closure_generated
         ));
     }
     if conformance.reference_model.move_mismatched != 0 {
@@ -617,6 +764,12 @@ fn borrow_escape_hatch_check(gates: &[ReleaseGate]) -> ReleaseHardeningCheck {
             conformance.reference_model.lifetime_mismatched
         ));
     }
+    if conformance.reference_model.closure_mismatched != 0 {
+        gaps.push(format!(
+            "independent affine closure reference disagrees with the checker in {} case(s)",
+            conformance.reference_model.closure_mismatched
+        ));
+    }
     if conformance.reference_model.property_mismatched != 0 {
         gaps.push(format!(
             "independent safety properties disagree with the checker in {} case(s)",
@@ -629,10 +782,22 @@ fn borrow_escape_hatch_check(gates: &[ReleaseGate]) -> ReleaseHardeningCheck {
             conformance.reference_model.persisted_regression_mismatched
         ));
     }
+    if conformance.reference_model.persisted_acceptance_mismatched != 0 {
+        gaps.push(format!(
+            "persisted borrow acceptance corpus disagrees with the checker in {} case(s)",
+            conformance.reference_model.persisted_acceptance_mismatched
+        ));
+    }
     if conformance.reference_model.campaign_mismatched != 0 {
         gaps.push(format!(
             "runtime-seeded safety campaign disagrees with the checker in {} case(s)",
             conformance.reference_model.campaign_mismatched
+        ));
+    }
+    if conformance.reference_model.campaign_closure_mismatched != 0 {
+        gaps.push(format!(
+            "runtime-seeded affine closure campaign disagrees with the checker in {} case(s)",
+            conformance.reference_model.campaign_closure_mismatched
         ));
     }
     if !conformance
@@ -651,7 +816,7 @@ fn borrow_escape_hatch_check(gates: &[ReleaseGate]) -> ReleaseHardeningCheck {
         title: "Borrow Escape-Hatch Conformance".to_string(),
         status: status.to_string(),
         requirement:
-            "Borrow RC cases cover raw pointer parameters, conditional lifetime escape, index projections, reborrows, loop-carried liveness, conditional borrow-state joins, and contract summaries; persisted minimized regressions plus independent generated move-state, alias place/liveness, lifetime-provenance, fixed property, and runtime-seeded shrinkable campaign models must agree with the production checker."
+                "Borrow RC cases cover raw pointer parameters, conditional lifetime escape, index and slice-range projections, recursive collection borrow carriers composed with generic return-contract chains, concrete generic mutable-borrow instantiation, recursively normalized associated-type ownership shapes, affine one-shot closures and mutable captures, reborrows, loop-carried liveness, conditional borrow-state joins, exhaustive two-, three-, and four-level nested-loop target joins, closure-capture moves, and contract summaries; persisted minimized regressions plus independent generated move-state, alias place/liveness, lifetime-provenance, affine-closure, fixed property, and runtime-seeded shrinkable move/alias/projection/nested-loop/lifetime/affine-closure campaign models must agree with the production checker."
                 .to_string(),
         evidence: vec![
             "fgx borrow-conformance --json".to_string(),
@@ -669,6 +834,10 @@ fn borrow_escape_hatch_check(gates: &[ReleaseGate]) -> ReleaseHardeningCheck {
                 conformance.reference_model.lifetime_generated
             ),
             format!(
+                "reference_closure_cases={}",
+                conformance.reference_model.closure_generated
+            ),
+            format!(
                 "reference_property_cases={}",
                 conformance.reference_model.property_generated
             ),
@@ -677,12 +846,20 @@ fn borrow_escape_hatch_check(gates: &[ReleaseGate]) -> ReleaseHardeningCheck {
                 conformance.reference_model.persisted_regression_generated
             ),
             format!(
+                "persisted_acceptance_cases={}",
+                conformance.reference_model.persisted_acceptance_generated
+            ),
+            format!(
                 "reference_campaign_seed={}",
                 conformance.reference_model.campaign_seed
             ),
             format!(
                 "reference_campaign_cases={}",
                 conformance.reference_model.campaign_generated
+            ),
+            format!(
+                "reference_campaign_closure_cases={}",
+                conformance.reference_model.campaign_closure_generated
             ),
             format!(
                 "reference_move_mismatches={}",
@@ -697,6 +874,10 @@ fn borrow_escape_hatch_check(gates: &[ReleaseGate]) -> ReleaseHardeningCheck {
                 conformance.reference_model.lifetime_mismatched
             ),
             format!(
+                "reference_closure_mismatches={}",
+                conformance.reference_model.closure_mismatched
+            ),
+            format!(
                 "reference_property_mismatches={}",
                 conformance.reference_model.property_mismatched
             ),
@@ -705,8 +886,16 @@ fn borrow_escape_hatch_check(gates: &[ReleaseGate]) -> ReleaseHardeningCheck {
                 conformance.reference_model.persisted_regression_mismatched
             ),
             format!(
+                "persisted_acceptance_mismatches={}",
+                conformance.reference_model.persisted_acceptance_mismatched
+            ),
+            format!(
                 "reference_campaign_mismatches={}",
                 conformance.reference_model.campaign_mismatched
+            ),
+            format!(
+                "reference_campaign_closure_mismatches={}",
+                conformance.reference_model.campaign_closure_mismatched
             ),
             format!(
                 "reference_campaign_failure_artifacts={}",
@@ -719,8 +908,29 @@ fn borrow_escape_hatch_check(gates: &[ReleaseGate]) -> ReleaseHardeningCheck {
             "lifetimes.unproven_conditional_arg_rejected".to_string(),
             "projections.constant_indices_disjoint_ok".to_string(),
             "projections.unknown_index_overlap_rejected".to_string(),
+            "reference.aliases.range.constant_0_2_constant_2_4".to_string(),
+            "reference.aliases.range_index.dynamic_i_j_dynamic_i".to_string(),
+            "reference.aliases.quadruple_nested_loop.left_to_right_to_left_to_right_to_left.right_alias_then_direct".to_string(),
+            "reference.lifetimes.collection.vec_depth_3_alias_true_parameter".to_string(),
+            "reference.lifetimes.generic.depth_4_alias_true_parameter".to_string(),
+            "reference.lifetimes.generic_collection.vec_carrier_3_wrapper_3_alias_true_parameter"
+                .to_string(),
+            "reference.moves.associated.owned_depth_3_alias_false".to_string(),
+            "reference.aliases.associated.left_left_depth_4".to_string(),
+            "reference.lifetimes.associated.depth_3_alias_false_unproven".to_string(),
+            "reference.closures.affine.move_call".to_string(),
+            "reference.closures.capture.mutable_alias_true_outer_use_true".to_string(),
+            format!(
+                "reference.campaign.v1.{:016x}.closures.0000",
+                crate::borrow_reference::DEFAULT_SAFETY_CAMPAIGN_SEED
+            ),
             "loops.loop_carried_alias_rejected".to_string(),
             "branches.conditional_alias_reassign_rejected".to_string(),
+            "closures.owned_capture_consumes_root".to_string(),
+            "closures.capture_after_move_rejected".to_string(),
+            "closures.parameter_shadow_does_not_capture".to_string(),
+            "closures.mutable_borrow_capture_rejected".to_string(),
+            "closures.mutable_parameter_shadow_does_not_capture".to_string(),
         ],
         gaps,
     }
@@ -728,12 +938,12 @@ fn borrow_escape_hatch_check(gates: &[ReleaseGate]) -> ReleaseHardeningCheck {
 
 fn target_decision_check(target: &str, gates: &[ReleaseGate]) -> ReleaseHardeningCheck {
     let all_gates_pass = gates.iter().all(|gate| gate.status == "pass");
-    let expected = if target == "v1.0" && all_gates_pass {
-        "v1_ready"
-    } else if target == "v1.0" {
-        "not_v1_ready"
-    } else {
-        "criteria_report"
+    let expected = match (target, all_gates_pass) {
+        ("v1.0", true) => "v1_ready",
+        ("v1.0", false) => "not_v1_ready",
+        (_, true) if is_public_0_1_target(target) => "public_0_1_ready",
+        (_, false) if is_public_0_1_target(target) => "public_0_1_not_ready",
+        _ => "criteria_report",
     };
     hardening(
         "target_decision_consistency",
@@ -825,6 +1035,11 @@ fn release_labels() -> Vec<ReleaseLabel> {
             "v1.0",
             "stable language core, tooling contracts, and production-quality safety guarantees",
             "completed",
+        ),
+        label(
+            "public-0.1",
+            "first coherent public Forgentex language release",
+            "in_progress",
         ),
     ]
 }

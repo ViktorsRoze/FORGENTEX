@@ -1,0 +1,18 @@
+foreign grow_utf8_c c version "c11":
+    input text: &mut String
+    output length: usize
+    sandbox "fs.none"
+    code:
+        #include <stddef.h>
+        #include <stdint.h>
+
+        size_t grow_utf8_c(uint8_t *text, size_t *text_len, size_t text_capacity) {
+            if (*text_len >= text_capacity) return *text_len;
+            text[*text_len] = (uint8_t)'!';
+            *text_len += 1;
+            return *text_len;
+        }
+
+fn grow_twice_from_c(text: &mut String) -> usize:
+    let first_length: usize = grow_utf8_c(text)
+    return grow_utf8_c(text)

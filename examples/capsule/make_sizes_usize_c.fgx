@@ -1,0 +1,36 @@
+# Native data boundaries: C returns an owned pointer-width unsigned Vec[usize].
+
+foreign make_sizes_usize_c c version "c11" effects [alloc]:
+    input count: i32
+    output sizes: Vec[usize]
+    sandbox "fs.none"
+    code:
+        #include "types.h"
+        #include <stddef.h>
+        #include <stdlib.h>
+
+        FgxOwnedUsize make_sizes_usize_c(int32_t count) {
+            FgxOwnedUsize result = { NULL, 0, 0 };
+            if (count <= 0) return result;
+            result.ptr = (size_t *)malloc((size_t)count * sizeof(size_t));
+            if (result.ptr == NULL) return result;
+            result.len = (size_t)count;
+            result.capacity = (size_t)count;
+            for (size_t i = 0; i < result.len; ++i) {
+                result.ptr[i] = i + 1 == result.len ? SIZE_MAX : i * (size_t)3000000000ULL;
+            }
+            return result;
+        }
+
+        void make_sizes_usize_c_free(
+            size_t *ptr,
+            size_t len,
+            size_t capacity
+        ) {
+            (void)len;
+            (void)capacity;
+            free(ptr);
+        }
+
+fn sizes_from_c(count: i32) -> Vec[usize] effects [alloc]:
+    return make_sizes_usize_c(count)

@@ -1,0 +1,44 @@
+# Native data boundaries: Rust accepts and returns nested @repr(C) structs.
+
+@repr(C)
+struct Bounds:
+    min_x: i16
+    max_x: i16
+    min_y: i16
+    max_y: i16
+
+@repr(C)
+struct Region:
+    id: i32
+    bounds: Bounds
+
+foreign nested_bounds_rust rust version "2021":
+    input region: Region
+    output adjusted: Region
+    sandbox "fs.none"
+    code:
+        #[repr(C)]
+        pub struct Bounds {
+            pub min_x: i16,
+            pub max_x: i16,
+            pub min_y: i16,
+            pub max_y: i16,
+        }
+
+        #[repr(C)]
+        pub struct Region {
+            pub id: i32,
+            pub bounds: Bounds,
+        }
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn nested_bounds_rust(mut region: Region) -> Region {
+            region.bounds.min_x += 10;
+            region.bounds.max_x += 10;
+            region.bounds.min_y += 20;
+            region.bounds.max_y += 20;
+            region
+        }
+
+fn adjust_region(region: Region) -> Region:
+    return nested_bounds_rust(region)

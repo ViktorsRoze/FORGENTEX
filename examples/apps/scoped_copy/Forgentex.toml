@@ -1,0 +1,38 @@
+[package]
+name = "scoped-copy"
+version = "0.1.0"
+root = "src"
+
+[application]
+forgentex = "0.1"
+entry = "copy_binary"
+runtime = "hosted_io"
+effects = ["fs.read", "fs.write"]
+
+[application.limits]
+max_read_bytes = 1048576
+max_write_bytes = 1048576
+
+[application.artifact.copy]
+root = "output"
+media_type = "application/octet-stream"
+max_bytes = 1048576
+required = true
+publication = "create_new"
+
+[security]
+trust = "untrusted"
+signed_by = "agent-public-demo"
+signature_algorithm = "Ed25519"
+signature = "mock-sig-scoped-copy"
+reproducible = true
+
+[permissions]
+fs.read = ["input"]
+fs.write = ["output"]
+
+[sandbox]
+build_scripts = "deny"
+codegen = "deny"
+tests = "sandboxed"
+agent_tools = "deny"

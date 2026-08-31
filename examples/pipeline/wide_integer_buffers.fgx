@@ -1,0 +1,100 @@
+# Immutable pipeline handoff for carrier-bounded u64 and host-width isize.
+
+share element_count: i32 = 3
+share ids: Vec[u64]
+share id_sum: i64 = 0
+share offsets: Vec[isize]
+share offset_sum: i64 = 0
+
+foreign make_pipeline_ids c version "c11" effects [alloc]:
+    input count: i32
+    output ids: Vec[u64]
+    sandbox "fs.none"
+    bind element_count read
+    bind ids rw
+    code:
+        #include "types.h"
+        #include <stdint.h>
+        #include <stdlib.h>
+
+        FgxOwnedU64 make_pipeline_ids(int32_t count) {
+            FgxOwnedU64 result = { NULL, 0, 0 };
+            if (count != 3) return result;
+            result.ptr = (uint64_t *)malloc((size_t)count * sizeof(uint64_t));
+            if (result.ptr == NULL) return result;
+            result.len = (size_t)count;
+            result.capacity = (size_t)count;
+            result.ptr[0] = UINT64_C(5000000000);
+            result.ptr[1] = UINT64_C(6000000000);
+            result.ptr[2] = UINT64_C(7000000000);
+            return result;
+        }
+
+        void make_pipeline_ids_free(uint64_t *ptr, size_t len, size_t capacity) {
+            (void)len;
+            (void)capacity;
+            free(ptr);
+        }
+
+foreign sum_pipeline_ids c version "c11" effects [cpu]:
+    input values: &[u64]
+    output sum: i64
+    sandbox "fs.none"
+    bind ids read
+    bind id_sum rw
+    code:
+        #include <stddef.h>
+        #include <stdint.h>
+
+        int64_t sum_pipeline_ids(const uint64_t *values, size_t values_len) {
+            int64_t sum = 0;
+            for (size_t i = 0; i < values_len; ++i) sum += (int64_t)values[i];
+            return sum;
+        }
+
+foreign make_pipeline_offsets c version "c11" effects [alloc]:
+    input count: i32
+    output offsets: Vec[isize]
+    sandbox "fs.none"
+    bind element_count read
+    bind offsets rw
+    code:
+        #include "types.h"
+        #include <stddef.h>
+        #include <stdint.h>
+        #include <stdlib.h>
+
+        FgxOwnedIsize make_pipeline_offsets(int32_t count) {
+            FgxOwnedIsize result = { NULL, 0, 0 };
+            if (count != 3) return result;
+            result.ptr = (ptrdiff_t *)malloc((size_t)count * sizeof(ptrdiff_t));
+            if (result.ptr == NULL) return result;
+            result.len = (size_t)count;
+            result.capacity = (size_t)count;
+            result.ptr[0] = (ptrdiff_t)-2000000000;
+            result.ptr[1] = (ptrdiff_t)500000000;
+            result.ptr[2] = (ptrdiff_t)2000000000;
+            return result;
+        }
+
+        void make_pipeline_offsets_free(ptrdiff_t *ptr, size_t len, size_t capacity) {
+            (void)len;
+            (void)capacity;
+            free(ptr);
+        }
+
+foreign sum_pipeline_offsets c version "c11" effects [cpu]:
+    input values: &[isize]
+    output sum: i64
+    sandbox "fs.none"
+    bind offsets read
+    bind offset_sum rw
+    code:
+        #include <stddef.h>
+        #include <stdint.h>
+
+        int64_t sum_pipeline_offsets(const ptrdiff_t *values, size_t values_len) {
+            int64_t sum = 0;
+            for (size_t i = 0; i < values_len; ++i) sum += (int64_t)values[i];
+            return sum;
+        }

@@ -1,0 +1,21 @@
+# Native data boundaries: C++ borrows a runner-owned slice of reviewed records.
+
+@repr(C)
+struct InputRecord:
+    id: u64
+    delta: i32
+    score: f64
+
+foreign last_record_id_cpp cpp version "c++17":
+    input records: &[InputRecord]
+    output id: u64
+    sandbox "fs.none"
+    code:
+        #include "types.h"
+
+        extern "C" uint64_t last_record_id_cpp(const InputRecord *records, size_t records_len) {
+            return records_len == 0 ? 0 : records[records_len - 1].id;
+        }
+
+fn last_id_cpp(records: &[InputRecord]) -> u64:
+    return last_record_id_cpp(records)

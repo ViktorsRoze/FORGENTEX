@@ -1,0 +1,27 @@
+# Native data boundaries: C mutates a runner-owned fixed-length record slice.
+
+@repr(C)
+struct MutableRecord:
+    id: u64
+    delta: i32
+    score: f64
+
+foreign mutate_records_c c version "c11":
+    input records: &mut [MutableRecord]
+    output changed: u64
+    sandbox "fs.none"
+    code:
+        #include "types.h"
+
+        uint64_t mutate_records_c(MutableRecord *records, size_t records_len) {
+            if (records_len > 0) records[0].delta = -17;
+            if (records_len > 1) {
+                records[1].id = UINT64_MAX;
+                records[1].score = 42.5;
+            }
+            return (uint64_t)records_len;
+        }
+
+fn mutate_then_last_c(records: &mut [MutableRecord]) -> u64:
+    let changed: u64 = mutate_records_c(records)
+    return records[1].id

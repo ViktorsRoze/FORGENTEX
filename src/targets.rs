@@ -389,6 +389,11 @@ fn check_expr_calls(
             check_expr_calls(base, caller, target, requirements, guards, diagnostics);
             check_expr_calls(index, caller, target, requirements, guards, diagnostics);
         }
+        Expr::SliceRange { base, start, end } => {
+            check_expr_calls(base, caller, target, requirements, guards, diagnostics);
+            check_expr_calls(start, caller, target, requirements, guards, diagnostics);
+            check_expr_calls(end, caller, target, requirements, guards, diagnostics);
+        }
     }
 }
 
@@ -487,6 +492,7 @@ fn collect_feature_guards(expr: &Expr, guards: &mut GuardContext) {
         | Expr::Cast { .. }
         | Expr::Field { .. }
         | Expr::Index { .. }
+        | Expr::SliceRange { .. }
         | Expr::Int(_)
         | Expr::Float(_)
         | Expr::Bool(_)

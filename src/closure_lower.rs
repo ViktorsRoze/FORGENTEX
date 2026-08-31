@@ -388,6 +388,21 @@ fn lower_expr(
                 generated,
             );
         }
+        Expr::SliceRange { base, start, end } => {
+            for child in [base.as_mut(), start.as_mut(), end.as_mut()] {
+                lower_expr(
+                    child,
+                    None,
+                    bindings,
+                    module_index,
+                    parent,
+                    ordinal,
+                    occupied,
+                    function_params,
+                    generated,
+                );
+            }
+        }
         Expr::Lambda { .. }
         | Expr::Int(_)
         | Expr::Float(_)
@@ -504,6 +519,11 @@ fn expression_captures(
             expression_captures(base, lambda_params, outer_bindings)
                 || expression_captures(index, lambda_params, outer_bindings)
         }
+        Expr::SliceRange { base, start, end } => {
+            expression_captures(base, lambda_params, outer_bindings)
+                || expression_captures(start, lambda_params, outer_bindings)
+                || expression_captures(end, lambda_params, outer_bindings)
+        }
         Expr::Int(_)
         | Expr::Float(_)
         | Expr::Bool(_)
@@ -527,6 +547,7 @@ mod tests {
                 name: "closures".to_string(),
                 version: "0.1.0".to_string(),
                 source_root: PathBuf::from("src"),
+                application: None,
                 dependencies: Vec::new(),
                 targets: Vec::new(),
                 profiles: Vec::new(),

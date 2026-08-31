@@ -31,8 +31,10 @@ pub fn generate_map_with_options(
         let program = parse_file(&file, &source)
             .map_err(|err| format!("failed to parse {}: {err}", file.display()))?;
         out.push_str(&format!("M {}\n", display_path(root, &file)));
-        let token_cost = source.split_whitespace().count();
         for item in &program.items {
+            let token_cost = crate::tokens::estimate(&format_human(&Program {
+                items: vec![item.clone()],
+            }));
             match item {
                 Item::Struct(decl) => {
                     out.push_str(&format!(
@@ -127,6 +129,16 @@ pub fn generate_map_with_options(
                         token_cost
                     ));
                 }
+                Item::Pipeline(pipeline) => {
+                    out.push_str(&format!(
+                        "  PIPELINE {} {} stages={} edges={} tokens~{}\n",
+                        pipeline.name,
+                        pipeline.id,
+                        pipeline.stages.len(),
+                        pipeline.edges.len(),
+                        token_cost
+                    ));
+                }
             }
         }
     }
@@ -187,6 +199,11 @@ pub fn get_symbol(root: &Path, target: &str, deps: Option<&str>) -> Result<Strin
                 }
                 Item::Share(share) => {
                     if target == share.id {
+                        found = Some(item);
+                    }
+                }
+                Item::Pipeline(pipeline) => {
+                    if target == pipeline.id {
                         found = Some(item);
                     }
                 }

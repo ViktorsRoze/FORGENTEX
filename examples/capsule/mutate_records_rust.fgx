@@ -1,0 +1,37 @@
+# Native data boundaries: Rust mutates a runner-owned fixed-length record slice.
+
+@repr(C)
+struct MutableRecord:
+    id: u64
+    delta: i32
+    score: f64
+
+foreign mutate_records_rust rust version "2021":
+    input records: &mut [MutableRecord]
+    output changed: u64
+    sandbox "fs.none"
+    code:
+        #[repr(C)]
+        pub struct MutableRecord {
+            pub id: u64,
+            pub delta: i32,
+            pub score: f64,
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn mutate_records_rust(
+            records: *mut MutableRecord,
+            records_len: usize,
+        ) -> u64 {
+            let records = unsafe { std::slice::from_raw_parts_mut(records, records_len) };
+            if let Some(first) = records.get_mut(0) { first.delta = -17; }
+            if let Some(second) = records.get_mut(1) {
+                second.id = u64::MAX;
+                second.score = 42.5;
+            }
+            records_len as u64
+        }
+
+fn mutate_then_last_rust(records: &mut [MutableRecord]) -> u64:
+    let changed: u64 = mutate_records_rust(records)
+    return records[1].id

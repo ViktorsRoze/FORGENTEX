@@ -1,0 +1,31 @@
+# Native data boundaries: C++ returns an owned buffer of reviewed records.
+
+@repr(C)
+struct NativeRecord:
+    id: u64
+    delta: i32
+    score: f64
+
+foreign make_records_cpp cpp version "c++17" effects [alloc]:
+    output records: Vec[NativeRecord]
+    sandbox "fs.none"
+    code:
+        #include "types.h"
+        #include <cstdint>
+        #include <cstdlib>
+
+        extern "C" FgxOwnedNativeRecord make_records_cpp(void) {
+            auto *ptr = static_cast<NativeRecord *>(std::malloc(2 * sizeof(NativeRecord)));
+            if (ptr == nullptr) { FgxOwnedNativeRecord empty = { nullptr, 0, 0 }; return empty; }
+            ptr[0] = NativeRecord{ 7, -3, 1.25 };
+            ptr[1] = NativeRecord{ UINT64_MAX, 9, -2.5 };
+            FgxOwnedNativeRecord result = { ptr, 2, 2 };
+            return result;
+        }
+
+        extern "C" void make_records_cpp_free(NativeRecord *ptr, std::size_t len, std::size_t capacity) {
+            (void)len; (void)capacity; std::free(ptr);
+        }
+
+fn records_cpp() -> Vec[NativeRecord]:
+    return make_records_cpp()

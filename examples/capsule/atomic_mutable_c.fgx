@@ -1,0 +1,32 @@
+# Native data boundaries: one atomic transaction for mixed mutable inputs.
+
+foreign revise_mutable_c c version "c11":
+    input text: &mut str
+    input samples: &mut [i16]
+    output changed: i32
+    sandbox "fs.none"
+    code:
+        #include <stddef.h>
+        #include <stdint.h>
+
+        int32_t revise_mutable_c(
+            uint8_t *text,
+            size_t text_len,
+            int16_t *samples,
+            size_t samples_len
+        ) {
+            int32_t changed = 0;
+            if (text_len > 0 && text[0] == (uint8_t)'f') {
+                text[0] = (uint8_t)'F';
+                changed = 1;
+            }
+            if (samples_len > 0 && samples[0] == 1) {
+                samples[0] = 2;
+                changed = 1;
+            }
+            return changed;
+        }
+
+fn revise_twice_from_c(text: &mut str, samples: &mut [i16]) -> i32:
+    let first_change: i32 = revise_mutable_c(text, samples)
+    return revise_mutable_c(text, samples)

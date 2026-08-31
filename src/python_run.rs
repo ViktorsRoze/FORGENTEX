@@ -54,6 +54,31 @@ pub struct PythonRun {
 }
 
 /// Detect a host Python: `$PYTHON` first, then `python3`, `python`.
+/// Resolve the interpreter for a capsule, honouring its declared `env` before
+/// falling back to the ambient probe chain. A declared environment that cannot
+/// be resolved is an error, not a fallback: a capsule naming an environment it
+/// cannot have must not silently run somewhere else.
+pub fn detect_python_for(capsule: &Capsule) -> Result<(String, String), String> {
+    if let Some(resolved) = crate::capsule_env::resolve(capsule.env.as_deref(), "python")? {
+        let version = Command::new(&resolved.interpreter)
+            .arg("--version")
+            .output()
+            .ok()
+            .map(|out| {
+                let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if text.is_empty() {
+                    String::from_utf8_lossy(&out.stderr).trim().to_string()
+                } else {
+                    text
+                }
+            })
+            .unwrap_or_default();
+        return Ok((resolved.interpreter, version));
+    }
+    detect_python()
+        .ok_or_else(|| "no host python found (looked for $PYTHON, python3, python)".to_string())
+}
+
 pub fn detect_python() -> Option<(String, String)> {
     let mut candidates: Vec<String> = Vec::new();
     if let Ok(py) = std::env::var("PYTHON") {
@@ -127,6 +152,7 @@ fn matches(expected: &CapsuleValue, got: &str) -> bool {
             .parse::<f64>()
             .map(|g| (g - *i as f64).abs() < 0.5)
             .unwrap_or(false),
+        CapsuleValue::UInt(i) => got.parse::<u64>().map(|g| g == *i).unwrap_or(false),
         CapsuleValue::Float(f) => got
             .parse::<f64>()
             .map(|g| (g - *f).abs() < 1e-9)
@@ -157,8 +183,7 @@ pub fn invoke_live(capsule: &Capsule, json_args: &str) -> Result<String, String>
     let body = dedent(&capsule.code);
     let entry =
         find_entry(&body).ok_or_else(|| "no top-level def found in capsule body".to_string())?;
-    let (py_name, _version) = detect_python()
-        .ok_or_else(|| "no host python found (looked for $PYTHON, python3, python)".to_string())?;
+    let (py_name, _version) = detect_python_for(capsule)?;
 
     use std::sync::atomic::{AtomicU64, Ordering};
     static LIVE_SEQ: AtomicU64 = AtomicU64::new(0);

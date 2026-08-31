@@ -1,0 +1,41 @@
+# Native data boundaries: a nested fixed array of reviewed structs crosses pinned Zig 0.14.
+
+@repr(C)
+struct GridPoint:
+    x: i16
+    y: i16
+
+@repr(C)
+struct PointGrid:
+    id: i32
+    points: [[GridPoint; 2]; 2]
+
+foreign shift_grid_zig zig version "0.14":
+    input grid: PointGrid
+    output shifted: PointGrid
+    sandbox "fs.none"
+    code:
+        pub const GridPoint = extern struct {
+            x: i16,
+            y: i16,
+        };
+
+        pub const PointGrid = extern struct {
+            id: i32,
+            points: [2][2]GridPoint,
+        };
+
+        pub export fn shift_grid_zig(grid: PointGrid) PointGrid {
+            var shifted = grid;
+            for (&shifted.points, 0..) |*row, row_index| {
+                for (row, 0..) |*point, column_index| {
+                    const delta: i16 = @intCast(row_index * 2 + column_index + 1);
+                    point.x += delta;
+                    point.y -= delta;
+                }
+            }
+            return shifted;
+        }
+
+fn shift_grid(grid: PointGrid) -> PointGrid:
+    return shift_grid_zig(grid)

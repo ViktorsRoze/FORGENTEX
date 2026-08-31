@@ -1,0 +1,46 @@
+# Native data boundaries: Rust returns an owned pointer-width unsigned Vec[usize].
+
+foreign make_sizes_usize_rust rust version "2021" effects [alloc]:
+    input count: i32
+    output sizes: Vec[usize]
+    sandbox "fs.none"
+    code:
+        #[repr(C)]
+        pub struct FgxOwnedUsize {
+            pub ptr: *mut usize,
+            pub len: usize,
+            pub capacity: usize,
+        }
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn make_sizes_usize_rust(count: i32) -> FgxOwnedUsize {
+            let len = count.max(0);
+            let mut values: Vec<usize> = (0..len)
+                .map(|index| if index + 1 == len {
+                    usize::MAX
+                } else {
+                    index as usize * 3_000_000_000usize
+                })
+                .collect();
+            let result = FgxOwnedUsize {
+                ptr: values.as_mut_ptr(),
+                len: values.len(),
+                capacity: values.capacity(),
+            };
+            std::mem::forget(values);
+            result
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn make_sizes_usize_rust_free(
+            ptr: *mut usize,
+            len: usize,
+            capacity: usize,
+        ) {
+            if capacity > 0 {
+                drop(unsafe { Vec::from_raw_parts(ptr, len, capacity) });
+            }
+        }
+
+fn sizes_from_rust(count: i32) -> Vec[usize] effects [alloc]:
+    return make_sizes_usize_rust(count)

@@ -231,6 +231,7 @@ fn matches(expected: &CapsuleValue, got: &str) -> bool {
             .parse::<f64>()
             .map(|g| (g - *i as f64).abs() < 0.5)
             .unwrap_or(false),
+        CapsuleValue::UInt(i) => got.parse::<u64>().map(|g| g == *i).unwrap_or(false),
         CapsuleValue::Float(f) => got
             .parse::<f64>()
             .map(|g| (g - *f).abs() < 1e-9)

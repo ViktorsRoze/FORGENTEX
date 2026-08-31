@@ -1,0 +1,27 @@
+module core.path
+
+export struct DirEntry:
+    path: Path
+    kind: str
+    size: usize
+
+export fn core_path_parse(value: str) -> Path:
+    return core_runtime_path_parse(value)
+
+export fn core_path_join(base: Path, child: str) -> Path:
+    return core_runtime_path_join(base, child)
+
+export fn core_path_parent(path: Path) -> Option[Path]:
+    return core_runtime_path_parent(path)
+
+export fn core_path_file_name(path: Path) -> str:
+    return core_runtime_path_file_name(path)
+
+export fn core_path_extension(path: Path) -> str:
+    return core_runtime_path_extension(path)
+
+export fn core_path_to_str(path: Path) -> str:
+    return core_runtime_path_to_str(path)
+
+export fn core_path_starts_with(path: Path, base: Path) -> bool:
+    return core_runtime_path_starts_with(path, base)

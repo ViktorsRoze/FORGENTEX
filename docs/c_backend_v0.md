@@ -42,18 +42,36 @@ The v0 C backend lowers safe functions only:
 - `let`, `return`, `require`, `if`, `for`, assignments, expression statements
 - arithmetic, comparisons, casts, calls, indexing, field access
 - `.len` on slices and arrays
-- fresh annotated function-local `Vec[i32]` with explicit `effects [alloc]`,
-  bounded push, discarded pop, checked index/len/write, and return-safe cleanup
+- fresh annotated function-, branch-, or loop-local `Vec[T]` for `bool`, every signed/unsigned
+  integer width (including pointer-sized integers), `f32`/`f64`, and declared
+  data-less or payload enums, backend-lowerable named structs, and borrowed
+  immutable `str` views and immutable scalar slices, plus recursively fixed-size
+  arrays of scalar, declared enum, backend-lowerable named-struct, or immutable
+  borrowed string/scalar-slice leaves with at most 16 dimensions and 1,024
+  total value leaves, including
+  declarations inside nested branches, loops, and data-less or payload-enum match arms, with
+  explicit `effects [alloc]`, bounded push, discarded pop, immediate
+  `is_some`/`is_none`/`unwrap_or` consumption of `pop`, or a stored local
+  `Option[T]` later consumed by those same operations or returned unchanged;
+  context-typed `Some`/`None` locals and direct or unmodified-local returns for
+  those value layouts; plus a direct returned `pop`; checked
+  index/len/write, return-safe cleanup, normal scope cleanup, and loop-control
+  cleanup before `break` or `continue`
 
 The backend rejects:
 
 - `unsafe fn`
 - structured `asm`
-- interpreter-only `Option` / `Result` intrinsics
+- `Option` parameters, reassignment, immediate untyped construction, and
+  parameter/callee-derived returns; general `Result` construction and unrelated
+  intrinsics
 - generic types that do not have a v0 C representation
 - effectful runtime APIs such as filesystem, networking, serialization, or
-  streaming; allocation is admitted only for the validated local-`Vec[i32]`
+  streaming; allocation is admitted only for the validated local native-Vec
   subset, while direct allocator calls remain FIR-blocked
+- native Vec aliases/escapes, signatures/returns, mutable-slice elements,
+  mutable-view or other unsupported owned/generic array leaves, and other
+  owned/generic element layouts; state-dependent pop fallbacks remain blocked
 
 ## Type Mapping
 
@@ -70,8 +88,11 @@ Primitive types map to fixed-width C types:
   `int_to_str`, `str_slice`) plus Option/Vec-returning search/split remain FIR
   blockers until ownership and deallocation are explicit
 - `bool` -> `bool`
-- eligible local `Vec[i32]` -> `{ int32_t *data, size_t len, size_t capacity }`;
-  growth is capped at 1,048,576 elements and every live return path frees it
+- eligible local scalar, recursively-fixed scalar/borrowed-view/named-value
+  array, borrowed-string/slice, enum-value, or named-struct `Vec[T]` -> matching
+  `{ T *data, size_t len, size_t capacity }` layouts; growth is capped at
+  1,048,576 elements per vector, every live return path frees it, and branch
+  locals are freed at normal scope exit
 - named structs -> `typedef struct Name { ... } Name`
 
 Slices become generated C structs:

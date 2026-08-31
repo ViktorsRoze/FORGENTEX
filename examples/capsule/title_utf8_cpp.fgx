@@ -1,0 +1,24 @@
+# Native data boundaries: fixed-length mutable UTF-8 copy-back through C++.
+
+foreign title_utf8_cpp cpp version "c++17":
+    input text: &mut str
+    output changed: i32
+    sandbox "fs.none"
+    code:
+        #include <cstddef>
+        #include <cstdint>
+
+        extern "C" std::int32_t title_utf8_cpp(
+            std::uint8_t *text,
+            std::size_t text_len
+        ) {
+            if (text_len > 0 && text[0] == static_cast<std::uint8_t>('f')) {
+                text[0] = static_cast<std::uint8_t>('F');
+                return 1;
+            }
+            return 0;
+        }
+
+fn title_twice_from_cpp(text: &mut str) -> i32:
+    let first_change: i32 = title_utf8_cpp(text)
+    return title_utf8_cpp(text)

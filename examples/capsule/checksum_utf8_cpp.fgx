@@ -1,0 +1,21 @@
+# Native-call v1.24: C++ uses the C ABI for the borrowed UTF-8 pair.
+
+foreign checksum_utf8_cpp cpp version "c++17" effects [cpu.avx2]:
+    input text: str
+    output checksum: i32
+    sandbox "fs.none"
+    code:
+        #include <cstddef>
+        #include <cstdint>
+
+        extern "C" std::int32_t checksum_utf8_cpp(
+            const std::uint8_t *text,
+            std::size_t text_len
+        ) {
+            std::int32_t checksum = 0;
+            for (std::size_t i = 0; i < text_len; ++i) checksum += text[i];
+            return checksum;
+        }
+
+fn checksum_live_cpp(text: str) -> i32 effects [cpu.avx2]:
+    return checksum_utf8_cpp(text)

@@ -24,19 +24,25 @@ pub struct BorrowReferenceSummary {
     pub move_generated: usize,
     pub alias_generated: usize,
     pub lifetime_generated: usize,
+    pub closure_generated: usize,
     pub property_generated: usize,
     pub persisted_regression_generated: usize,
+    pub persisted_acceptance_generated: usize,
     pub campaign_seed: String,
     pub campaign_cases_per_family: usize,
     pub campaign_generated: usize,
+    pub campaign_closure_generated: usize,
     pub matched: usize,
     pub mismatched: usize,
     pub move_mismatched: usize,
     pub alias_mismatched: usize,
     pub lifetime_mismatched: usize,
+    pub closure_mismatched: usize,
     pub property_mismatched: usize,
     pub persisted_regression_mismatched: usize,
+    pub persisted_acceptance_mismatched: usize,
     pub campaign_mismatched: usize,
+    pub campaign_closure_mismatched: usize,
     pub campaign_failure_artifacts: Vec<BorrowCampaignFailureArtifact>,
 }
 
@@ -85,10 +91,18 @@ pub fn run_borrow_conformance_with_campaign(
     let reference_start = cases.len();
     let persisted_regression_specs = persisted_regression_cases();
     let persisted_regression_generated = persisted_regression_specs.len();
+    let persisted_acceptance_generated = persisted_regression_specs
+        .iter()
+        .filter(|case| case.is_acceptance)
+        .count();
     cases.extend(persisted_regression_specs.into_iter().map(|case| {
         run_diagnostic_case(
             case.id,
-            "persisted_regressions",
+            if case.is_acceptance {
+                "persisted_acceptance_regressions"
+            } else {
+                "persisted_regressions"
+            },
             case.description,
             case.source,
             case.expected_diagnostics,
@@ -154,6 +168,26 @@ pub fn run_borrow_conformance_with_campaign(
                 )
             }),
     );
+    let closure_start = cases.len();
+    let closure_generated = crate::borrow_reference::generated_affine_closure_cases().len();
+    cases.extend(
+        crate::borrow_reference::generated_affine_closure_cases()
+            .into_iter()
+            .map(|case| {
+                let expected = if case.expects_use_after_move {
+                    &["use_after_move"][..]
+                } else {
+                    &[][..]
+                };
+                run_diagnostic_case(
+                    &case.id,
+                    "reference_closures",
+                    &case.description,
+                    &case.source,
+                    expected,
+                )
+            }),
+    );
     let property_start = cases.len();
     let property_generated = crate::borrow_reference::generated_safety_property_cases().len();
     cases.extend(
@@ -176,6 +210,10 @@ pub fn run_borrow_conformance_with_campaign(
         campaign_cases_per_family,
     );
     let campaign_generated = campaign_specs.len();
+    let campaign_closure_generated = campaign_specs
+        .iter()
+        .filter(|case| case.id.contains(".closures."))
+        .count();
     let mut campaign_failure_artifacts = Vec::new();
     for campaign_case in campaign_specs {
         let (case, artifact) = run_campaign_case(campaign_case);
@@ -188,33 +226,46 @@ pub fn run_borrow_conformance_with_campaign(
     let persisted_regression_cases = &cases[reference_start..move_start];
     let move_cases = &cases[move_start..alias_start];
     let alias_cases = &cases[alias_start..lifetime_start];
-    let lifetime_cases = &cases[lifetime_start..property_start];
+    let lifetime_cases = &cases[lifetime_start..closure_start];
+    let closure_cases = &cases[closure_start..property_start];
     let property_cases = &cases[property_start..campaign_start];
     let campaign_cases = &cases[campaign_start..];
     let reference_model = BorrowReferenceSummary {
         schema: "forgentex.borrow_reference.v1".to_string(),
-        scope: "persisted minimized regression fixtures; owned Pair root/field move availability across linear flow, branch joins, and two-iteration loops; mutable alias/reborrow liveness across descendant loans, projections, joins, and loops; parameter/unproven lifetime provenance across aliases, control flow, selective helper contracts, transitive wrappers, field/index projections, and recursive cycles; seeded long-form properties; runtime-seeded move, alias, projection, and lifetime campaigns with mismatch shrinking and replay artifacts"
+        scope: "persisted rejection and acceptance regression fixtures; owned Pair root/field move availability across linear flow, branch joins, and two-iteration loops; mutable alias/reborrow liveness across descendant loans, field/index/slice-range projections, joins, loops, exhaustive two-, three-, and four-level nested-loop conditional target sets, concrete mutable-borrow instantiations of generic wrapper chains, and recursively normalized associated types; parameter/unproven lifetime provenance across aliases, control flow, selective helper contracts, transitive wrappers, field/index projections, recursive Vec/array borrow carriers composed with generic identity/wrapper chains, recursively normalized associated types, and recursive cycles; affine closure call/transfer state and mutable/shared direct/aliased captures; seeded long-form properties; runtime-seeded move, alias, projection, nested-loop, lifetime, and affine closure call/transfer/spawn/reinitialization campaigns with mismatch shrinking and replay artifacts"
             .to_string(),
         generated: reference_cases.len(),
         move_generated,
         alias_generated,
         lifetime_generated,
+        closure_generated,
         property_generated,
         persisted_regression_generated,
+        persisted_acceptance_generated,
         campaign_seed: format!("0x{campaign_seed:016x}"),
         campaign_cases_per_family,
         campaign_generated,
+        campaign_closure_generated,
         matched: reference_cases.iter().filter(|case| case.passed).count(),
         mismatched: reference_cases.iter().filter(|case| !case.passed).count(),
         move_mismatched: move_cases.iter().filter(|case| !case.passed).count(),
         alias_mismatched: alias_cases.iter().filter(|case| !case.passed).count(),
         lifetime_mismatched: lifetime_cases.iter().filter(|case| !case.passed).count(),
+        closure_mismatched: closure_cases.iter().filter(|case| !case.passed).count(),
         property_mismatched: property_cases.iter().filter(|case| !case.passed).count(),
         persisted_regression_mismatched: persisted_regression_cases
             .iter()
             .filter(|case| !case.passed)
             .count(),
+        persisted_acceptance_mismatched: persisted_regression_cases
+            .iter()
+            .filter(|case| case.category == "persisted_acceptance_regressions" && !case.passed)
+            .count(),
         campaign_mismatched: campaign_cases.iter().filter(|case| !case.passed).count(),
+        campaign_closure_mismatched: campaign_cases
+            .iter()
+            .filter(|case| case.id.contains(".closures.") && !case.passed)
+            .count(),
         campaign_failure_artifacts,
     };
     let passed = cases.iter().filter(|case| case.passed).count();
@@ -286,16 +337,20 @@ impl BorrowConformanceReport {
             self.reference_model.scope
         ));
         out.push_str(&format!(
-            "persisted_regressions={} mismatched={}\n",
+            "persisted_regressions={} mismatched={} acceptance={} acceptance_mismatched={}\n",
             self.reference_model.persisted_regression_generated,
-            self.reference_model.persisted_regression_mismatched
+            self.reference_model.persisted_regression_mismatched,
+            self.reference_model.persisted_acceptance_generated,
+            self.reference_model.persisted_acceptance_mismatched
         ));
         out.push_str(&format!(
-            "campaign_seed={} cases_per_family={} generated={} mismatched={} failure_artifacts={}\n",
+            "campaign_seed={} cases_per_family={} generated={} closure_generated={} mismatched={} closure_mismatched={} failure_artifacts={}\n",
             self.reference_model.campaign_seed,
             self.reference_model.campaign_cases_per_family,
             self.reference_model.campaign_generated,
+            self.reference_model.campaign_closure_generated,
             self.reference_model.campaign_mismatched,
+            self.reference_model.campaign_closure_mismatched,
             self.reference_model.campaign_failure_artifacts.len()
         ));
         for artifact in &self.reference_model.campaign_failure_artifacts {
@@ -359,6 +414,16 @@ impl BorrowConformanceReport {
         push_prop(
             &mut out,
             2,
+            "persisted_acceptance_generated",
+            &self
+                .reference_model
+                .persisted_acceptance_generated
+                .to_string(),
+            true,
+        );
+        push_prop(
+            &mut out,
+            2,
             "scope",
             &quoted(&self.reference_model.scope),
             true,
@@ -370,6 +435,16 @@ impl BorrowConformanceReport {
             &self
                 .reference_model
                 .persisted_regression_mismatched
+                .to_string(),
+            true,
+        );
+        push_prop(
+            &mut out,
+            2,
+            "persisted_acceptance_mismatched",
+            &self
+                .reference_model
+                .persisted_acceptance_mismatched
                 .to_string(),
             true,
         );
@@ -404,6 +479,13 @@ impl BorrowConformanceReport {
         push_prop(
             &mut out,
             2,
+            "closure_generated",
+            &self.reference_model.closure_generated.to_string(),
+            true,
+        );
+        push_prop(
+            &mut out,
+            2,
             "property_generated",
             &self.reference_model.property_generated.to_string(),
             true,
@@ -427,6 +509,13 @@ impl BorrowConformanceReport {
             2,
             "campaign_generated",
             &self.reference_model.campaign_generated.to_string(),
+            true,
+        );
+        push_prop(
+            &mut out,
+            2,
+            "campaign_closure_generated",
+            &self.reference_model.campaign_closure_generated.to_string(),
             true,
         );
         push_prop(
@@ -467,6 +556,13 @@ impl BorrowConformanceReport {
         push_prop(
             &mut out,
             2,
+            "closure_mismatched",
+            &self.reference_model.closure_mismatched.to_string(),
+            true,
+        );
+        push_prop(
+            &mut out,
+            2,
             "property_mismatched",
             &self.reference_model.property_mismatched.to_string(),
             true,
@@ -476,6 +572,13 @@ impl BorrowConformanceReport {
             2,
             "campaign_mismatched",
             &self.reference_model.campaign_mismatched.to_string(),
+            true,
+        );
+        push_prop(
+            &mut out,
+            2,
+            "campaign_closure_mismatched",
+            &self.reference_model.campaign_closure_mismatched.to_string(),
             true,
         );
         push_line(&mut out, 2, "\"campaign_failure_artifacts\": [");
@@ -524,6 +627,7 @@ struct PersistedRegressionSpec {
     description: &'static str,
     source: &'static str,
     expected_diagnostics: &'static [&'static str],
+    is_acceptance: bool,
 }
 
 fn persisted_regression_cases() -> Vec<PersistedRegressionSpec> {
@@ -533,24 +637,57 @@ fn persisted_regression_cases() -> Vec<PersistedRegressionSpec> {
             description: "persisted minimal whole-value move regression",
             source: include_str!("../tests/borrow_regressions/move_after_whole_move.fgx"),
             expected_diagnostics: &["use_after_move"],
+            is_acceptance: false,
         },
         PersistedRegressionSpec {
             id: "regression.loop_parent_child_conflict",
             description: "persisted loop-carried parent/child loan regression",
             source: include_str!("../tests/borrow_regressions/loop_parent_child_conflict.fgx"),
             expected_diagnostics: &["mutable_borrow_alias"],
+            is_acceptance: false,
         },
         PersistedRegressionSpec {
             id: "regression.unknown_index_overlap",
             description: "persisted conservative unknown-index overlap regression",
             source: include_str!("../tests/borrow_regressions/unknown_index_overlap.fgx"),
             expected_diagnostics: &["mutable_borrow_alias"],
+            is_acceptance: false,
         },
         PersistedRegressionSpec {
             id: "regression.field_return_escape",
             description: "persisted unproven field-return provenance regression",
             source: include_str!("../tests/borrow_regressions/field_return_escape.fgx"),
             expected_diagnostics: &["escaping_reference"],
+            is_acceptance: false,
+        },
+        PersistedRegressionSpec {
+            id: "regression.accept.field_sibling_after_move",
+            description:
+                "persisted acceptance regression for sibling availability after a field move",
+            source: include_str!("../tests/borrow_regressions/field_sibling_after_move.fgx"),
+            expected_diagnostics: &[],
+            is_acceptance: true,
+        },
+        PersistedRegressionSpec {
+            id: "regression.accept.loop_local_alias_release",
+            description: "persisted acceptance regression for loop-local non-lexical loan release",
+            source: include_str!("../tests/borrow_regressions/loop_local_alias_release.fgx"),
+            expected_diagnostics: &[],
+            is_acceptance: true,
+        },
+        PersistedRegressionSpec {
+            id: "regression.accept.constant_indices_disjoint",
+            description: "persisted acceptance regression for disjoint constant projections",
+            source: include_str!("../tests/borrow_regressions/constant_indices_disjoint.fgx"),
+            expected_diagnostics: &[],
+            is_acceptance: true,
+        },
+        PersistedRegressionSpec {
+            id: "regression.accept.affine_reinitialize_after_call",
+            description: "persisted acceptance regression for affine closure reinitialization",
+            source: include_str!("../tests/borrow_regressions/affine_reinitialize_after_call.fgx"),
+            expected_diagnostics: &[],
+            is_acceptance: true,
         },
     ]
 }
@@ -599,6 +736,137 @@ fn bad(packet: Packet) -> u8:
     return packet.value
 ",
             &["use_after_move"],
+        ),
+        diagnostic_case(
+            "closures.copy_capture_remains_available",
+            "closures",
+            "capturing a primitive copies it and leaves the outer binding available",
+            "\
+fn ok(value: u8) -> u8:
+    let add: Fn[u8, u8] = |offset: u8| value + offset
+    return value + add(1)
+",
+            &[],
+        ),
+        diagnostic_case(
+            "closures.owned_capture_consumes_root",
+            "closures",
+            "capturing an owned struct by value consumes the outer root",
+            "\
+struct Packet:
+    value: u8
+
+fn bad(packet: Packet) -> u8:
+    let read: Fn[u8, u8] = |offset: u8| packet.value + offset
+    return packet.value
+",
+            &["use_after_move"],
+        ),
+        diagnostic_case(
+            "closures.owned_field_capture_consumes_root",
+            "closures",
+            "a field read still captures and consumes the complete owned root",
+            "\
+struct Packet:
+    value: u8
+
+struct Pair:
+    left: Packet
+    right: Packet
+
+fn bad(pair: Pair) -> u8:
+    let read: Fn[u8, u8] = |offset: u8| pair.left.value + offset
+    return pair.right.value
+",
+            &["use_after_move"],
+        ),
+        diagnostic_case(
+            "closures.capture_after_move_rejected",
+            "closures",
+            "closure creation cannot capture an owned value that was already moved",
+            "\
+struct Packet:
+    value: u8
+
+fn bad(packet: Packet) -> u8:
+    let moved: Packet = packet
+    let read: Fn[u8, u8] = |offset: u8| packet.value + offset
+    return read(0)
+",
+            &["use_after_move"],
+        ),
+        diagnostic_case(
+            "closures.parameter_shadow_does_not_capture",
+            "closures",
+            "a lambda parameter shadows an outer owned binding instead of capturing it",
+            "\
+struct Packet:
+    value: u8
+
+fn ok(packet: Packet) -> u8:
+    let read: Fn[Packet, u8] = |packet: Packet| packet.value
+    return packet.value
+",
+            &[],
+        ),
+        diagnostic_case(
+            "closures.owned_capture_used_through_closure",
+            "closures",
+            "an owned capture remains available inside its closure environment",
+            "\
+struct Packet:
+    value: u8
+
+fn ok(packet: Packet) -> u8:
+    let read: Fn[u8, u8] = |offset: u8| packet.value + offset
+    return read(1)
+",
+            &[],
+        ),
+        diagnostic_case(
+            "closures.immutable_borrow_capture_ok",
+            "closures",
+            "copyable closures may capture immutable borrows",
+            "\
+fn ok(xs: &[u8]) -> u8:
+    let read: Fn[usize, u8] = |index: usize| xs[index]
+    return read(0)
+",
+            &[],
+        ),
+        diagnostic_case(
+            "closures.mutable_borrow_capture_rejected",
+            "closures",
+            "copyable closures cannot capture mutable borrows without an affine environment",
+            "\
+fn bad(xs: &mut [u8]) -> u8:
+    let read: Fn[usize, u8] = |index: usize| xs[index]
+    return read(0)
+",
+            &["mutable_borrow_alias"],
+        ),
+        diagnostic_case(
+            "closures.mutable_alias_capture_rejected",
+            "closures",
+            "a local mutable alias cannot be hidden inside a copyable closure",
+            "\
+fn bad(xs: &mut [u8]) -> u8:
+    let alias: &mut [u8] = xs
+    let read: Fn[usize, u8] = |index: usize| alias[index]
+    return read(0)
+",
+            &["mutable_borrow_alias"],
+        ),
+        diagnostic_case(
+            "closures.mutable_parameter_shadow_does_not_capture",
+            "closures",
+            "a mutable lambda parameter shadows rather than captures the outer borrow",
+            "\
+fn ok(xs: &mut [u8]) -> u8:
+    let read: Fn[&mut [u8], usize, u8] = |xs: &mut [u8], index: usize| xs[index]
+    return xs[0]
+",
+            &[],
         ),
         diagnostic_case(
             "borrows.reborrow_child_then_parent_ok",

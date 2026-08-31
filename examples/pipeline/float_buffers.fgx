@@ -1,0 +1,97 @@
+# Deterministic immutable pipeline handoff for reviewed IEEE-754 buffers.
+
+share element_count: i32 = 4
+share gains: Vec[f32]
+share gain_sum: f32 = 0.0
+share precise_values: Vec[f64]
+share precise_sum: f64 = 0.0
+
+foreign make_pipeline_gains c version "c11" effects [alloc]:
+    input count: i32
+    output gains: Vec[f32]
+    sandbox "fs.none"
+    bind element_count read
+    bind gains rw
+    code:
+        #include "types.h"
+        #include <stdlib.h>
+
+        FgxOwnedF32 make_pipeline_gains(int32_t count) {
+            FgxOwnedF32 result = { NULL, 0, 0 };
+            if (count != 4) return result;
+            result.ptr = (float *)malloc((size_t)count * sizeof(float));
+            if (result.ptr == NULL) return result;
+            result.len = (size_t)count;
+            result.capacity = (size_t)count;
+            result.ptr[0] = 0.5f;
+            result.ptr[1] = -1.25f;
+            result.ptr[2] = 2.0f;
+            result.ptr[3] = 4.75f;
+            return result;
+        }
+
+        void make_pipeline_gains_free(float *ptr, size_t len, size_t capacity) {
+            (void)len;
+            (void)capacity;
+            free(ptr);
+        }
+
+foreign sum_pipeline_gains c version "c11" effects [cpu]:
+    input values: &[f32]
+    output sum: f32
+    sandbox "fs.none"
+    bind gains read
+    bind gain_sum rw
+    code:
+        #include <stddef.h>
+
+        float sum_pipeline_gains(const float *values, size_t values_len) {
+            float sum = 0.0f;
+            for (size_t i = 0; i < values_len; ++i) sum += values[i];
+            return sum;
+        }
+
+foreign make_pipeline_precise_values c version "c11" effects [alloc]:
+    input count: i32
+    output values: Vec[f64]
+    sandbox "fs.none"
+    bind element_count read
+    bind precise_values rw
+    code:
+        #include "types.h"
+        #include <stdlib.h>
+
+        FgxOwnedF64 make_pipeline_precise_values(int32_t count) {
+            FgxOwnedF64 result = { NULL, 0, 0 };
+            if (count != 4) return result;
+            result.ptr = (double *)malloc((size_t)count * sizeof(double));
+            if (result.ptr == NULL) return result;
+            result.len = (size_t)count;
+            result.capacity = (size_t)count;
+            result.ptr[0] = 0.5;
+            result.ptr[1] = -2.25;
+            result.ptr[2] = -0.0;
+            result.ptr[3] = 4.0;
+            return result;
+        }
+
+        void make_pipeline_precise_values_free(double *ptr, size_t len, size_t capacity) {
+            (void)len;
+            (void)capacity;
+            free(ptr);
+        }
+
+foreign sum_pipeline_precise_values c version "c11" effects [cpu]:
+    input values: &[f64]
+    output sum: f64
+    sandbox "fs.none"
+    bind precise_values read
+    bind precise_sum rw
+    code:
+        #include <stddef.h>
+
+        double sum_pipeline_precise_values(const double *values, size_t values_len) {
+            double sum = 0.0;
+            for (size_t i = 0; i < values_len; ++i) sum += values[i];
+            return sum;
+        }

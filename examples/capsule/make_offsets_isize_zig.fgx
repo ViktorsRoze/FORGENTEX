@@ -1,0 +1,38 @@
+# Native data boundaries: Zig returns an owned pointer-width signed Vec[isize].
+
+foreign make_offsets_isize_zig zig version "0.14" effects [alloc]:
+    input count: i32
+    output offsets: Vec[isize]
+    sandbox "fs.none"
+    code:
+        const std = @import("std");
+
+        pub const FgxOwnedIsize = extern struct {
+            ptr: ?[*]isize,
+            len: usize,
+            capacity: usize,
+        };
+
+        pub export fn make_offsets_isize_zig(count: i32) FgxOwnedIsize {
+            const len: usize = @intCast(@max(count, 0));
+            if (len == 0) return .{ .ptr = null, .len = 0, .capacity = 0 };
+            const values = std.heap.page_allocator.alloc(isize, len) catch
+                return .{ .ptr = null, .len = 0, .capacity = 0 };
+            for (values, 0..) |*value, index| {
+                const signed_index: isize = @intCast(index);
+                value.* = (signed_index - 1) * 5_000_000_000;
+            }
+            return .{ .ptr = values.ptr, .len = values.len, .capacity = values.len };
+        }
+
+        pub export fn make_offsets_isize_zig_free(
+            ptr: ?[*]isize,
+            len: usize,
+            capacity: usize,
+        ) void {
+            _ = len;
+            if (ptr) |values| std.heap.page_allocator.free(values[0..capacity]);
+        }
+
+fn offsets_from_zig(count: i32) -> Vec[isize] effects [alloc]:
+    return make_offsets_isize_zig(count)

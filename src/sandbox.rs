@@ -19,7 +19,14 @@ use crate::json;
 /// declare a matching effect.
 const GRANTED_CATEGORIES: &[&str] = &["fs", "net", "proc", "env", "chain", "gpu"];
 
-const LIMIT_KEYS: &[&str] = &["cpu_ms", "mem_mb", "wall_ms", "fs_bytes", "net_bytes"];
+const LIMIT_KEYS: &[&str] = &[
+    "cpu_ms",
+    "mem_mb",
+    "wall_ms",
+    "fs_bytes",
+    "net_bytes",
+    "output_bytes",
+];
 
 /// The capability category a sandbox rule grants, or `None` for `.none`
 /// denials and `limit.*` rules (which grant no access).
@@ -82,7 +89,15 @@ pub fn analyze_capsule(capsule: &Capsule) -> CapsuleSandbox {
     for rule in &capsule.sandbox {
         let (capability, scope) = split_rule(rule);
         if let Some(key) = capability.strip_prefix("limit.") {
-            if LIMIT_KEYS.contains(&key) && scope.parse::<u64>().is_ok() {
+            let parsed = scope.parse::<u64>().ok();
+            let valid_output_limit = key != "output_bytes"
+                || parsed.is_some_and(|value| {
+                    value > 0
+                        && value
+                            <= u64::try_from(crate::native_build::MAX_CONTAINED_OUTPUT_BYTES)
+                                .unwrap_or(u64::MAX)
+                });
+            if LIMIT_KEYS.contains(&key) && parsed.is_some() && valid_output_limit {
                 limits.push((key.to_string(), scope));
             } else {
                 invalid_limits.push(rule.clone());
@@ -187,7 +202,7 @@ pub fn validate(program: &Program) -> Vec<Diagnostic> {
                         capsule.name, rule
                     ),
                 )
-                .suggest("use limit.<cpu_ms|mem_mb|wall_ms|fs_bytes|net_bytes> <integer>"),
+                .suggest("use limit.<cpu_ms|mem_mb|wall_ms|fs_bytes|net_bytes|output_bytes> <integer>; output_bytes must be 1..=402653184"),
             );
         }
         for rule in &plan.invalid_redactions {

@@ -1,0 +1,41 @@
+# Native data boundaries: Rust returns an owned Vec[i64] with values beyond 32 bits.
+
+foreign make_marks_i64_rust rust version "2021" effects [alloc]:
+    input count: i32
+    output marks: Vec[i64]
+    sandbox "fs.none"
+    code:
+        #[repr(C)]
+        pub struct FgxOwnedI64 {
+            pub ptr: *mut i64,
+            pub len: usize,
+            pub capacity: usize,
+        }
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn make_marks_i64_rust(count: i32) -> FgxOwnedI64 {
+            let mut values: Vec<i64> = (0..count.max(0))
+                .map(|index| (index as i64 - 1) * 5_000_000_000i64)
+                .collect();
+            let result = FgxOwnedI64 {
+                ptr: values.as_mut_ptr(),
+                len: values.len(),
+                capacity: values.capacity(),
+            };
+            std::mem::forget(values);
+            result
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn make_marks_i64_rust_free(
+            ptr: *mut i64,
+            len: usize,
+            capacity: usize,
+        ) {
+            if capacity > 0 {
+                drop(unsafe { Vec::from_raw_parts(ptr, len, capacity) });
+            }
+        }
+
+fn marks_from_rust(count: i32) -> Vec[i64] effects [alloc]:
+    return make_marks_i64_rust(count)

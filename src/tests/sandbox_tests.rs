@@ -97,6 +97,29 @@ foreign t python version \"3.13\":
 }
 
 #[test]
+fn native_output_limit_is_bounded_and_must_be_nonzero() {
+    let valid = human(
+        "foreign t c version \"c11\":\n    output r: i32\n    sandbox \"limit.output_bytes 1024\"\n    code:\n        int t(void) { return 1; }\n",
+    );
+    let plan = analyze_capsule(valid.capsules().next().unwrap());
+    assert_eq!(
+        plan.limits,
+        vec![("output_bytes".to_string(), "1024".to_string())]
+    );
+    assert!(plan.invalid_limits.is_empty());
+
+    for value in ["0", "402653185"] {
+        let source = format!(
+            "foreign t c version \"c11\":\n    output r: i32\n    sandbox \"limit.output_bytes {value}\"\n    code:\n        int t(void) {{ return 1; }}\n"
+        );
+        let program = human(&source);
+        let plan = analyze_capsule(program.capsules().next().unwrap());
+        assert_eq!(plan.decision, "deny");
+        assert_eq!(plan.invalid_limits.len(), 1);
+    }
+}
+
+#[test]
 fn audit_redaction_names_declared_inputs_without_granting_a_capability() {
     let source = "\
 foreign authenticate python version \"3.13\":

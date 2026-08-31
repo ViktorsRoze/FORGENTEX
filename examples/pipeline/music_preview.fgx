@@ -16,6 +16,7 @@ foreign analyze_music c version "c11" effects [cpu]:
     input energy: i32
     output metrics: SceneMetrics
     sandbox "fs.none"
+    sandbox "limit.wall_ms 1000"
     bind music_energy read
     bind scene_metrics rw
     code:
@@ -32,6 +33,7 @@ foreign render_preview c version "c11" effects [cpu]:
     input scene: SceneMetrics
     output preview: i32
     sandbox "fs.none"
+    sandbox "limit.wall_ms 1000"
     bind scene_metrics read
     bind preview_score rw
     code:

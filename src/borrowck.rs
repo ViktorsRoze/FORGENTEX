@@ -64,7 +64,8 @@ impl<'a> ProgramContext<'a> {
                 | Item::TraitImpl(_)
                 | Item::Test(_)
                 | Item::Capsule(_)
-                | Item::Share(_) => {}
+                | Item::Share(_)
+                | Item::Pipeline(_) => {}
             }
         }
         let mut mutating_params = HashMap::new();
@@ -116,6 +117,7 @@ impl<'a> ProgramContext<'a> {
 enum Proj {
     Field(String),
     Index(Option<i64>),
+    Range(Option<i64>, Option<i64>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -142,6 +144,8 @@ impl Place {
                 }
                 Proj::Index(Some(index)) => out.push_str(&format!("[{index}]")),
                 Proj::Index(None) => out.push_str("[*]"),
+                Proj::Range(Some(start), Some(end)) => out.push_str(&format!("[{start}..{end}]")),
+                Proj::Range(_, _) => out.push_str("[*..*]"),
             }
         }
         out
@@ -158,6 +162,17 @@ fn places_overlap(a: &Place, b: &Place) -> bool {
         match (pa, pb) {
             (Proj::Field(fa), Proj::Field(fb)) if fa != fb => return false,
             (Proj::Index(Some(ia)), Proj::Index(Some(ib))) if ia != ib => return false,
+            (Proj::Range(Some(sa), Some(ea)), Proj::Range(Some(sb), Some(eb)))
+                if ea <= sb || eb <= sa =>
+            {
+                return false;
+            }
+            (Proj::Index(Some(index)), Proj::Range(Some(start), Some(end)))
+            | (Proj::Range(Some(start), Some(end)), Proj::Index(Some(index)))
+                if index < start || index >= end =>
+            {
+                return false;
+            }
             _ => {}
         }
     }
@@ -226,6 +241,7 @@ fn check_function_with_context(
     let live = liveness(&cfg);
     let mut checker = FunctionChecker {
         context,
+        types: types.clone(),
         diagnostics: Vec::new(),
         reported: BTreeSet::new(),
     };
@@ -302,12 +318,19 @@ fn apply_inst(
         return;
     };
     match source {
-        Stmt::Let { name, expr, .. } => {
+        Stmt::Let { name, ty, expr } => {
             mark_value_moves(expr, state, types, context);
+            if ty.as_ref().map(is_affine_function).unwrap_or(false) {
+                mark_affine_capture_moves(expr, state, types);
+            }
             apply_binding(name, expr, state, types);
         }
         Stmt::Assign { target, expr } => {
             mark_value_moves(expr, state, types, context);
+            if matches!(target, Expr::Var(name) if types.get(name).map(is_affine_function).unwrap_or(false))
+            {
+                mark_affine_capture_moves(expr, state, types);
+            }
             match target {
                 Expr::Var(name) => {
                     apply_binding(name, expr, state, types);
@@ -373,7 +396,8 @@ fn mark_value_moves(
         return;
     }
     match expr {
-        Expr::Call { args, .. } => {
+        Expr::Call { name, args } => {
+            mark_affine_call(name, state, types);
             for arg in args {
                 mark_value_moves(arg, state, types, context);
             }
@@ -388,6 +412,14 @@ fn mark_value_moves(
         Expr::Index { base, index } => {
             mark_call_moves_only(base, state, types, context);
             mark_call_moves_only(index, state, types, context);
+        }
+        Expr::SliceRange { base, start, end } => {
+            mark_call_moves_only(base, state, types, context);
+            mark_call_moves_only(start, state, types, context);
+            mark_call_moves_only(end, state, types, context);
+        }
+        Expr::Lambda { params, body } => {
+            mark_owned_capture_moves(params, body, state, types, context)
         }
         _ => {}
     }
@@ -402,7 +434,8 @@ fn mark_call_moves_only(
     context: &ProgramContext,
 ) {
     match expr {
-        Expr::Call { args, .. } => {
+        Expr::Call { name, args } => {
+            mark_affine_call(name, state, types);
             for arg in args {
                 mark_value_moves(arg, state, types, context);
             }
@@ -418,13 +451,124 @@ fn mark_call_moves_only(
             mark_call_moves_only(base, state, types, context);
             mark_call_moves_only(index, state, types, context);
         }
+        Expr::SliceRange { base, start, end } => {
+            mark_call_moves_only(base, state, types, context);
+            mark_call_moves_only(start, state, types, context);
+            mark_call_moves_only(end, state, types, context);
+        }
         Expr::Field { base, .. } => mark_call_moves_only(base, state, types, context),
+        Expr::Lambda { params, body } => {
+            mark_owned_capture_moves(params, body, state, types, context)
+        }
         _ => {}
+    }
+}
+
+/// A closure captures each free variable by value at creation. Capturing a
+/// named owned value therefore consumes its whole root, even when the body
+/// reads only one field; the interpreter stores the whole value in the closure
+/// environment. Primitive and borrowed values remain copy captures.
+fn mark_owned_capture_moves(
+    params: &[crate::ast::Param],
+    body: &Expr,
+    state: &mut State,
+    types: &HashMap<String, Type>,
+    context: &ProgramContext,
+) {
+    for name in lambda_capture_names(params, body) {
+        let capture = Expr::Var(name);
+        if let Some((root, path)) = owned_move(&capture, types, context) {
+            let entry = state.moved.entry(root).or_default();
+            entry.retain(|existing| !path_covers(&path, existing));
+            entry.insert(path);
+        }
+    }
+}
+
+/// Move mutable borrow roots into an explicitly affine closure environment.
+/// Alias captures consume both the alias binding and every possible underlying
+/// root, so the borrow cannot be activated outside the one-shot callable.
+fn mark_affine_capture_moves(expr: &Expr, state: &mut State, types: &HashMap<String, Type>) {
+    let Expr::Lambda { params, body } = expr else {
+        return;
+    };
+    for name in lambda_capture_names(params, body) {
+        if !types.get(&name).map(is_mut_borrow).unwrap_or(false) {
+            continue;
+        }
+        state
+            .moved
+            .entry(name.clone())
+            .or_default()
+            .insert(Vec::new());
+        for place in expr_places(&Expr::Var(name), state) {
+            state
+                .moved
+                .entry(place.root)
+                .or_default()
+                .insert(Vec::new());
+        }
+    }
+}
+
+fn mark_affine_call(name: &str, state: &mut State, types: &HashMap<String, Type>) {
+    if types.get(name).map(is_affine_function).unwrap_or(false) {
+        state
+            .moved
+            .entry(name.to_string())
+            .or_default()
+            .insert(Vec::new());
+    }
+}
+
+fn lambda_capture_names(params: &[crate::ast::Param], body: &Expr) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    collect_expr_var_names(body, &mut names);
+    for param in params {
+        names.remove(&param.name);
+    }
+    names
+}
+
+fn collect_expr_var_names(expr: &Expr, out: &mut BTreeSet<String>) {
+    match expr {
+        Expr::Var(name) => {
+            out.insert(name.clone());
+        }
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => collect_expr_var_names(expr, out),
+        Expr::Binary { left, right, .. } => {
+            collect_expr_var_names(left, out);
+            collect_expr_var_names(right, out);
+        }
+        Expr::Call { args, .. } => {
+            for arg in args {
+                collect_expr_var_names(arg, out);
+            }
+        }
+        Expr::Field { base, .. } => collect_expr_var_names(base, out),
+        Expr::Index { base, index } => {
+            collect_expr_var_names(base, out);
+            collect_expr_var_names(index, out);
+        }
+        Expr::SliceRange { base, start, end } => {
+            collect_expr_var_names(base, out);
+            collect_expr_var_names(start, out);
+            collect_expr_var_names(end, out);
+        }
+        Expr::Lambda { params, body } => {
+            out.extend(lambda_capture_names(params, body));
+        }
+        Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::String(_)
+        | Expr::TraitConst { .. } => {}
     }
 }
 
 struct FunctionChecker<'a> {
     context: &'a ProgramContext<'a>,
+    types: HashMap<String, Type>,
     diagnostics: Vec<Diagnostic>,
     reported: BTreeSet<(String, String, String)>,
 }
@@ -435,12 +579,18 @@ impl<'a> FunctionChecker<'a> {
             return;
         };
         match &source {
-            Stmt::Let { expr, .. } => {
-                self.check_reads(inst, expr, state);
+            Stmt::Let { ty, expr, .. } => {
+                self.check_reads(
+                    inst,
+                    expr,
+                    state,
+                    ty.as_ref().map(is_affine_function).unwrap_or(false),
+                );
                 self.check_calls(inst, expr, state, live_after);
             }
             Stmt::Assign { target, expr } => {
-                self.check_reads(inst, expr, state);
+                let affine = matches!(target, Expr::Var(name) if self.types.get(name).map(is_affine_function).unwrap_or(false));
+                self.check_reads(inst, expr, state, affine);
                 self.check_calls(inst, expr, state, live_after);
                 if !matches!(target, Expr::Var(_)) {
                     self.check_index_reads(inst, target, state);
@@ -448,7 +598,7 @@ impl<'a> FunctionChecker<'a> {
                 }
             }
             Stmt::Return(Some(expr)) | Stmt::Require(expr) | Stmt::Expr(expr) => {
-                self.check_reads(inst, expr, state);
+                self.check_reads(inst, expr, state, false);
                 self.check_calls(inst, expr, state, live_after);
             }
             _ => {}
@@ -458,7 +608,7 @@ impl<'a> FunctionChecker<'a> {
     /// Reject reads through moved paths (forward may-moved analysis).
     /// A place expression is checked once as a whole; only non-place
     /// subexpressions recurse.
-    fn check_reads(&mut self, inst: &Inst, expr: &Expr, state: &State) {
+    fn check_reads(&mut self, inst: &Inst, expr: &Expr, state: &State, affine_lambda: bool) {
         if let Some((root, path)) = place_path(expr) {
             if let Some(moved_paths) = state.moved.get(&root) {
                 for moved in moved_paths {
@@ -472,22 +622,46 @@ impl<'a> FunctionChecker<'a> {
         }
         match expr {
             Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
-                self.check_reads(inst, expr, state)
+                self.check_reads(inst, expr, state, false)
             }
             Expr::Binary { left, right, .. } => {
-                self.check_reads(inst, left, state);
-                self.check_reads(inst, right, state);
+                self.check_reads(inst, left, state, false);
+                self.check_reads(inst, right, state, false);
             }
-            Expr::Call { args, .. } => {
+            Expr::Call { name, args } => {
+                if state
+                    .moved
+                    .get(name)
+                    .is_some_and(|paths| paths.iter().any(|path| path.is_empty()))
+                {
+                    self.report_use_after_move(inst, name, &[]);
+                }
                 for arg in args {
-                    self.check_reads(inst, arg, state);
+                    self.check_reads(inst, arg, state, false);
                 }
             }
             Expr::Index { base, index } => {
-                self.check_reads(inst, base, state);
-                self.check_reads(inst, index, state);
+                self.check_reads(inst, base, state, false);
+                self.check_reads(inst, index, state, false);
             }
-            Expr::Field { base, .. } => self.check_reads(inst, base, state),
+            Expr::SliceRange { base, start, end } => {
+                self.check_reads(inst, base, state, false);
+                self.check_reads(inst, start, state, false);
+                self.check_reads(inst, end, state, false);
+            }
+            Expr::Field { base, .. } => self.check_reads(inst, base, state, false),
+            Expr::Lambda { params, body } => {
+                for name in lambda_capture_names(params, body) {
+                    self.check_reads(inst, &Expr::Var(name.clone()), state, false);
+                    if !affine_lambda && self.types.get(&name).map(is_mut_borrow).unwrap_or(false) {
+                        self.report_alias(
+                            inst,
+                            &name,
+                            "copyable Fn closure cannot capture a mutable borrow; an affine closure environment is required",
+                        );
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -495,7 +669,12 @@ impl<'a> FunctionChecker<'a> {
     fn check_index_reads(&mut self, inst: &Inst, target: &Expr, state: &State) {
         match target {
             Expr::Index { base, index } => {
-                self.check_reads(inst, index, state);
+                self.check_reads(inst, index, state, false);
+                self.check_index_reads(inst, base, state);
+            }
+            Expr::SliceRange { base, start, end } => {
+                self.check_reads(inst, start, state, false);
+                self.check_reads(inst, end, state, false);
                 self.check_index_reads(inst, base, state);
             }
             Expr::Field { base, .. } => self.check_index_reads(inst, base, state),
@@ -595,6 +774,11 @@ impl<'a> FunctionChecker<'a> {
             Expr::Index { base, index } => {
                 self.check_calls(inst, base, state, live_after);
                 self.check_calls(inst, index, state, live_after);
+            }
+            Expr::SliceRange { base, start, end } => {
+                self.check_calls(inst, base, state, live_after);
+                self.check_calls(inst, start, state, live_after);
+                self.check_calls(inst, end, state, live_after);
             }
             Expr::Field { base, .. } => self.check_calls(inst, base, state, live_after),
             _ => {}
@@ -733,10 +917,13 @@ fn infer_expr_type(
             let base_ty = infer_expr_type(base, context, types)?;
             context.field_type(&base_ty, std::slice::from_ref(field))
         }
-        Expr::Index { base, .. } => match infer_expr_type(base, context, types)? {
-            Type::Slice { elem, .. } | Type::Array { elem, .. } | Type::Pointer { elem, .. } => {
-                Some(*elem)
-            }
+        Expr::Index { base, .. } => infer_expr_type(base, context, types)?.element_type(),
+        Expr::SliceRange { base, .. } => match infer_expr_type(base, context, types)? {
+            Type::Slice { mutable, elem } => Some(Type::Slice { mutable, elem }),
+            Type::Array { elem, .. } => Some(Type::Slice {
+                mutable: false,
+                elem,
+            }),
             _ => None,
         },
         Expr::Call { name, .. } => context.callee(name).map(|callee| callee.ret.clone()),
@@ -748,8 +935,18 @@ fn is_mut_borrow(ty: &Type) -> bool {
     matches!(ty, Type::Slice { mutable: true, .. })
 }
 
-fn is_owned_struct(ty: &Type) -> bool {
-    matches!(ty, Type::Named(_))
+fn is_affine_function(ty: &Type) -> bool {
+    matches!(ty, Type::Generic { name, .. } if name == "FnOnce")
+}
+
+fn is_owned_struct(ty: &Type, context: &ProgramContext<'_>) -> bool {
+    is_affine_function(ty)
+        || matches!(
+        ty,
+        Type::Named(name)
+            if !matches!(name.as_str(), "WakeToken" | "AsyncClock" | "IntervalTimer")
+                || context.structs.contains_key(name)
+        )
 }
 
 /// The possible places an expression refers to, substituting alias
@@ -791,6 +988,15 @@ fn expr_projection(expr: &Expr) -> Option<(String, Vec<Proj>)> {
             projs.push(Proj::Index(constant));
             Some((root, projs))
         }
+        Expr::SliceRange { base, start, end } => {
+            let (root, mut projs) = expr_projection(base)?;
+            let literal = |expr: &Expr| match expr {
+                Expr::Int(value) => Some(*value),
+                _ => None,
+            };
+            projs.push(Proj::Range(literal(start), literal(end)));
+            Some((root, projs))
+        }
         _ => None,
     }
 }
@@ -823,7 +1029,7 @@ fn owned_move(
     let (root, path) = place_path(expr)?;
     let root_ty = types.get(&root)?;
     let value_ty = context.field_type(root_ty, &path)?;
-    if is_owned_struct(&value_ty) {
+    if is_owned_struct(&value_ty, context) {
         Some((root, path))
     } else {
         None

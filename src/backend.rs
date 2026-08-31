@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::ast::{Expr, FunctionDecl, Item, Program, Stmt, Type};
 use crate::c_backend::build_c_project;
-use crate::diag::diagnostics_to_json;
+use crate::diag::{diagnostics_array_to_json, diagnostics_to_json};
 use crate::effects::{analyze as analyze_effects, effects_to_json};
 use crate::format::format_expr;
 use crate::parser::parse_file;
@@ -686,6 +686,11 @@ fn generate_file_backend_ir(input: &Path) -> Result<BackendIr, String> {
     let public = single_file_public_symbols(&source);
     let module_name = single_file_module_name(input, &source);
     let module_path = input.display().to_string().replace('\\', "/");
+    let native_vec_element_names = program
+        .enums()
+        .map(|decl| decl.name.clone())
+        .chain(program.structs().map(|decl| decl.name.clone()))
+        .collect::<BTreeSet<_>>();
     Ok(BackendIr {
         package: "single-file".to_string(),
         version: "0.0.0".to_string(),
@@ -696,6 +701,7 @@ fn generate_file_backend_ir(input: &Path) -> Result<BackendIr, String> {
             stable_hash(&source),
             &program,
             &public,
+            &native_vec_element_names,
         )],
     })
 }
@@ -1023,12 +1029,7 @@ fn frontend_contract_json_for_program(package: &str, version: &str, program: &Pr
         "  \"canonical_ast_hash\": {},\n",
         quoted(&stable_hash(&program.to_canonical_json()))
     ));
-    let diagnostics_json = diagnostics_to_json(&type_diagnostics);
-    let diagnostics = diagnostics_json
-        .trim()
-        .strip_prefix("{\n  \"diagnostics\": ")
-        .and_then(|value| value.strip_suffix("\n}"))
-        .unwrap_or("[]");
+    let diagnostics = diagnostics_array_to_json(&type_diagnostics);
     out.push_str(&format!("  \"type_diagnostics\": {diagnostics},\n"));
     let effects_json = effects_to_json(&effects).replace('\n', "\n  ");
     out.push_str(&format!("  \"effects\": {effects_json}\n"));
@@ -1039,6 +1040,16 @@ fn frontend_contract_json_for_program(package: &str, version: &str, program: &Pr
 fn lower_project_to_ir(project: &Project) -> BackendIr {
     let mut modules = project.modules.iter().collect::<Vec<_>>();
     modules.sort_by(|left, right| left.name.cmp(&right.name));
+    let native_vec_element_names = modules
+        .iter()
+        .flat_map(|module| {
+            module
+                .program
+                .enums()
+                .map(|decl| decl.name.clone())
+                .chain(module.program.structs().map(|decl| decl.name.clone()))
+        })
+        .collect::<BTreeSet<_>>();
     BackendIr {
         package: project.manifest.name.clone(),
         version: project.manifest.version.clone(),
@@ -1065,6 +1076,7 @@ fn lower_project_to_ir(project: &Project) -> BackendIr {
                     module.source_hash.clone(),
                     &module.program,
                     &public,
+                    &native_vec_element_names,
                 )
             })
             .collect(),
@@ -1074,6 +1086,11 @@ fn lower_project_to_ir(project: &Project) -> BackendIr {
 pub fn lower_program_to_run_ir(program: &Program) -> BackendIr {
     let public = BTreeSet::new();
     let canonical = program.to_canonical_json();
+    let native_vec_element_names = program
+        .enums()
+        .map(|decl| decl.name.clone())
+        .chain(program.structs().map(|decl| decl.name.clone()))
+        .collect::<BTreeSet<_>>();
     BackendIr {
         package: "runtime".to_string(),
         version: "0.0.0".to_string(),
@@ -1084,6 +1101,7 @@ pub fn lower_program_to_run_ir(program: &Program) -> BackendIr {
             stable_hash(&canonical),
             program,
             &public,
+            &native_vec_element_names,
         )],
     }
 }
@@ -1095,6 +1113,7 @@ fn lower_program_module_to_ir(
     source_hash: String,
     program: &Program,
     public: &BTreeSet<String>,
+    native_vec_element_names: &BTreeSet<String>,
 ) -> IrModule {
     let capsule_names = program
         .capsules()
@@ -1140,6 +1159,7 @@ fn lower_program_module_to_ir(
                 public,
                 &capsule_names,
                 &trait_names,
+                native_vec_element_names,
             )),
             // Capsules are review-only foreign code; tests and shares are
             // metadata. None are lowered to backend IR.
@@ -1147,7 +1167,8 @@ fn lower_program_module_to_ir(
             | Item::TraitImpl(_)
             | Item::Test(_)
             | Item::Capsule(_)
-            | Item::Share(_) => {}
+            | Item::Share(_)
+            | Item::Pipeline(_) => {}
         }
     }
     IrModule {
@@ -1166,14 +1187,20 @@ fn lower_function(
     public: &BTreeSet<String>,
     capsule_names: &BTreeSet<String>,
     trait_names: &BTreeSet<String>,
+    native_vec_element_names: &BTreeSet<String>,
 ) -> IrFunction {
     let metadata = target_metadata_for_function(function);
     let blocks = vec![IrBlock {
         label: "entry".to_string(),
         instructions: lower_stmts(&function.body),
     }];
-    let backend_contracts =
-        backend_contracts_for_function(function, &blocks, capsule_names, trait_names);
+    let backend_contracts = backend_contracts_for_function(
+        function,
+        &blocks,
+        capsule_names,
+        trait_names,
+        native_vec_element_names,
+    );
     IrFunction {
         id: function.id.clone(),
         name: function.name.clone(),
@@ -1335,11 +1362,19 @@ fn backend_contracts_for_function(
     blocks: &[IrBlock],
     capsule_names: &BTreeSet<String>,
     trait_names: &BTreeSet<String>,
+    native_vec_element_names: &BTreeSet<String>,
 ) -> Vec<IrBackendContract> {
     ["interp", "c", "zig"]
         .into_iter()
         .map(|backend| {
-            let blockers = backend_blockers(function, blocks, backend, capsule_names, trait_names);
+            let blockers = backend_blockers(
+                function,
+                blocks,
+                backend,
+                capsule_names,
+                trait_names,
+                native_vec_element_names,
+            );
             IrBackendContract {
                 backend: backend.to_string(),
                 status: if blockers.is_empty() {
@@ -1359,6 +1394,7 @@ fn backend_blockers(
     backend: &str,
     capsule_names: &BTreeSet<String>,
     trait_names: &BTreeSet<String>,
+    native_vec_element_names: &BTreeSet<String>,
 ) -> Vec<String> {
     let mut blockers = BTreeSet::new();
     if function.unsafe_fn {
@@ -1379,19 +1415,41 @@ fn backend_blockers(
                     function.type_params.join(",")
                 ));
             }
-            let has_native_vec = function_has_native_vec_i32(function);
+            let has_native_vec = function_has_native_vec(function, native_vec_element_names);
+            let returns_native_option =
+                function_returns_native_option(function, native_vec_element_names);
             for effect in &function.effects {
                 if is_runtime_only_effect(effect) && !(effect == "alloc" && has_native_vec) {
                     blockers.insert(format!("effect:{effect}"));
                 }
             }
-            collect_generic_type_blockers(&function.ret, &mut blockers);
+            if !returns_native_option {
+                collect_generic_type_blockers(&function.ret, &mut blockers);
+            }
             for param in &function.params {
                 collect_generic_type_blockers(&param.ty, &mut blockers);
             }
-            collect_stmt_type_blockers(&function.body, true, &mut blockers);
-            collect_source_expr_blockers(&function.body, capsule_names, trait_names, &mut blockers);
-            collect_native_vec_blockers(&function.body, &BTreeSet::new(), &mut blockers);
+            collect_stmt_type_blockers(
+                &function.body,
+                true,
+                native_vec_element_names,
+                &mut blockers,
+            );
+            collect_source_expr_blockers(
+                &function.body,
+                capsule_names,
+                trait_names,
+                native_vec_element_names,
+                returns_native_option,
+                &mut blockers,
+            );
+            collect_native_vec_blockers(
+                &function.body,
+                &BTreeSet::new(),
+                native_vec_element_names,
+                returns_native_option,
+                &mut blockers,
+            );
         }
         _ => {}
     }
@@ -1402,28 +1460,55 @@ fn backend_blockers(
 fn collect_stmt_type_blockers(
     body: &[Stmt],
     allow_native_vec_local: bool,
+    native_vec_element_names: &BTreeSet<String>,
     blockers: &mut BTreeSet<String>,
 ) {
     for stmt in body {
         match stmt {
             Stmt::Let {
                 ty: Some(ty), expr, ..
-            } if allow_native_vec_local && is_native_vec_i32(ty) && is_vec_new(expr) => {}
+            } if allow_native_vec_local
+                && is_native_vec(ty, native_vec_element_names)
+                && is_vec_new(expr) => {}
+            Stmt::Let {
+                ty: Some(ty), expr, ..
+            } if is_native_value_option(ty, native_vec_element_names)
+                && (is_pop_call(expr) || is_native_option_constructor(expr)) => {}
             Stmt::Let { ty: Some(ty), .. } => collect_generic_type_blockers(ty, blockers),
             Stmt::If {
                 then_body,
                 else_body,
                 ..
             } => {
-                collect_stmt_type_blockers(then_body, false, blockers);
-                collect_stmt_type_blockers(else_body, false, blockers);
+                collect_stmt_type_blockers(
+                    then_body,
+                    allow_native_vec_local,
+                    native_vec_element_names,
+                    blockers,
+                );
+                collect_stmt_type_blockers(
+                    else_body,
+                    allow_native_vec_local,
+                    native_vec_element_names,
+                    blockers,
+                );
             }
             Stmt::For { body, .. } | Stmt::While { body, .. } => {
-                collect_stmt_type_blockers(body, false, blockers);
+                collect_stmt_type_blockers(
+                    body,
+                    allow_native_vec_local,
+                    native_vec_element_names,
+                    blockers,
+                );
             }
             Stmt::Match { arms, .. } => {
                 for arm in arms {
-                    collect_stmt_type_blockers(&arm.body, false, blockers);
+                    collect_stmt_type_blockers(
+                        &arm.body,
+                        allow_native_vec_local,
+                        native_vec_element_names,
+                        blockers,
+                    );
                 }
             }
             Stmt::Let { ty: None, .. }
@@ -1438,25 +1523,230 @@ fn collect_stmt_type_blockers(
     }
 }
 
-fn is_native_vec_i32(ty: &Type) -> bool {
-    matches!(
-        ty,
-        Type::Generic { name, args }
-            if name == "Vec"
-                && args.as_slice() == [Type::Primitive("i32".to_string())]
+fn is_native_vec(ty: &Type, native_vec_element_names: &BTreeSet<String>) -> bool {
+    let Type::Generic { name, args } = ty else {
+        return false;
+    };
+    if name != "Vec" {
+        return false;
+    }
+    match args.as_slice() {
+        [Type::Bool] => true,
+        [Type::Primitive(element)] => matches!(
+            element.as_str(),
+            "i8" | "i16"
+                | "i32"
+                | "i64"
+                | "isize"
+                | "u8"
+                | "u16"
+                | "u32"
+                | "u64"
+                | "usize"
+                | "f32"
+                | "f64"
+                | "str"
+        ),
+        [Type::Slice {
+            mutable: false,
+            elem,
+        }] => is_native_vec_slice_element(elem),
+        [element @ Type::Array { .. }] => is_native_vec_array_element(element),
+        [Type::Named(element)] => native_vec_element_names.contains(element),
+        _ => false,
+    }
+}
+
+fn is_native_value_option(ty: &Type, native_vec_element_names: &BTreeSet<String>) -> bool {
+    let Type::Generic { name, args } = ty else {
+        return false;
+    };
+    if name != "Option" || args.len() != 1 {
+        return false;
+    }
+    is_native_vec(
+        &Type::Generic {
+            name: "Vec".to_string(),
+            args: args.clone(),
+        },
+        native_vec_element_names,
     )
 }
 
-fn function_has_native_vec_i32(function: &FunctionDecl) -> bool {
-    function.body.iter().any(|stmt| {
-        matches!(
-            stmt,
+fn is_pop_call(expr: &Expr) -> bool {
+    matches!(expr, Expr::Call { name, args } if name == "pop" && args.len() == 1)
+}
+
+fn is_native_option_constructor(expr: &Expr) -> bool {
+    matches!(expr, Expr::Call { name, args } if (name == "Some" && args.len() == 1) || (name == "None" && args.is_empty()))
+}
+
+fn function_returns_native_option(
+    function: &FunctionDecl,
+    native_vec_element_names: &BTreeSet<String>,
+) -> bool {
+    if !is_native_value_option(&function.ret, native_vec_element_names) {
+        return false;
+    }
+    let mut saw_return = false;
+    body_returns_only_native_options(
+        &function.body,
+        &BTreeSet::new(),
+        &function.ret,
+        &mut saw_return,
+    ) && saw_return
+}
+
+fn body_returns_only_native_options(
+    body: &[Stmt],
+    inherited: &BTreeSet<String>,
+    expected: &Type,
+    saw_return: &mut bool,
+) -> bool {
+    let mut options = inherited.clone();
+    for stmt in body {
+        match stmt {
             Stmt::Let {
+                name,
                 ty: Some(ty),
                 expr,
+            } => {
+                options.remove(name);
+                if ty == expected && (is_pop_call(expr) || is_native_option_constructor(expr)) {
+                    options.insert(name.clone());
+                }
+            }
+            Stmt::Return(Some(expr)) => {
+                *saw_return = true;
+                if !is_pop_call(expr)
+                    && !is_native_option_constructor(expr)
+                    && !matches!(expr, Expr::Var(name) if options.contains(name))
+                {
+                    return false;
+                }
+            }
+            Stmt::Return(None) => return false,
+            Stmt::If {
+                then_body,
+                else_body,
                 ..
-            } if is_native_vec_i32(ty) && is_vec_new(expr)
+            } => {
+                if !body_returns_only_native_options(then_body, &options, expected, saw_return)
+                    || !body_returns_only_native_options(else_body, &options, expected, saw_return)
+                {
+                    return false;
+                }
+            }
+            Stmt::For { body, .. } | Stmt::While { body, .. } => {
+                if !body_returns_only_native_options(body, &options, expected, saw_return) {
+                    return false;
+                }
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    if !body_returns_only_native_options(&arm.body, &options, expected, saw_return)
+                    {
+                        return false;
+                    }
+                }
+            }
+            Stmt::Assign {
+                target: Expr::Var(name),
+                ..
+            } if options.contains(name) => return false,
+            Stmt::Let { name, .. } => {
+                options.remove(name);
+            }
+            Stmt::Break
+            | Stmt::Continue
+            | Stmt::Require(_)
+            | Stmt::Assign { .. }
+            | Stmt::Expr(_)
+            | Stmt::Asm(_) => {}
+        }
+    }
+    true
+}
+
+fn is_native_vec_slice_element(ty: &Type) -> bool {
+    match ty {
+        Type::Bool => true,
+        Type::Primitive(element) => matches!(
+            element.as_str(),
+            "i8" | "i16"
+                | "i32"
+                | "i64"
+                | "isize"
+                | "u8"
+                | "u16"
+                | "u32"
+                | "u64"
+                | "usize"
+                | "f32"
+                | "f64"
+        ),
+        _ => false,
+    }
+}
+
+pub(crate) fn is_native_vec_array_element(ty: &Type) -> bool {
+    fn scalar_leaves(ty: &Type, depth: usize, leaves: usize) -> Option<usize> {
+        match ty {
+            Type::Array { elem, len } if depth < 16 && *len != 0 => {
+                let leaves = leaves.checked_mul(*len)?;
+                if leaves > 1024 {
+                    return None;
+                }
+                scalar_leaves(elem, depth + 1, leaves)
+            }
+            ty if depth != 0 && is_native_vec_array_leaf(ty) => Some(leaves),
+            _ => None,
+        }
+    }
+
+    scalar_leaves(ty, 0, 1).is_some()
+}
+
+fn is_native_vec_array_leaf(ty: &Type) -> bool {
+    is_native_vec_slice_element(ty)
+        || matches!(ty, Type::Named(_))
+        || matches!(ty, Type::Primitive(name) if name == "str")
+        || matches!(
+            ty,
+            Type::Slice {
+                mutable: false,
+                elem,
+            } if is_native_vec_slice_element(elem)
         )
+}
+
+fn function_has_native_vec(
+    function: &FunctionDecl,
+    native_vec_element_names: &BTreeSet<String>,
+) -> bool {
+    stmts_have_native_vec(&function.body, native_vec_element_names)
+}
+
+fn stmts_have_native_vec(body: &[Stmt], native_vec_element_names: &BTreeSet<String>) -> bool {
+    body.iter().any(|stmt| match stmt {
+        Stmt::Let {
+            ty: Some(ty), expr, ..
+        } => is_native_vec(ty, native_vec_element_names) && is_vec_new(expr),
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            stmts_have_native_vec(then_body, native_vec_element_names)
+                || stmts_have_native_vec(else_body, native_vec_element_names)
+        }
+        Stmt::For { body, .. } | Stmt::While { body, .. } => {
+            stmts_have_native_vec(body, native_vec_element_names)
+        }
+        Stmt::Match { arms, .. } => arms
+            .iter()
+            .any(|arm| stmts_have_native_vec(&arm.body, native_vec_element_names)),
+        _ => false,
     })
 }
 
@@ -1466,12 +1756,16 @@ fn is_vec_new(expr: &Expr) -> bool {
 
 /// Validate the deliberately small owned native-Vec subset. The source
 /// backends can prove exactly-once cleanup only for fresh, annotated local
-/// `Vec[i32]` values. Any alias, whole-vector assignment, return, or call
-/// argument remains an explicit FIR blocker instead of becoming an unsafe
-/// shallow copy in generated C/Zig.
+/// `Vec[T]` values, where `T` is a scalar primitive, borrowed string/scalar-slice
+/// view, bounded recursively fixed-size scalar array, or already-lowered named enum/struct
+/// value. Any alias, whole-vector assignment, return, or call argument remains
+/// an explicit FIR blocker instead of becoming an unsafe shallow copy in
+/// generated C/Zig.
 fn collect_native_vec_blockers(
     body: &[Stmt],
     inherited: &BTreeSet<String>,
+    native_vec_element_names: &BTreeSet<String>,
+    allow_returned_pop: bool,
     blockers: &mut BTreeSet<String>,
 ) {
     let mut vecs = inherited.clone();
@@ -1481,8 +1775,13 @@ fn collect_native_vec_blockers(
                 name,
                 ty: Some(ty),
                 expr,
-            } if is_native_vec_i32(ty) && is_vec_new(expr) => {
+            } if is_native_vec(ty, native_vec_element_names) && is_vec_new(expr) => {
                 vecs.insert(name.clone());
+            }
+            Stmt::Let {
+                ty: Some(ty), expr, ..
+            } if is_native_value_option(ty, native_vec_element_names) && is_pop_call(expr) => {
+                collect_native_vec_expr_blockers(expr, &vecs, true, blockers);
             }
             Stmt::Let { expr, .. } | Stmt::Require(expr) => {
                 collect_native_vec_expr_blockers(expr, &vecs, false, blockers);
@@ -1491,7 +1790,12 @@ fn collect_native_vec_blockers(
                 collect_native_vec_expr_blockers(expr, &vecs, true, blockers);
             }
             Stmt::Return(Some(expr)) => {
-                collect_native_vec_expr_blockers(expr, &vecs, false, blockers);
+                collect_native_vec_expr_blockers(
+                    expr,
+                    &vecs,
+                    allow_returned_pop && is_pop_call(expr),
+                    blockers,
+                );
             }
             Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Asm(_) => {}
             Stmt::If {
@@ -1500,24 +1804,54 @@ fn collect_native_vec_blockers(
                 else_body,
             } => {
                 collect_native_vec_expr_blockers(cond, &vecs, false, blockers);
-                collect_native_vec_blockers(then_body, &vecs, blockers);
-                collect_native_vec_blockers(else_body, &vecs, blockers);
+                collect_native_vec_blockers(
+                    then_body,
+                    &vecs,
+                    native_vec_element_names,
+                    allow_returned_pop,
+                    blockers,
+                );
+                collect_native_vec_blockers(
+                    else_body,
+                    &vecs,
+                    native_vec_element_names,
+                    allow_returned_pop,
+                    blockers,
+                );
             }
             Stmt::For {
                 start, end, body, ..
             } => {
                 collect_native_vec_expr_blockers(start, &vecs, false, blockers);
                 collect_native_vec_expr_blockers(end, &vecs, false, blockers);
-                collect_native_vec_blockers(body, &vecs, blockers);
+                collect_native_vec_blockers(
+                    body,
+                    &vecs,
+                    native_vec_element_names,
+                    allow_returned_pop,
+                    blockers,
+                );
             }
             Stmt::While { cond, body } => {
                 collect_native_vec_expr_blockers(cond, &vecs, false, blockers);
-                collect_native_vec_blockers(body, &vecs, blockers);
+                collect_native_vec_blockers(
+                    body,
+                    &vecs,
+                    native_vec_element_names,
+                    allow_returned_pop,
+                    blockers,
+                );
             }
             Stmt::Match { scrutinee, arms } => {
                 collect_native_vec_expr_blockers(scrutinee, &vecs, false, blockers);
                 for arm in arms {
-                    collect_native_vec_blockers(&arm.body, &vecs, blockers);
+                    collect_native_vec_blockers(
+                        &arm.body,
+                        &vecs,
+                        native_vec_element_names,
+                        allow_returned_pop,
+                        blockers,
+                    );
                 }
             }
             Stmt::Assign { target, expr } => {
@@ -1559,7 +1893,7 @@ fn collect_native_vec_expr_blockers(
         }
         Expr::Call { name, args } if name == "push" => {
             if args.len() != 2 || !is_local_vec_var(&args[0], vecs) {
-                blockers.insert("native_vec:push_requires_local_vec_i32".to_string());
+                blockers.insert("native_vec:push_requires_local_native_vec".to_string());
             }
             for arg in args.iter().skip(1) {
                 collect_native_vec_expr_blockers(arg, vecs, false, blockers);
@@ -1567,8 +1901,14 @@ fn collect_native_vec_expr_blockers(
         }
         Expr::Call { name, args } if name == "pop" => {
             if !discarded || args.len() != 1 || !is_local_vec_var(&args[0], vecs) {
-                blockers.insert("native_vec:pop_requires_discarded_local_vec_i32".to_string());
+                blockers.insert("native_vec:pop_requires_discarded_local_native_vec".to_string());
             }
+            for arg in args.iter().skip(1) {
+                collect_native_vec_expr_blockers(arg, vecs, false, blockers);
+            }
+        }
+        Expr::Call { name, args } if is_immediate_pop_consumer(name, args) => {
+            collect_native_vec_expr_blockers(&args[0], vecs, true, blockers);
             for arg in args.iter().skip(1) {
                 collect_native_vec_expr_blockers(arg, vecs, false, blockers);
             }
@@ -1595,6 +1935,11 @@ fn collect_native_vec_expr_blockers(
             collect_native_vec_expr_blockers(base, vecs, false, blockers);
             collect_native_vec_expr_blockers(index, vecs, false, blockers);
         }
+        Expr::SliceRange { base, start, end } => {
+            collect_native_vec_expr_blockers(base, vecs, false, blockers);
+            collect_native_vec_expr_blockers(start, vecs, false, blockers);
+            collect_native_vec_expr_blockers(end, vecs, false, blockers);
+        }
         Expr::Int(_)
         | Expr::Float(_)
         | Expr::Bool(_)
@@ -1612,12 +1957,26 @@ fn collect_source_expr_blockers(
     body: &[Stmt],
     capsule_names: &BTreeSet<String>,
     trait_names: &BTreeSet<String>,
+    native_vec_element_names: &BTreeSet<String>,
+    allow_returned_native_option: bool,
     blockers: &mut BTreeSet<String>,
 ) {
     for stmt in body {
         match stmt {
+            Stmt::Let {
+                ty: Some(ty), expr, ..
+            } if is_native_value_option(ty, native_vec_element_names)
+                && is_native_option_constructor(expr) =>
+            {
+                collect_native_option_constructor_args(expr, capsule_names, trait_names, blockers);
+            }
             Stmt::Let { expr, .. } | Stmt::Require(expr) | Stmt::Expr(expr) => {
                 collect_expr_source_blockers(expr, capsule_names, trait_names, blockers);
+            }
+            Stmt::Return(Some(expr))
+                if allow_returned_native_option && is_native_option_constructor(expr) =>
+            {
+                collect_native_option_constructor_args(expr, capsule_names, trait_names, blockers);
             }
             Stmt::Return(Some(expr)) => {
                 collect_expr_source_blockers(expr, capsule_names, trait_names, blockers)
@@ -1629,30 +1988,78 @@ fn collect_source_expr_blockers(
                 else_body,
             } => {
                 collect_expr_source_blockers(cond, capsule_names, trait_names, blockers);
-                collect_source_expr_blockers(then_body, capsule_names, trait_names, blockers);
-                collect_source_expr_blockers(else_body, capsule_names, trait_names, blockers);
+                collect_source_expr_blockers(
+                    then_body,
+                    capsule_names,
+                    trait_names,
+                    native_vec_element_names,
+                    allow_returned_native_option,
+                    blockers,
+                );
+                collect_source_expr_blockers(
+                    else_body,
+                    capsule_names,
+                    trait_names,
+                    native_vec_element_names,
+                    allow_returned_native_option,
+                    blockers,
+                );
             }
             Stmt::For {
                 start, end, body, ..
             } => {
                 collect_expr_source_blockers(start, capsule_names, trait_names, blockers);
                 collect_expr_source_blockers(end, capsule_names, trait_names, blockers);
-                collect_source_expr_blockers(body, capsule_names, trait_names, blockers);
+                collect_source_expr_blockers(
+                    body,
+                    capsule_names,
+                    trait_names,
+                    native_vec_element_names,
+                    allow_returned_native_option,
+                    blockers,
+                );
             }
             Stmt::While { cond, body } => {
                 collect_expr_source_blockers(cond, capsule_names, trait_names, blockers);
-                collect_source_expr_blockers(body, capsule_names, trait_names, blockers);
+                collect_source_expr_blockers(
+                    body,
+                    capsule_names,
+                    trait_names,
+                    native_vec_element_names,
+                    allow_returned_native_option,
+                    blockers,
+                );
             }
             Stmt::Match { scrutinee, arms } => {
                 collect_expr_source_blockers(scrutinee, capsule_names, trait_names, blockers);
                 for arm in arms {
-                    collect_source_expr_blockers(&arm.body, capsule_names, trait_names, blockers);
+                    collect_source_expr_blockers(
+                        &arm.body,
+                        capsule_names,
+                        trait_names,
+                        native_vec_element_names,
+                        allow_returned_native_option,
+                        blockers,
+                    );
                 }
             }
             Stmt::Assign { target, expr } => {
                 collect_expr_source_blockers(target, capsule_names, trait_names, blockers);
                 collect_expr_source_blockers(expr, capsule_names, trait_names, blockers);
             }
+        }
+    }
+}
+
+fn collect_native_option_constructor_args(
+    expr: &Expr,
+    capsule_names: &BTreeSet<String>,
+    trait_names: &BTreeSet<String>,
+    blockers: &mut BTreeSet<String>,
+) {
+    if let Expr::Call { args, .. } = expr {
+        for arg in args {
+            collect_expr_source_blockers(arg, capsule_names, trait_names, blockers);
         }
     }
 }
@@ -1681,7 +2088,10 @@ fn collect_expr_source_blockers(
             collect_expr_source_blockers(right, capsule_names, trait_names, blockers);
         }
         Expr::Call { name, args } => {
-            if is_interpreter_only_intrinsic(name) {
+            if is_interpreter_only_intrinsic(name)
+                && !is_immediate_pop_consumer(name, args)
+                && !is_stored_option_consumer(name, args)
+            {
                 blockers.insert(format!("intrinsic:{name}"));
             }
             if capsule_names.contains(name) {
@@ -1708,7 +2118,45 @@ fn collect_expr_source_blockers(
             collect_expr_source_blockers(base, capsule_names, trait_names, blockers);
             collect_expr_source_blockers(index, capsule_names, trait_names, blockers);
         }
+        Expr::SliceRange { base, start, end } => {
+            blockers.insert("op:slice_range".to_string());
+            collect_expr_source_blockers(base, capsule_names, trait_names, blockers);
+            collect_expr_source_blockers(start, capsule_names, trait_names, blockers);
+            collect_expr_source_blockers(end, capsule_names, trait_names, blockers);
+        }
     }
+}
+
+fn is_stored_option_consumer(name: &str, args: &[Expr]) -> bool {
+    let expected = match name {
+        "is_some" | "is_none" => 1,
+        "unwrap_or" => 2,
+        _ => return false,
+    };
+    args.len() == expected
+        && matches!(args.first(), Some(Expr::Var(_)))
+        && (name != "unwrap_or" || is_native_pop_fallback(&args[1]))
+}
+
+fn is_immediate_pop_consumer(name: &str, args: &[Expr]) -> bool {
+    let expected = match name {
+        "is_some" | "is_none" => 1,
+        "unwrap_or" => 2,
+        _ => return false,
+    };
+    args.len() == expected
+        && matches!(
+            args.first(),
+            Some(Expr::Call { name, args }) if name == "pop" && args.len() == 1
+        )
+        && (name != "unwrap_or" || is_native_pop_fallback(&args[1]))
+}
+
+fn is_native_pop_fallback(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::String(_) | Expr::Var(_)
+    )
 }
 
 fn is_interpreter_only_intrinsic(name: &str) -> bool {
@@ -1762,6 +2210,9 @@ fn collect_generic_type_blockers(ty: &Type, blockers: &mut BTreeSet<String>) {
 /// aggregates, and borrowed/container signatures keep the established
 /// `generic_type:Fn` blocker until their ABI is designed explicitly.
 pub(crate) fn is_native_function_type(ty: &Type) -> bool {
+    if !matches!(ty, Type::Generic { name, .. } if name == "Fn") {
+        return false;
+    }
     let Some((params, ret, _effects)) = ty.function_parts() else {
         return false;
     };
@@ -1790,6 +2241,7 @@ fn is_runtime_only_effect(effect: &str) -> bool {
         || effect.starts_with("crypto.")
         || effect.starts_with("ledger.")
         || effect.starts_with("agent.")
+        || effect.starts_with("concurrency.")
         || effect == "serialize"
         || effect == "stream"
 }

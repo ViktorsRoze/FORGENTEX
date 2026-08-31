@@ -21,8 +21,9 @@ The default surface is memory-safe, checked before anything runs:
 - **Ownership + borrow checking.** A CFG dataflow borrow checker computes moved
   paths, alias places, and liveness as fixpoint analyses over the control-flow
   graph, so use-after-move and illegal aliasing on references/slices are
-  compile-time errors. A conformance suite (`fgx borrow-conformance`, 30 curated
-  cases plus 510 independently modeled generated move programs) pins it;
+  compile-time errors. A conformance suite (`fgx borrow-conformance`, 40 curated
+  cases plus 1,922 generated/reference and regression programs across move,
+  alias, lifetime, affine-closure, property, and runtime-seeded families) pins it;
   `fgx borrow-report` shows the dataflow evidence. See
   [borrow_checker_v1.md](borrow_checker_v1.md).
 - **Bounds-checked indexing.** Array/slice access is guarded — in the
@@ -94,21 +95,43 @@ unsafety."
 ## Honest caveats (current state)
 
 - **The borrow checker is research-grade *today* — and hardening is underway,
-  not hand-waved.** Its first independent net now exhaustively cross-checks 510
-  generated whole-value/partial-field move programs across linear flow, branch
-  joins, and loop-carried state. It is not yet battle-hardened: the independent
-  model must expand to borrow aliases and lifetimes, property/fuzz generation
-  must assert the soundness invariant, and full coverage of new language
-  constructs remains milestone `safe.1` in
+  not hand-waved.** Independent nets now cross-check 526 move, 610 alias, 292
+  lifetime-provenance, and 38 affine-closure programs, including recursive
+  collection/generic carriers, exhaustive two-/three-/four-level loop joins, and recursively
+  normalized associated-type ownership shapes. Fixed and runtime-seeded
+  properties add 448 programs, while four minimized regressions remain pinned.
+  `FnOnce` makes explicitly typed one-shot closure locals affine, moves captured
+  mutable roots into their environment, and is consumed by calls, transfers,
+  and task spawn. The runtime campaign now includes balanced long affine traces,
+  and weekly rotation covers eight seeds at 96 cases per family. Promotion of
+  any newly discovered minimized failures remains milestone `safe.1` work in
   [v3_application_maturity.md](v3_application_maturity.md). Read it as
   "Rust-style and working today, with proper hardening on the roadmap."
 - **The heap surface is deliberately narrow.** Safe source still cannot call
   `malloc`/`free`. The interpreter owns general growable collections; the C/Zig
-  fast path currently admits only fresh annotated function-local `Vec[i32]`
-  values with explicit `effects [alloc]`, caps growth at 1,048,576 elements, bounds-checks accesses, and emits
-  cleanup on every live function exit. Whole-vector aliases, escapes,
-  signatures/returns, nested declarations, other element layouts, and
-  value-returning `pop` are FIR-blocked, so unsafe shallow copies cannot reach
+  fast path currently admits only fresh annotated function-, branch-, loop-, or
+  match-arm-local `Vec[T]` values for scalar primitives, borrowed immutable
+  string/scalar-slice views, recursively fixed arrays of scalar, declared enum,
+  backend-lowerable named-struct, or immutable borrowed string/scalar-slice
+  leaves with at most 16 dimensions and 1,024 total value leaves, declared
+  enums, and backend-lowerable named structs. Explicit
+  `effects [alloc]` is required; growth is capped at
+  1,048,576 elements, access is bounds-checked, and cleanup covers normal scope
+  exit, loop control, and every live return. `pop` results may be consumed
+  immediately or stored in a local `Option[T]` and later inspected by `is_some`,
+  `is_none`, or `unwrap_or` with a literal or already-evaluated fallback. C uses
+  a layout-specific by-value option and Zig uses `?T`; neither representation
+  owns vector storage, and the fallback restriction preserves eager ordering.
+  A direct pop result or an unmodified stored pop option may also return by
+  value: C saves it before freeing all live vectors, while Zig evaluates it
+  before lexical `defer` cleanup.
+  Whole-vector aliases, escapes,
+  signatures/returns, mutable-view or other unsupported owned/generic array
+  leaves, other owned/generic element layouts, option parameters, reassignment,
+  immediate untyped construction, parameter/callee-derived returns, and
+  state-dependent pop fallbacks
+  are FIR-blocked, so
+  unsafe shallow copies cannot reach
   source emission. Expanding this subset requires the same explicit ownership
   and deallocation proof, not direct allocator access from safe code.
 - **Integer overflow is a correctness, not a memory-safety, matter.** Overflow

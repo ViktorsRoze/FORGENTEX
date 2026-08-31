@@ -15,6 +15,31 @@ use crate::targets::check_program_target;
 pub struct CreatedPackage {
     pub manifest: PathBuf,
     pub source: PathBuf,
+    /// Additional scaffolded paths, in creation order. Empty for the library
+    /// template; the application template adds its declared artifact root.
+    pub extra: Vec<PathBuf>,
+}
+
+/// Which starting package `fgx new` writes. The library template stays the
+/// default so existing scaffolds keep their exact shape; the application
+/// template adds the `[application]` contract that `fgx app-run` requires.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PackageTemplate {
+    #[default]
+    Lib,
+    App,
+}
+
+impl PackageTemplate {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "lib" => Ok(PackageTemplate::Lib),
+            "app" => Ok(PackageTemplate::App),
+            other => Err(format!(
+                "unknown template '{other}': expected 'lib' or 'app'"
+            )),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -92,6 +117,14 @@ const DEFAULT_TARGET_MATRIX: &[&str] = &[
 ];
 
 pub fn create_package(path: &Path, name: Option<&str>) -> Result<CreatedPackage, String> {
+    create_package_with_template(path, name, PackageTemplate::Lib)
+}
+
+pub fn create_package_with_template(
+    path: &Path,
+    name: Option<&str>,
+    template: PackageTemplate,
+) -> Result<CreatedPackage, String> {
     let package_name = name
         .map(str::to_string)
         .or_else(|| {
@@ -119,21 +152,57 @@ pub fn create_package(path: &Path, name: Option<&str>) -> Result<CreatedPackage,
     let manifest = path.join("Forgentex.toml");
     let source = src_dir.join("main.fgx");
     let module_name = package_module_name(&package_name);
-    fs::write(
-        &manifest,
-        format!(
-            "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nroot = \"src\"\n\n[targets]\nmatrix = [\"x86_64-unknown-linux-gnu\", \"aarch64-unknown-linux-gnu\", \"riscv64gc-unknown-linux-gnu\"]\n\n[profile.dev]\nbackend = \"c\"\noptimize = \"none\"\ndebug = true\n\n[security]\ntrust = \"trusted\"\nreproducible = true\n\n[permissions]\nfs.read = [\"src\"]\nfs.write = [\"build\"]\nio = [\"stdout\"]\n\n[sandbox]\nbuild_scripts = \"deny\"\ncodegen = \"deny\"\ntests = \"sandboxed\"\nagent_tools = \"deny\"\n",
-            package_name
+    let (manifest_body, source_body) = match template {
+        PackageTemplate::Lib => (
+            library_manifest(&package_name),
+            format!("module {module_name}\n\nexport fn hello() -> i32:\n    return 42\n"),
         ),
-    )
-    .map_err(|err| format!("failed to write {}: {err}", manifest.display()))?;
-    fs::write(
-        &source,
-        format!("module {module_name}\n\nexport fn hello() -> i32:\n    return 42\n"),
-    )
-    .map_err(|err| format!("failed to write {}: {err}", source.display()))?;
+        PackageTemplate::App => (
+            application_manifest(&package_name),
+            APPLICATION_SOURCE.to_string(),
+        ),
+    };
+    fs::write(&manifest, manifest_body)
+        .map_err(|err| format!("failed to write {}: {err}", manifest.display()))?;
+    fs::write(&source, source_body)
+        .map_err(|err| format!("failed to write {}: {err}", source.display()))?;
 
-    Ok(CreatedPackage { manifest, source })
+    let mut extra = Vec::new();
+    if template == PackageTemplate::App {
+        // The artifact root must exist before the first run: publication is
+        // host-controlled and create-new, so it never creates the directory.
+        let output_dir = path.join(APPLICATION_ARTIFACT_ROOT);
+        fs::create_dir_all(&output_dir)
+            .map_err(|err| format!("failed to create {}: {err}", output_dir.display()))?;
+        let keep = output_dir.join(".gitkeep");
+        fs::write(&keep, "").map_err(|err| format!("failed to write {}: {err}", keep.display()))?;
+        extra.push(output_dir);
+        extra.push(keep);
+    }
+
+    Ok(CreatedPackage {
+        manifest,
+        source,
+        extra,
+    })
+}
+
+const APPLICATION_ARTIFACT_ROOT: &str = "output";
+
+/// Entry, artifact name, and artifact path are bound together across the
+/// manifest and the source; changing one requires changing the others.
+const APPLICATION_SOURCE: &str = "import core.io\n\nfn greet(message: str) -> usize effects [fs.write]:\n    let destination: Path = core_path_parse(\"output/greeting.txt\")\n    return core_io_publish_text_artifact(\"greeting\", destination, message)\n";
+
+fn library_manifest(package_name: &str) -> String {
+    format!(
+        "[package]\nname = \"{package_name}\"\nversion = \"0.1.0\"\nroot = \"src\"\n\n[targets]\nmatrix = [\"x86_64-unknown-linux-gnu\", \"aarch64-unknown-linux-gnu\", \"riscv64gc-unknown-linux-gnu\"]\n\n[profile.dev]\nbackend = \"c\"\noptimize = \"none\"\ndebug = true\n\n[security]\ntrust = \"trusted\"\nreproducible = true\n\n[permissions]\nfs.read = [\"src\"]\nfs.write = [\"build\"]\nio = [\"stdout\"]\n\n[sandbox]\nbuild_scripts = \"deny\"\ncodegen = \"deny\"\ntests = \"sandboxed\"\nagent_tools = \"deny\"\n"
+    )
+}
+
+fn application_manifest(package_name: &str) -> String {
+    format!(
+        "[package]\nname = \"{package_name}\"\nversion = \"0.1.0\"\nroot = \"src\"\n\n[application]\nforgentex = \"0.1\"\nentry = \"greet\"\nruntime = \"hosted_io\"\neffects = [\"fs.write\"]\n\n[application.limits]\nmax_write_bytes = 65536\n\n[application.artifact.greeting]\nroot = \"{APPLICATION_ARTIFACT_ROOT}\"\nmedia_type = \"text/plain\"\nmax_bytes = 65536\nrequired = true\npublication = \"create_new\"\n\n[security]\ntrust = \"untrusted\"\nsigned_by = \"agent-public-demo\"\nsignature_algorithm = \"Ed25519\"\nsignature = \"mock-sig-{package_name}\"\nreproducible = true\n\n[permissions]\nfs.write = [\"{APPLICATION_ARTIFACT_ROOT}\"]\n\n[sandbox]\nbuild_scripts = \"deny\"\ncodegen = \"deny\"\ntests = \"sandboxed\"\nagent_tools = \"deny\"\n"
+    )
 }
 
 pub fn generate_lock(input: &Path) -> Result<PackageLock, String> {

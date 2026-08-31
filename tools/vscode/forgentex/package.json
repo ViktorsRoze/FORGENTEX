@@ -16,13 +16,7 @@
     "onLanguage:forgentex-fgx",
     "onLanguage:forgentex-fgai",
     "onLanguage:forgentex-fgp",
-    "onLanguage:forgentex-fgmap",
-    "onCommand:forgentex.showHumanAgentViews",
-    "onCommand:forgentex.contextForSymbol",
-    "onCommand:forgentex.reviewPatch",
-    "onCommand:forgentex.applyPatchPreview",
-    "onCommand:forgentex.runDiagnostics",
-    "onCommand:forgentex.showUnsafeArchitectureSlices"
+    "onLanguage:forgentex-fgmap"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -195,6 +189,17 @@
           ],
           "default": "cli",
           "description": "Language service integration mode. Stage 20 uses the fgx CLI as the editor language service."
+        },
+        "forgentex.checkOnType": {
+          "type": "boolean",
+          "default": true,
+          "description": "Re-check the file with fgx while typing. Unsaved buffers are mirrored to a scratch file so diagnostics track the editor, not the last save."
+        },
+        "forgentex.checkDelayMs": {
+          "type": "number",
+          "default": 400,
+          "minimum": 200,
+          "description": "Debounce delay in milliseconds before a check-on-type run. Values below 200 are clamped."
         }
       }
     },
@@ -211,6 +216,84 @@
           "message": 1
         }
       }
+    ],
+    "debuggers": [
+      {
+        "type": "forgentex",
+        "label": "Forgentex",
+        "program": "./adapter.js",
+        "runtime": "node",
+        "languages": [
+          "forgentex-fgx",
+          "forgentex-fgai"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [
+              "program",
+              "entry"
+            ],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Path to the .fgx file to debug.",
+                "default": "${file}"
+              },
+              "entry": {
+                "type": "string",
+                "description": "Function to run.",
+                "default": "main"
+              },
+              "input": {
+                "type": "string",
+                "description": "JSON input document for the entry arguments.",
+                "default": "{}"
+              },
+              "live": {
+                "type": "boolean",
+                "description": "Execute foreign capsules for real.",
+                "default": false
+              },
+              "allowEffects": {
+                "type": "string",
+                "description": "Comma-separated effect grants for live capsules."
+              },
+              "grantFs": {
+                "type": "string",
+                "description": "Comma-separated hosted filesystem grants."
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "forgentex",
+            "request": "launch",
+            "name": "Debug Forgentex file",
+            "program": "${file}",
+            "entry": "main"
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "Forgentex: Debug a file",
+            "description": "Run a Forgentex entry function under the debugger.",
+            "body": {
+              "type": "forgentex",
+              "request": "launch",
+              "name": "Debug Forgentex file",
+              "program": "^\"${file}\"",
+              "entry": "main"
+            }
+          }
+        ]
+      }
     ]
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "The extension runs the fgx binary named by workspace settings."
+    }
   }
 }

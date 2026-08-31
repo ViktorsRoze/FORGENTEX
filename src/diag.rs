@@ -35,8 +35,15 @@ impl Diagnostic {
 }
 
 pub fn diagnostics_to_json(diagnostics: &[Diagnostic]) -> String {
-    let mut out = String::new();
-    out.push_str("{\n  \"diagnostics\": [");
+    format!(
+        "{{\n  \"schema\": \"{}\",\n  \"diagnostics\": {}\n}}",
+        crate::public_compat::DIAGNOSTICS_SCHEMA,
+        diagnostics_array_to_json(diagnostics)
+    )
+}
+
+pub fn diagnostics_array_to_json(diagnostics: &[Diagnostic]) -> String {
+    let mut out = String::from("[");
     for (idx, diagnostic) in diagnostics.iter().enumerate() {
         if idx > 0 {
             out.push(',');
@@ -63,7 +70,7 @@ pub fn diagnostics_to_json(diagnostics: &[Diagnostic]) -> String {
         }
         out.push_str("]\n    }");
     }
-    out.push_str("\n  ]\n}");
+    out.push_str("\n  ]");
     out
 }
 

@@ -1,0 +1,18 @@
+# Native data boundaries: fixed-length mutable UTF-8 copy-back through Zig.
+
+foreign title_utf8_zig zig version "0.14":
+    input text: &mut str
+    output changed: i32
+    sandbox "fs.none"
+    code:
+        pub export fn title_utf8_zig(text: [*]u8, text_len: usize) i32 {
+            if (text_len > 0 and text[0] == 'f') {
+                text[0] = 'F';
+                return 1;
+            }
+            return 0;
+        }
+
+fn title_twice_from_zig(text: &mut str) -> i32:
+    let first_change: i32 = title_utf8_zig(text)
+    return title_utf8_zig(text)

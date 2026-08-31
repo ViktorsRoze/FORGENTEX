@@ -1,0 +1,23 @@
+# Native data boundaries: fixed-length mutable UTF-8 copy-back through Rust.
+
+foreign title_utf8_rust rust version "2021":
+    input text: &mut str
+    output changed: i32
+    sandbox "fs.none"
+    code:
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn title_utf8_rust(
+            text: *mut u8,
+            text_len: usize,
+        ) -> i32 {
+            if text_len > 0 && unsafe { *text } == b'f' {
+                unsafe { *text = b'F'; }
+                1
+            } else {
+                0
+            }
+        }
+
+fn title_twice_from_rust(text: &mut str) -> i32:
+    let first_change: i32 = title_utf8_rust(text)
+    return title_utf8_rust(text)

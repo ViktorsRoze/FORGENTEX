@@ -1,0 +1,30 @@
+[package]
+name = "directory-inventory"
+version = "0.1.0"
+root = "src"
+
+[application]
+forgentex = "0.1"
+entry = "inventory_count"
+runtime = "hosted_io"
+effects = ["fs.read"]
+
+[application.limits]
+max_read_bytes = 1048576
+max_directory_entries = 64
+
+[security]
+trust = "untrusted"
+signed_by = "agent-public-demo"
+signature_algorithm = "Ed25519"
+signature = "mock-sig-directory-inventory"
+reproducible = true
+
+[permissions]
+fs.read = ["input"]
+
+[sandbox]
+build_scripts = "deny"
+codegen = "deny"
+tests = "sandboxed"
+agent_tools = "deny"

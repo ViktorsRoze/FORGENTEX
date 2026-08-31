@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use crate::ast::{Expr, FunctionDecl, Program, Stmt, Type};
-use crate::diag::{diagnostics_to_json, Diagnostic};
+use crate::diag::{diagnostics_array_to_json, Diagnostic};
 use crate::stdlib::canonical_simd_intrinsic;
 use crate::targets::{target_by_triple, TargetSpec};
 
@@ -239,12 +239,7 @@ pub fn review_json(review: &SimdReview) -> String {
         out.push_str("  ");
     }
     out.push_str("],\n");
-    let diagnostics_json = diagnostics_to_json(&review.diagnostics);
-    let diagnostics = diagnostics_json
-        .trim()
-        .strip_prefix("{\n  \"diagnostics\": ")
-        .and_then(|value| value.strip_suffix("\n}"))
-        .unwrap_or("[]");
+    let diagnostics = diagnostics_array_to_json(&review.diagnostics);
     out.push_str(&format!("  \"diagnostics\": {diagnostics}\n"));
     out.push('}');
     out
@@ -645,6 +640,9 @@ fn expr_has_simd(expr: &Expr) -> bool {
         }
         Expr::Binary { left, right, .. } => expr_has_simd(left) || expr_has_simd(right),
         Expr::Index { base, index } => expr_has_simd(base) || expr_has_simd(index),
+        Expr::SliceRange { base, start, end } => {
+            expr_has_simd(base) || expr_has_simd(start) || expr_has_simd(end)
+        }
         Expr::Int(_)
         | Expr::Float(_)
         | Expr::Bool(_)
@@ -735,6 +733,11 @@ fn collect_expr_simd(
         Expr::Index { base, index } => {
             collect_expr_simd(base, intrinsics, vector_types);
             collect_expr_simd(index, intrinsics, vector_types);
+        }
+        Expr::SliceRange { base, start, end } => {
+            collect_expr_simd(base, intrinsics, vector_types);
+            collect_expr_simd(start, intrinsics, vector_types);
+            collect_expr_simd(end, intrinsics, vector_types);
         }
         Expr::Int(_)
         | Expr::Float(_)

@@ -68,7 +68,7 @@ The following CLI commands are part of the v0 demo contract:
 - `fgx stdlib [--json]`
 - `fgx build <project> --backend c [--out <dir>]`
 - `fgx build <project> --backend zig [--out <dir>]`
-- `fgx new <path> [--name <package>]`
+- `fgx new <path> [--name <package>] [--template lib|app]`
 - `fgx lock [project] [--out <file>] [--json]`
 - `fgx test [--project <path>] [--target <triple>|--all-targets] [--json]`
 - `fgx build <project> --backend c --target <triple> [--profile <profile>] [--out <dir>] [--json]`
@@ -93,7 +93,7 @@ The following CLI commands are part of the v0 demo contract:
 - `fgx map --project [path] --out <file>`
 - `fgx map --project [path] --include-targets --out <file>`
 - `fgx get '@function.name' --from <dir> --deps types`
-- `fgx context '@function.name' --deps types,effects,tests [--project <path>] [--json]`
+- `fgx context '@function.name' --deps types,effects,tests [--max-tokens <n>] [--since <context.json>] [--out <context.json>] [--project <path>] [--json]`
 - `fgx review <patch> [--source <file>] [--project <path>] [--json]`
 - `fgx fuzz [--iterations <n>] [--json]`
 - `fgx diff-test [--project <path>] [--source <file>] --entry <function> --json-input <file> [--json]`
@@ -301,7 +301,7 @@ The v0 demo now includes deterministic mock crypto and agent-payment APIs:
 The v0 demo now includes compact compiler-native packets for agent tooling:
 
 - `docs/agent_workbench_protocol.md` defines context and review packet schemas
-- `fgx context <symbol> --deps types,effects,tests --json` emits
+- `fgx context <symbol> --deps types,effects,tests [--max-tokens <n>] [--since <context.json>] --json` emits
   `forgentex.agent_context.v1`
 - context packets include project/source summaries, `.fgmap`-style symbol map
   lines, symbol source, optional dependency slices, diagnostics with suggested
@@ -372,7 +372,8 @@ The v0 demo now includes a local package manager and matrix-aware build flow:
 - `docs/package_build_system.md` defines the Stage 23 package layout, manifest
   fields, lock output, target tests, matrix builds, and publish dry-runs
 - `fgx new <path> [--name <package>]` creates a package skeleton with a default
-  x86_64/AArch64/RISC-V target matrix
+  x86_64/AArch64/RISC-V target matrix; `--template app` instead scaffolds a
+  runnable `[application]` contract and omits the target matrix
 - `Forgentex.toml` accepts `[dependencies]`, `[targets]`, and `[profile.<name>]`
   sections in addition to package name, version, and source root
 - local path dependencies are resolved before standard library modules

@@ -12,6 +12,51 @@ const FGX_LANGUAGES = [
   { language: "forgentex-fgmap", extension: ".fgmap" }
 ];
 
+// Syntaxes that `fgx check` and `fgx fmt` accept.
+const SOURCE_LANGUAGES = [
+  { language: "forgentex-fgx" },
+  { language: "forgentex-fgai" }
+];
+
+const SOURCE_LANGUAGE_IDS = new Set(SOURCE_LANGUAGES.map((entry) => entry.language));
+
+// Completion vocabulary, mirroring the grammars. `test/grammar-coverage.js`
+// checks the grammars against the parser; these lists follow the same surface.
+const HUMAN_COMPLETIONS = {
+  keywords: [
+    "module", "import", "export", "pub", "struct", "enum", "trait", "impl",
+    "requires", "default", "fn", "unsafe", "const", "type", "let", "return",
+    "require", "if", "else", "match", "case", "for", "in", "while", "break",
+    "continue", "effects", "share", "foreign", "version", "input", "output",
+    "sandbox", "code", "bind", "pipeline", "stage", "edge", "via", "test",
+    "expect", "expect_diagnostic", "dep", "env", "mock", "true", "false"
+  ],
+  types: [
+    "bool", "i8", "i16", "i32", "i64", "isize", "u8", "u16", "u32", "u64",
+    "usize", "f32", "f64", "str", "void", "Vec", "Map", "Option", "Result",
+    "Path", "DirEntry", "String"
+  ],
+  effects: [
+    "alloc", "cpu", "cpu.render", "fs.read", "fs.write", "io.read", "io.write",
+    "media.encode", "network.read", "network.write", "crypto.hash",
+    "crypto.sign", "concurrency.task", "concurrency.channel", "gpu.render"
+  ],
+  bindings: ["read", "rw", "move", "update"]
+};
+
+const AGENT_COMPLETIONS = {
+  keywords: [
+    "M", "IMPORT", "EXPORT", "PUB", "S", "EN", "TR", "IM", "F", "UF", "CONST",
+    "TYPE", "LET", "SET", "R", "REQ", "IF", "EI", "EL", "MT", "FOR", "WH",
+    "BR", "CN", "SHARE", "CAP", "ENDCAP", "IN", "OUT", "SBX", "CODE", "BIND",
+    "PIPELINE", "ENDPIPELINE", "STAGE", "EDGE", "VIA", "TEST", "XTEST",
+    "EXPECT", "ASM", "OP", "true", "false"
+  ],
+  types: HUMAN_COMPLETIONS.types,
+  effects: HUMAN_COMPLETIONS.effects,
+  bindings: HUMAN_COMPLETIONS.bindings
+};
+
 const DECLARATION_PATTERNS = [
   {
     regex: /^\s*(?:pub\s+)?(unsafe\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)/,
@@ -51,6 +96,15 @@ function activate(context) {
     );
   }
 
+  // Formatting and completion apply to the two source syntaxes only; patch and
+  // project-map files are not reformatted by `fgx fmt`.
+  for (const selector of SOURCE_LANGUAGES) {
+    context.subscriptions.push(
+      vscode.languages.registerDocumentFormattingEditProvider(selector, new ForgentexFormattingProvider()),
+      vscode.languages.registerCompletionItemProvider(selector, new ForgentexCompletionProvider())
+    );
+  }
+
   context.subscriptions.push(
     vscode.commands.registerCommand("forgentex.showHumanAgentViews", showHumanAgentViews),
     vscode.commands.registerCommand("forgentex.contextForSymbol", contextForSymbol),
@@ -59,6 +113,74 @@ function activate(context) {
     vscode.commands.registerCommand("forgentex.runDiagnostics", () => runDiagnostics(diagnostics)),
     vscode.commands.registerCommand("forgentex.showUnsafeArchitectureSlices", showUnsafeArchitectureSlices)
   );
+
+  registerAutomaticDiagnostics(context, diagnostics);
+
+  // The debug adapter shim spawns the CLI, so it needs the same binary the
+  // rest of the extension uses rather than whatever happens to be on PATH.
+  context.subscriptions.push(
+    vscode.debug.registerDebugAdapterDescriptorFactory("forgentex", {
+      createDebugAdapterDescriptor() {
+        const adapter = path.join(__dirname, "adapter.js");
+        return new vscode.DebugAdapterExecutable(process.execPath, [adapter], {
+          env: Object.assign({}, process.env, {
+            FORGENTEX_FGX_PATH: config().get("fgxPath") || "fgx"
+          })
+        });
+      }
+    })
+  );
+}
+
+// Keep checked files current without a language server: check on open and on
+// save always, and while typing when `checkOnType` is enabled. Typing is
+// debounced and superseded so a burst of keystrokes runs one check.
+function registerAutomaticDiagnostics(context, collection) {
+  const timers = new Map();
+
+  const schedule = (document, delay) => {
+    if (!isSourceDocument(document)) {
+      return;
+    }
+    const key = document.uri.toString();
+    const pending = timers.get(key);
+    if (pending) {
+      clearTimeout(pending);
+    }
+    timers.set(key, setTimeout(() => {
+      timers.delete(key);
+      checkDocument(document, collection).catch(() => {});
+    }, delay));
+  };
+
+  context.subscriptions.push(
+    vscode.workspace.onDidOpenTextDocument((document) => schedule(document, 0)),
+    vscode.workspace.onDidSaveTextDocument((document) => schedule(document, 0)),
+    vscode.workspace.onDidChangeTextDocument((event) => {
+      if (config().get("checkOnType")) {
+        schedule(event.document, Math.max(200, Number(config().get("checkDelayMs")) || 400));
+      }
+    }),
+    vscode.workspace.onDidCloseTextDocument((document) => {
+      const key = document.uri.toString();
+      const pending = timers.get(key);
+      if (pending) {
+        clearTimeout(pending);
+        timers.delete(key);
+      }
+      collection.delete(document.uri);
+    }),
+    { dispose: () => {
+      for (const timer of timers.values()) {
+        clearTimeout(timer);
+      }
+      timers.clear();
+    } }
+  );
+
+  for (const document of vscode.workspace.textDocuments) {
+    schedule(document, 0);
+  }
 }
 
 function deactivate() {}
@@ -184,21 +306,165 @@ async function runDiagnostics(collection) {
   if (!document) {
     return;
   }
-  const source = document.uri.fsPath;
-  const output = await runFgx(["check", source, "--json"], workspaceRootFor(source));
-  const parsed = parseJsonOrFallback(output);
-  const diagnostics = (parsed.diagnostics || []).map((item) => {
-    const range = rangeForDiagnostic(document, item);
-    const severity = item.severity === "warning"
-      ? vscode.DiagnosticSeverity.Warning
-      : vscode.DiagnosticSeverity.Error;
-    const diagnostic = new vscode.Diagnostic(range, item.message || item.code || "Forgentex diagnostic", severity);
-    diagnostic.code = item.code;
-    diagnostic.source = "fgx";
-    return diagnostic;
-  });
-  collection.set(document.uri, diagnostics);
-  vscode.window.setStatusBarMessage(`Forgentex diagnostics: ${diagnostics.length}`, 4000);
+  const count = await checkDocument(document, collection, { quiet: false });
+  if (count !== null) {
+    vscode.window.setStatusBarMessage(`Forgentex diagnostics: ${count}`, 4000);
+  }
+}
+
+function isSourceDocument(document) {
+  return Boolean(document) && SOURCE_LANGUAGE_IDS.has(document.languageId);
+}
+
+// Check one document and publish its diagnostics. Returns the diagnostic count,
+// or null when the check could not run.
+//
+// `fgx check` reads a path, so an unsaved or dirty buffer is mirrored into a
+// scratch file first; otherwise the editor would report diagnostics for stale
+// on-disk text while the user types.
+async function checkDocument(document, collection, options) {
+  const quiet = !options || options.quiet !== false;
+  if (!isSourceDocument(document) || config().get("languageServiceMode") === "disabled") {
+    return null;
+  }
+
+  const onDisk = !document.isUntitled && !document.isDirty;
+  const target = onDisk ? document.uri.fsPath : mirrorToScratch(document);
+  if (!target) {
+    return null;
+  }
+
+  try {
+    const cwd = workspaceRootFor(document.isUntitled ? undefined : document.uri.fsPath);
+    const output = await runFgx(["check", target, "--json"], cwd, { quiet });
+    const parsed = parseJsonOrFallback(output);
+    const diagnostics = (parsed.diagnostics || []).map((item) => {
+      // `forgentex.diagnostics.v1` names the code `error` and carries no
+      // severity field; everything it reports blocks the checker.
+      const code = item.error || item.code;
+      const severity = item.severity === "warning"
+        ? vscode.DiagnosticSeverity.Warning
+        : vscode.DiagnosticSeverity.Error;
+      let message = item.message || code || "Forgentex diagnostic";
+      if (item.expected !== undefined || item.found !== undefined) {
+        message += ` (expected ${item.expected}, found ${item.found})`;
+      }
+      const diagnostic = new vscode.Diagnostic(
+        rangeForDiagnostic(document, item),
+        message,
+        severity
+      );
+      diagnostic.code = code;
+      diagnostic.source = "fgx";
+      return diagnostic;
+    });
+    collection.set(document.uri, diagnostics);
+    return diagnostics.length;
+  } catch (error) {
+    // A failed check must not leave stale diagnostics implying the file is
+    // still clean, or still broken, when neither is known.
+    collection.delete(document.uri);
+    return null;
+  } finally {
+    if (!onDisk && target) {
+      removeScratch(target);
+    }
+  }
+}
+
+// Remove a scratch mirror synchronously. Fire-and-forget deletion can outlive
+// the run that created it and leave the temp directory accumulating files.
+function removeScratch(target) {
+  try {
+    fs.rmSync(target, { force: true });
+  } catch (error) {
+    // A scratch file that cannot be removed must not fail the surrounding
+    // editor operation.
+  }
+}
+
+// Mirror a dirty buffer into a scratch file that keeps the original extension,
+// because `fgx` selects its syntax from the file extension.
+function mirrorToScratch(document) {
+  const suffix = document.languageId === "forgentex-fgai" ? ".fgai" : ".fgx";
+  const name = `forgentex-check-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${suffix}`;
+  const target = path.join(require("os").tmpdir(), name);
+  try {
+    fs.writeFileSync(target, document.getText(), "utf8");
+    return target;
+  } catch (error) {
+    return null;
+  }
+}
+
+class ForgentexFormattingProvider {
+  async provideDocumentFormattingEdits(document) {
+    if (config().get("languageServiceMode") === "disabled") {
+      return [];
+    }
+    const onDisk = !document.isUntitled && !document.isDirty;
+    const target = onDisk ? document.uri.fsPath : mirrorToScratch(document);
+    if (!target) {
+      return [];
+    }
+    const to = document.languageId === "forgentex-fgai" ? "fgai" : "fgx";
+    try {
+      const formatted = await runFgx(
+        ["fmt", target, "--to", to],
+        workspaceRootFor(document.isUntitled ? undefined : document.uri.fsPath),
+        { quiet: false }
+      );
+      if (!formatted || formatted === document.getText()) {
+        return [];
+      }
+      const full = new vscode.Range(
+        document.positionAt(0),
+        document.positionAt(document.getText().length)
+      );
+      return [vscode.TextEdit.replace(full, formatted)];
+    } catch (error) {
+      return [];
+    } finally {
+      if (!onDisk && target) {
+        removeScratch(target);
+      }
+    }
+  }
+}
+
+class ForgentexCompletionProvider {
+  provideCompletionItems(document, position) {
+    const vocabulary = document.languageId === "forgentex-fgai"
+      ? AGENT_COMPLETIONS
+      : HUMAN_COMPLETIONS;
+    const line = document.lineAt(position.line).text.slice(0, position.character);
+
+    // Inside an `effects [...]` list only effect names are meaningful, and
+    // after a `bind <name>` only the binding modes are.
+    if (/effects\s*\[[^\]]*$/.test(line)) {
+      return vocabulary.effects.map((name) =>
+        completion(name, vscode.CompletionItemKind.Constant, "effect"));
+    }
+    if (/^\s*(?:bind|BIND)\s+[A-Za-z_][A-Za-z0-9_]*(?:@\d+)?\s+\w*$/.test(line)) {
+      return vocabulary.bindings.map((name) =>
+        completion(name, vscode.CompletionItemKind.EnumMember, "binding mode"));
+    }
+
+    return [
+      ...vocabulary.keywords.map((name) =>
+        completion(name, vscode.CompletionItemKind.Keyword, "keyword")),
+      ...vocabulary.types.map((name) =>
+        completion(name, vscode.CompletionItemKind.TypeParameter, "type")),
+      ...vocabulary.effects.map((name) =>
+        completion(name, vscode.CompletionItemKind.Constant, "effect"))
+    ];
+  }
+}
+
+function completion(label, kind, detail) {
+  const item = new vscode.CompletionItem(label, kind);
+  item.detail = `Forgentex ${detail}`;
+  return item;
 }
 
 async function showUnsafeArchitectureSlices() {
@@ -427,21 +693,34 @@ function workspaceRootFor(file) {
   return file ? path.dirname(file) : process.cwd();
 }
 
-function runFgx(args, cwd) {
+// `quiet` suppresses the error popup for background work such as check-on-type,
+// where a missing binary or a failing check would otherwise raise a modal on
+// every keystroke. Interactive commands leave it off and surface the message.
+function runFgx(args, cwd, options) {
   if (config().get("languageServiceMode") === "disabled") {
     return Promise.reject(new Error("Forgentex CLI language service is disabled."));
   }
   const command = config().get("fgxPath") || "fgx";
+  const quiet = Boolean(options && options.quiet);
   return new Promise((resolve, reject) => {
-    cp.execFile(command, args, { cwd }, (error, stdout, stderr) => {
+    cp.execFile(command, args, { cwd, maxBuffer: 32 * 1024 * 1024 }, (error, stdout, stderr) => {
+      // `fgx check` exits non-zero when a file has diagnostics, and still
+      // prints the JSON report. Treat parseable stdout as success so real
+      // diagnostics are published instead of reported as a failed command.
       if (error) {
+        if (stdout && stdout.trim().startsWith("{")) {
+          resolve(stdout);
+          return;
+        }
         reject(new Error(stderr || error.message));
         return;
       }
       resolve(stdout);
     });
   }).catch((error) => {
-    vscode.window.showErrorMessage(`Forgentex command failed: ${error.message}`);
+    if (!quiet) {
+      vscode.window.showErrorMessage(`Forgentex command failed: ${error.message}`);
+    }
     throw error;
   });
 }
@@ -470,5 +749,15 @@ function escapeHtml(value) {
 
 module.exports = {
   activate,
-  deactivate
+  deactivate,
+  // Internals exercised by test/extension-smoke.js, which drives the extension
+  // against the real fgx binary with a stubbed vscode module.
+  __test: {
+    checkDocument,
+    mirrorToScratch,
+    isSourceDocument,
+    ForgentexFormattingProvider,
+    ForgentexCompletionProvider,
+    ForgentexSymbolProvider
+  }
 };

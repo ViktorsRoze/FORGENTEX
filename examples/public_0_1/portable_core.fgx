@@ -1,0 +1,29 @@
+enum Mode:
+    Fast
+    Careful
+
+struct Pair:
+    left: i32
+    right: i32
+
+fn pair_score(pair: Pair) -> i32:
+    return pair.left + pair.right
+
+export fn public_score(limit: i32) -> i32:
+    let pair: Pair = Pair(2, 3)
+    let pair_value: i32 = pair_score(pair)
+    let mode: Mode = Mode::Fast
+    let score: i32 = 0
+    let i: i32 = 0
+    while i < limit:
+        if i == 2:
+            score = score + pair_value
+        else:
+            score = score + i
+        i = i + 1
+    match mode:
+        case Mode::Fast:
+            score = score + 10
+        case Mode::Careful:
+            score = score + 20
+    return score

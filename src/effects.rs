@@ -84,6 +84,7 @@ pub fn is_known_effect(effect: &str) -> bool {
             | "agent.patch"
             | "concurrency.task"
             | "concurrency.channel"
+            | "concurrency.timer"
             | "gpu.render"
             | "media.encode"
             | "memory.raw"
@@ -264,8 +265,19 @@ fn collect_expr_effects(
             for effect in builtin_effects(name) {
                 effects.insert(effect.to_string());
             }
-            if matches!(name.as_str(), "task_spawn" | "task_group_spawn") {
-                let callable = if name == "task_group_spawn" {
+            if matches!(
+                name.as_str(),
+                "task_spawn"
+                    | "task_spawn_parked"
+                    | "task_then"
+                    | "task_group_spawn"
+                    | "task_group_spawn_wait"
+                    | "task_spawn_on"
+            ) {
+                let callable = if matches!(
+                    name.as_str(),
+                    "task_spawn_on" | "task_then" | "task_group_spawn" | "task_group_spawn_wait"
+                ) {
                     args.get(1)
                 } else {
                     args.first()
@@ -308,6 +320,11 @@ fn collect_expr_effects(
             }
             collect_expr_effects(base, env, functions, structs, effects);
             collect_expr_effects(index, env, functions, structs, effects);
+        }
+        Expr::SliceRange { base, start, end } => {
+            collect_expr_effects(base, env, functions, structs, effects);
+            collect_expr_effects(start, env, functions, structs, effects);
+            collect_expr_effects(end, env, functions, structs, effects);
         }
     }
 }
@@ -390,6 +407,14 @@ fn expr_type(
         Expr::Index { base, .. } => expr_type(base, env, functions, structs)
             .element_type()
             .unwrap_or(Type::Unknown),
+        Expr::SliceRange { base, .. } => match expr_type(base, env, functions, structs) {
+            Type::Slice { mutable, elem } => Type::Slice { mutable, elem },
+            Type::Array { elem, .. } => Type::Slice {
+                mutable: false,
+                elem,
+            },
+            _ => Type::Unknown,
+        },
     }
 }
 
@@ -436,15 +461,54 @@ fn builtin_effects(name: &str) -> Vec<&'static str> {
     }
     match name {
         "task_spawn"
+        | "task_spawn_parked"
+        | "task_spawn_on"
+        | "task_then"
+        | "task_wait_on"
         | "task_await"
+        | "task_poll"
         | "task_cancel"
+        | "task_wake"
+        | "wake_token_new"
+        | "wake_token_signal"
+        | "wake_token_select"
+        | "readiness_arm_token"
+        | "readiness_arm_task"
         | "task_group_new"
         | "task_group_spawn"
+        | "task_group_spawn_wait"
+        | "task_group_await_next"
         | "task_group_await_all"
         | "task_group_cancel" => vec!["concurrency.task"],
-        "channel_new" | "channel_send" | "channel_recv" | "channel_close" => {
+        "wake_token_wait" | "task_wait" | "task_race" | "task_timeout" => {
+            vec!["concurrency.task", "concurrency.timer"]
+        }
+        "readiness_wait" | "readiness_wait_timeout" => vec![
+            "concurrency.task",
+            "concurrency.channel",
+            "concurrency.timer",
+        ],
+        "clock_new"
+        | "clock_now"
+        | "timer_after"
+        | "timer_cancel"
+        | "timer_reschedule"
+        | "timer_interval"
+        | "timer_interval_next"
+        | "timer_interval_cancel"
+        | "clock_advance" => {
+            vec!["concurrency.timer"]
+        }
+        "channel_new"
+        | "channel_send"
+        | "channel_recv"
+        | "channel_close"
+        | "readiness_arm_channel"
+        | "readiness_arm_channel_send" => {
             vec!["concurrency.channel"]
         }
+        "readiness_arm_file_read" => vec!["fs.read"],
+        "readiness_arm_file_create" => vec!["fs.write"],
         "alloc" | "alloc_buffer" | "realloc" | "free" | "push" => vec!["alloc"],
         "read_file" | "file_read" | "io_read" => vec!["io.read"],
         "write_file" | "file_write" | "io_write" => vec!["io.write"],
@@ -457,9 +521,26 @@ fn builtin_effects(name: &str) -> Vec<&'static str> {
         | "core_fs_write_text"
         | "core_runtime_fs_write_text" => vec!["fs.write"],
         "core_fs_copy_text" | "core_runtime_fs_copy_text" => vec!["fs.read", "fs.write"],
-        "core_io_read_file" => vec!["fs.read"],
-        "core_io_write_file" => vec!["fs.write"],
-        "core_io_copy_file" => vec!["fs.read", "fs.write"],
+        "core_io_read_file"
+        | "core_runtime_io_read_file"
+        | "core_io_read_bytes"
+        | "core_runtime_io_read_bytes"
+        | "core_io_list_dir"
+        | "core_runtime_io_list_dir" => vec!["fs.read"],
+        "core_io_write_file"
+        | "core_runtime_io_write_file"
+        | "core_io_write_file_atomic"
+        | "core_runtime_io_write_file_atomic"
+        | "core_io_write_bytes_atomic"
+        | "core_runtime_io_write_bytes_atomic"
+        | "core_io_publish_text_artifact"
+        | "core_runtime_io_publish_text_artifact"
+        | "core_io_publish_bytes_artifact"
+        | "core_runtime_io_publish_bytes_artifact" => vec!["fs.write"],
+        "core_io_copy_file"
+        | "core_runtime_io_copy_file"
+        | "core_io_copy_file_atomic"
+        | "core_runtime_io_copy_file_atomic" => vec!["fs.read", "fs.write"],
         "core_socket_tcp_request" => vec!["network.connect", "network.write", "network.read"],
         "core_socket_tcp_send" => vec!["network.connect", "network.write"],
         "core_hash_sha256" | "core_hash_hmac_sha256" => vec!["crypto.hash"],

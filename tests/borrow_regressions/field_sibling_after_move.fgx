@@ -1,0 +1,10 @@
+struct Packet:
+    value: u8
+
+struct Pair:
+    left: Packet
+    right: Packet
+
+fn ok(pair: Pair) -> u8:
+    let left: Packet = pair.left
+    return pair.right.value

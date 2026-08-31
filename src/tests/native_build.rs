@@ -3,6 +3,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::native_build::{build, run_with_path_contained_limited, ArtifactKind, ProcessLimits};
+#[cfg(windows)]
+use crate::native_build::{
+    run_with_path_timeout_limited, DEFAULT_CONTAINED_PROCESS_LIMIT, WINDOWS_JOB_UI_RESTRICTIONS,
+};
 
 use super::manifest_path;
 
@@ -162,4 +166,118 @@ fn contained_runner_does_not_leave_a_background_descendant() {
         "background descendant escaped process-tree containment"
     );
     let _ = fs::remove_dir_all(&out);
+}
+
+#[test]
+#[cfg(any(unix, windows))]
+fn contained_runner_rejects_combined_output_over_budget() {
+    #[cfg(windows)]
+    let argv = vec![
+        "powershell.exe".to_string(),
+        "-NoProfile".to_string(),
+        "-Command".to_string(),
+        "[Console]::Out.Write('x' * 4096)".to_string(),
+    ];
+
+    #[cfg(unix)]
+    let argv = vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        "i=0; while [ $i -lt 4096 ]; do printf x; i=$((i + 1)); done".to_string(),
+    ];
+
+    let limits = ProcessLimits {
+        output_bytes: 1024,
+        ..ProcessLimits::default()
+    };
+    let error = run_with_path_contained_limited(&argv, None, limits).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::FileTooLarge);
+    assert!(error
+        .to_string()
+        .contains("combined 1024-byte output limit"));
+}
+
+#[test]
+#[cfg(windows)]
+fn contained_runner_enforces_the_windows_active_process_limit() {
+    let out = out_dir("process_limit");
+    let _ = fs::remove_dir_all(&out);
+    fs::create_dir_all(&out).unwrap();
+    let child = out.join("child.ps1");
+    let parent = out.join("parent.ps1");
+    fs::write(&child, "Start-Sleep -Seconds 5\n").unwrap();
+    let escaped_child = child.display().to_string().replace('\'', "''");
+    fs::write(
+        &parent,
+        format!(
+            "$ErrorActionPreference = 'Stop'\n1..4 | ForEach-Object {{ Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', '{escaped_child}') -WindowStyle Hidden | Out-Null }}\n"
+        ),
+    )
+    .unwrap();
+    let argv = vec![
+        "powershell.exe".to_string(),
+        "-NoProfile".to_string(),
+        "-ExecutionPolicy".to_string(),
+        "Bypass".to_string(),
+        "-File".to_string(),
+        parent.display().to_string(),
+    ];
+    let limits = ProcessLimits {
+        active_processes: Some(2),
+        ..ProcessLimits::default()
+    };
+    let output = run_with_path_contained_limited(&argv, None, limits).unwrap();
+    assert!(
+        !output.status.success(),
+        "process fan-out unexpectedly exceeded the two-process Job Object limit"
+    );
+    let _ = fs::remove_dir_all(&out);
+}
+
+#[test]
+#[cfg(windows)]
+fn contained_runner_reports_windows_peak_process_count() {
+    let argv = vec![
+        "powershell.exe".to_string(),
+        "-NoProfile".to_string(),
+        "-Command".to_string(),
+        "Start-Sleep -Milliseconds 100".to_string(),
+    ];
+    let run = run_with_path_timeout_limited(
+        &argv,
+        None,
+        Duration::from_secs(2),
+        ProcessLimits::default(),
+    )
+    .unwrap()
+    .expect("contained process should finish");
+    assert!(run.output.status.success(), "output: {:?}", run.output);
+    let peak = run
+        .peak_tree_processes
+        .expect("Windows Job Object must report active processes");
+    assert!((1..=DEFAULT_CONTAINED_PROCESS_LIMIT).contains(&peak));
+}
+
+#[test]
+#[cfg(windows)]
+fn contained_runner_installs_complete_windows_ui_restrictions() {
+    let argv = vec![
+        "powershell.exe".to_string(),
+        "-NoProfile".to_string(),
+        "-Command".to_string(),
+        "Start-Sleep -Milliseconds 50".to_string(),
+    ];
+    let run = run_with_path_timeout_limited(
+        &argv,
+        None,
+        Duration::from_secs(2),
+        ProcessLimits::default(),
+    )
+    .unwrap()
+    .expect("contained process should finish");
+    assert!(run.output.status.success(), "output: {:?}", run.output);
+    assert_eq!(
+        run.windows_ui_restrictions,
+        Some(WINDOWS_JOB_UI_RESTRICTIONS)
+    );
 }

@@ -55,9 +55,7 @@ impl CapsuleWorker {
         let body = crate::python_run::dedent(&capsule.code);
         let entry = crate::python_run::find_entry(&body)
             .ok_or_else(|| "no top-level def found in capsule body".to_string())?;
-        let (py_name, _version) = crate::python_run::detect_python().ok_or_else(|| {
-            "no host python found (looked for $PYTHON, python3, python)".to_string()
-        })?;
+        let (py_name, _version) = crate::python_run::detect_python_for(capsule)?;
         // The read-eval loop: one JSON request per line, one enveloped JSON
         // response per line, flushed. Exceptions become {"err": …} responses.
         let driver = format!(

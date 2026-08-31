@@ -1,0 +1,137 @@
+# visual.2: final-profile scene -> raw RGB -> governed PPM proof.
+
+share final_seed: i32 = 29
+
+@repr(C)
+struct ScenePlan:
+    width: i32
+    height: i32
+    seed: i32
+    glyph_count: i32
+
+share scene_plan: ScenePlan
+share raw_frame: Vec[u8]
+share encoded_final: Vec[u8]
+
+foreign plan_final c version "c11" effects [cpu]:
+    input seed: i32
+    output scene: ScenePlan
+    sandbox "fs.none"
+    bind final_seed read
+    bind scene_plan rw
+    code:
+        #include "types.h"
+
+        ScenePlan plan_final(int32_t seed) {
+            ScenePlan scene;
+            scene.width = 64;
+            scene.height = 36;
+            scene.seed = seed;
+            scene.glyph_count = 48;
+            return scene;
+        }
+
+foreign render_rgb_final c version "c11" effects [alloc, cpu.render]:
+    input scene: ScenePlan
+    output frame: Vec[u8]
+    sandbox "fs.none"
+    sandbox "limit.wall_ms 5000"
+    sandbox "limit.cpu_ms 3000"
+    sandbox "limit.mem_mb 128"
+    sandbox "artifact.media_type application/x-forgentex-rgb"
+    sandbox "artifact.max_bytes 33554432"
+    sandbox "render.profile final"
+    sandbox "render.seed_field seed"
+    bind scene_plan read
+    bind raw_frame rw
+    code:
+        #include "types.h"
+        #include <stdlib.h>
+
+        FgxOwnedU8 render_rgb_final(ScenePlan scene) {
+            FgxOwnedU8 result = { NULL, 0, 0 };
+            if (scene.width <= 0 || scene.height <= 0) return result;
+            size_t pixels = (size_t)scene.width * (size_t)scene.height;
+            if (pixels > (SIZE_MAX - 8) / 3) return result;
+            result.len = 8 + pixels * 3;
+            result.capacity = result.len;
+            result.ptr = (uint8_t *)malloc(result.len);
+            if (result.ptr == NULL) {
+                result.len = 0;
+                result.capacity = 0;
+                return result;
+            }
+            uint32_t width = (uint32_t)scene.width;
+            uint32_t height = (uint32_t)scene.height;
+            for (size_t i = 0; i < 4; ++i) {
+                result.ptr[i] = (uint8_t)(width >> (i * 8));
+                result.ptr[4 + i] = (uint8_t)(height >> (i * 8));
+            }
+            for (int32_t y = 0; y < scene.height; ++y) {
+                for (int32_t x = 0; x < scene.width; ++x) {
+                    size_t offset = 8 + ((size_t)y * (size_t)scene.width + (size_t)x) * 3;
+                    result.ptr[offset] = (uint8_t)(x * 5 + scene.seed * 11);
+                    result.ptr[offset + 1] = (uint8_t)(y * 7 + scene.glyph_count * 3);
+                    result.ptr[offset + 2] = (uint8_t)((x + y) * 13 + scene.seed);
+                }
+            }
+            return result;
+        }
+
+        void render_rgb_final_free(uint8_t *ptr, size_t len, size_t capacity) {
+            (void)len;
+            (void)capacity;
+            free(ptr);
+        }
+
+foreign encode_ppm_final c version "c11" effects [alloc, media.encode, fs.write]:
+    input frame: &[u8]
+    output image: Vec[u8]
+    sandbox "fs.write target/render-final"
+    sandbox "limit.wall_ms 5000"
+    sandbox "limit.cpu_ms 3000"
+    sandbox "limit.mem_mb 128"
+    sandbox "artifact.media_type image/x-portable-pixmap"
+    sandbox "artifact.max_bytes 33554432"
+    sandbox "artifact.path target/render-final/visualizer-final.ppm"
+    sandbox "encode.profile ppm"
+    bind raw_frame read
+    bind encoded_final rw
+    code:
+        #include "types.h"
+        #include <stdio.h>
+        #include <stdlib.h>
+        #include <string.h>
+
+        FgxOwnedU8 encode_ppm_final(const uint8_t *frame, size_t frame_len) {
+            FgxOwnedU8 result = { NULL, 0, 0 };
+            if (frame == NULL || frame_len < 8) return result;
+            uint32_t width = 0;
+            uint32_t height = 0;
+            for (size_t i = 0; i < 4; ++i) {
+                width |= (uint32_t)frame[i] << (i * 8);
+                height |= (uint32_t)frame[4 + i] << (i * 8);
+            }
+            if (width == 0 || height == 0) return result;
+            size_t pixels = (size_t)width * (size_t)height;
+            if (pixels > (SIZE_MAX - 8) / 3 || frame_len != 8 + pixels * 3) return result;
+            int header_len = snprintf(NULL, 0, "P6\n%u %u\n255\n", width, height);
+            if (header_len <= 0 || pixels > (SIZE_MAX - (size_t)header_len) / 3) return result;
+            result.len = (size_t)header_len + pixels * 3;
+            result.capacity = result.len;
+            result.ptr = (uint8_t *)malloc(result.len);
+            if (result.ptr == NULL) {
+                result.len = 0;
+                result.capacity = 0;
+                return result;
+            }
+            snprintf((char *)result.ptr, (size_t)header_len + 1, "P6\n%u %u\n255\n", width, height);
+            memcpy(result.ptr + (size_t)header_len, frame + 8, pixels * 3);
+            return result;
+        }
+
+        void encode_ppm_final_free(uint8_t *ptr, size_t len, size_t capacity) {
+            (void)len;
+            (void)capacity;
+            free(ptr);
+        }

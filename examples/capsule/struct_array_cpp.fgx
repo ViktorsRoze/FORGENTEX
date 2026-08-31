@@ -1,0 +1,29 @@
+# Native data boundaries: a fixed-size array of reviewed structs crosses C++ by value.
+
+@repr(C)
+struct NativePoint:
+    x: i16
+    y: i16
+
+@repr(C)
+struct PointBatch:
+    id: i32
+    points: [NativePoint; 3]
+
+foreign shift_points_cpp cpp version "c++17":
+    input batch: PointBatch
+    output shifted: PointBatch
+    sandbox "fs.none"
+    code:
+        #include "types.h"
+
+        extern "C" PointBatch shift_points_cpp(PointBatch batch) {
+            for (size_t index = 0; index < 3; ++index) {
+                batch.points[index].x += static_cast<int16_t>(index + 1);
+                batch.points[index].y -= static_cast<int16_t>(index + 1);
+            }
+            return batch;
+        }
+
+fn shift_points(batch: PointBatch) -> PointBatch:
+    return shift_points_cpp(batch)

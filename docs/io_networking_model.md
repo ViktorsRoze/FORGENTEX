@@ -50,6 +50,27 @@ policies, and least-privilege review checks without changing the API shape.
 - `core_fs_write_text(scope: str, path: str, contents: str) -> Result[usize,str] effects [fs.write]`
 - `core_fs_copy_text(scope: str, source: str, dest: str) -> Result[usize,str] effects [fs.read, fs.write]`
 
+`core.io` is the real hosted filesystem boundary used by `fgx io-run` and
+`fgx app-run`:
+
+- `core_io_read_file(path: str) -> str effects [fs.read]`
+- `core_io_read_bytes(path: str) -> Vec[u8] effects [fs.read]`
+- `core_io_write_file(path: str, contents: str) -> usize effects [fs.write]`
+- `core_io_write_file_atomic(path: str, contents: str) -> usize effects [fs.write]`
+- `core_io_write_bytes_atomic(path: str, bytes: Vec[u8]) -> usize effects [fs.write]`
+- `core_io_publish_text_artifact(name: str, path: Path, contents: str) -> usize effects [fs.write]`
+- `core_io_publish_bytes_artifact(name: str, path: Path, bytes: Vec[u8]) -> usize effects [fs.write]`
+- `core_io_copy_file(source: str, destination: str) -> usize effects [fs.read, fs.write]`
+- `core_io_copy_file_atomic(source: str, destination: str) -> usize effects [fs.read, fs.write]`
+- `core_io_list_dir(path: Path) -> Vec[DirEntry] effects [fs.read]`
+
+Manifest-backed calls are package-relative, scope checked, and byte budgeted.
+Directory listings additionally require a cumulative manifest entry limit and
+return sorted typed paths. Atomic variants are no-clobber publication
+operations. Artifact variants additionally require a named
+`[application.artifact.<name>]` contract and record exact size/hash/media
+evidence in the application report.
+
 `core.net`:
 
 - `core_net_http_get(scope: str, url: str) -> Result[str,str] effects [network.connect, network.read, network.http]`

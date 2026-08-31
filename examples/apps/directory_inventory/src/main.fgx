@@ -1,0 +1,6 @@
+import core.io
+
+fn inventory_count(directory: str) -> usize effects [fs.read]:
+    let path: Path = core_path_parse(directory)
+    let entries: Vec[DirEntry] = core_io_list_dir(path)
+    return entries.len

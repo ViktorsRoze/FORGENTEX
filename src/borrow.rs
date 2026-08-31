@@ -496,6 +496,11 @@ impl RegionBuilder {
                 }
                 self.collect_expr_uses(index, node);
             }
+            Expr::SliceRange { base, start, end } => {
+                self.collect_expr_uses(base, node);
+                self.collect_expr_uses(start, node);
+                self.collect_expr_uses(end, node);
+            }
             Expr::Field { base, .. } => self.collect_assign_target(base, node),
             Expr::Cast { expr, .. } | Expr::Unary { expr, .. } => {
                 self.collect_assign_target(expr, node)
@@ -545,6 +550,14 @@ impl RegionBuilder {
                 self.collect_expr_uses(base, node);
                 self.collect_expr_uses(index, node);
             }
+            Expr::SliceRange { base, start, end } => {
+                if let Some(root) = self.borrow_root(base) {
+                    self.add_use(&root, "range_read", &expr_place(base), node);
+                }
+                self.collect_expr_uses(base, node);
+                self.collect_expr_uses(start, node);
+                self.collect_expr_uses(end, node);
+            }
             Expr::Int(_)
             | Expr::Float(_)
             | Expr::Bool(_)
@@ -563,7 +576,9 @@ impl RegionBuilder {
         match expr {
             Expr::Lambda { .. } => None,
             Expr::Var(name) => self.bindings.get(name).map(|binding| binding.root.clone()),
-            Expr::Field { base, .. } | Expr::Index { base, .. } => self.borrow_root(base),
+            Expr::Field { base, .. } | Expr::Index { base, .. } | Expr::SliceRange { base, .. } => {
+                self.borrow_root(base)
+            }
             Expr::Cast { expr, .. } | Expr::Unary { expr, .. } => self.borrow_root(expr),
             Expr::Call { .. }
             | Expr::TraitConst { .. }
@@ -702,6 +717,12 @@ fn expr_place(expr: &Expr) -> String {
         Expr::Cast { ty, expr } => format!("{} as {}", expr_place(expr), ty.to_human()),
         Expr::Field { base, field } => format!("{}.{}", expr_place(base), field),
         Expr::Index { base, index } => format!("{}[{}]", expr_place(base), expr_place(index)),
+        Expr::SliceRange { base, start, end } => format!(
+            "{}[{} .. {}]",
+            expr_place(base),
+            expr_place(start),
+            expr_place(end)
+        ),
     }
 }
 

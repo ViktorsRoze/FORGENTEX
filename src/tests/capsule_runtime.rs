@@ -43,6 +43,71 @@ const SPIN_C_LIVE: &str = "foreign spin_forever c version \"c11\":\n    output r
 // a typed capsule error rather than terminating the Forgentex interpreter.
 const ABORT_C_LIVE: &str = "foreign abort_now c version \"c11\":\n    output result: i32\n    sandbox \"fs.none\"\n    code:\n        #include <stdlib.h>\n        int abort_now(void) { abort(); }\n\nfn run_abort() -> i32:\n    return abort_now()\n";
 
+const AMBIENT_AUTHORITY_C_LIVE: &str = r#"foreign ambient_authority c version "c11":
+    output removed: i32
+    sandbox "fs.none"
+    code:
+        #include <stdio.h>
+        #include <stdlib.h>
+        #ifdef _WIN32
+        #include <windows.h>
+        #endif
+
+        int ambient_authority(void) {
+            int removed = 0;
+            #ifdef _WIN32
+            if (getenv("USERPROFILE") == NULL && getenv("HOMEPATH") == NULL) {
+                removed |= 1;
+            }
+            #else
+            if (getenv("HOME") == NULL) {
+                removed |= 1;
+            }
+            #endif
+            FILE *marker = fopen(".forgentex-native-workspace-probe", "rb");
+            if (marker == NULL) {
+                removed |= 2;
+            } else {
+                fclose(marker);
+            }
+            #ifdef _WIN32
+            char system_dir[MAX_PATH];
+            char command[MAX_PATH + 32];
+            STARTUPINFOA startup = {0};
+            PROCESS_INFORMATION process = {0};
+            startup.cb = sizeof(startup);
+            UINT length = GetSystemDirectoryA(system_dir, MAX_PATH);
+            if (length > 0 && length < MAX_PATH) {
+                snprintf(
+                    command, sizeof(command),
+                    "\"%s\\cmd.exe\" /c echo escaped>.forgentex-native-child-escaped",
+                    system_dir
+                );
+                BOOL spawned = CreateProcessA(
+                    NULL, command, NULL, NULL, FALSE, CREATE_NO_WINDOW,
+                    NULL, NULL, &startup, &process
+                );
+                if (spawned) {
+                    WaitForSingleObject(process.hProcess, 2000);
+                    CloseHandle(process.hThread);
+                    CloseHandle(process.hProcess);
+                }
+                FILE *escaped = fopen(".forgentex-native-child-escaped", "rb");
+                if (escaped == NULL) {
+                    removed |= 4;
+                } else {
+                    fclose(escaped);
+                    remove(".forgentex-native-child-escaped");
+                }
+            }
+            #endif
+            return removed;
+        }
+
+fn verify_ambient_authority() -> i32:
+    return ambient_authority()
+"#;
+
 const CLAMP_RUST_LIVE: &str = include_str!("../../examples/capsule/clamp_rust.fgx");
 const CLAMP_ZIG_LIVE: &str = include_str!("../../examples/capsule/clamp_zig.fgx");
 const SUM_I16_ZIG_LIVE: &str = include_str!("../../examples/capsule/sum_i16_zig.fgx");
@@ -58,9 +123,43 @@ const OWNED_I16_ZIG_LIVE: &str = include_str!("../../examples/capsule/make_sampl
 const OWNED_I32_C_LIVE: &str = include_str!("../../examples/capsule/make_values_c.fgx");
 const OWNED_I32_RUST_LIVE: &str = include_str!("../../examples/capsule/make_values_rust.fgx");
 const OWNED_I32_ZIG_LIVE: &str = include_str!("../../examples/capsule/make_values_zig.fgx");
+const OWNED_U64_C_LIVE: &str = include_str!("../../examples/capsule/make_ids_u64_c.fgx");
+const OWNED_U64_RUST_LIVE: &str = include_str!("../../examples/capsule/make_ids_u64_rust.fgx");
+const OWNED_U64_ZIG_LIVE: &str = include_str!("../../examples/capsule/make_ids_u64_zig.fgx");
+const OWNED_ISIZE_C_LIVE: &str = include_str!("../../examples/capsule/make_offsets_isize_c.fgx");
+const OWNED_ISIZE_RUST_LIVE: &str =
+    include_str!("../../examples/capsule/make_offsets_isize_rust.fgx");
+const OWNED_ISIZE_ZIG_LIVE: &str =
+    include_str!("../../examples/capsule/make_offsets_isize_zig.fgx");
+const OWNED_USIZE_C_LIVE: &str = include_str!("../../examples/capsule/make_sizes_usize_c.fgx");
+const OWNED_USIZE_CPP_LIVE: &str = include_str!("../../examples/capsule/make_sizes_usize_cpp.fgx");
+const OWNED_USIZE_RUST_LIVE: &str =
+    include_str!("../../examples/capsule/make_sizes_usize_rust.fgx");
+const OWNED_USIZE_ZIG_LIVE: &str = include_str!("../../examples/capsule/make_sizes_usize_zig.fgx");
+const OWNED_F32_C_LIVE: &str = include_str!("../../examples/capsule/make_gains_f32_c.fgx");
+const OWNED_F32_RUST_LIVE: &str = include_str!("../../examples/capsule/make_gains_f32_rust.fgx");
+const OWNED_F32_ZIG_LIVE: &str = include_str!("../../examples/capsule/make_gains_f32_zig.fgx");
+const OWNED_F64_C_LIVE: &str = include_str!("../../examples/capsule/make_precise_f64_c.fgx");
+const OWNED_F64_RUST_LIVE: &str = include_str!("../../examples/capsule/make_precise_f64_rust.fgx");
+const OWNED_F64_ZIG_LIVE: &str = include_str!("../../examples/capsule/make_precise_f64_zig.fgx");
 const OWNED_STRING_C_LIVE: &str = include_str!("../../examples/capsule/make_greeting_c.fgx");
+const OWNED_STRING_CPP_LIVE: &str = include_str!("../../examples/capsule/make_greeting_cpp.fgx");
 const OWNED_STRING_RUST_LIVE: &str = include_str!("../../examples/capsule/make_greeting_rust.fgx");
 const OWNED_STRING_ZIG_LIVE: &str = include_str!("../../examples/capsule/make_greeting_zig.fgx");
+const BORROWED_STRING_C_LIVE: &str = include_str!("../../examples/capsule/checksum_utf8_c.fgx");
+const BORROWED_STRING_CPP_LIVE: &str = include_str!("../../examples/capsule/checksum_utf8_cpp.fgx");
+const BORROWED_STRING_RUST_LIVE: &str =
+    include_str!("../../examples/capsule/checksum_utf8_rust.fgx");
+const BORROWED_STRING_ZIG_LIVE: &str = include_str!("../../examples/capsule/checksum_utf8_zig.fgx");
+const MUT_STRING_C_LIVE: &str = include_str!("../../examples/capsule/title_utf8_c.fgx");
+const MUT_STRING_CPP_LIVE: &str = include_str!("../../examples/capsule/title_utf8_cpp.fgx");
+const MUT_STRING_RUST_LIVE: &str = include_str!("../../examples/capsule/title_utf8_rust.fgx");
+const MUT_STRING_ZIG_LIVE: &str = include_str!("../../examples/capsule/title_utf8_zig.fgx");
+const GROW_STRING_C_LIVE: &str = include_str!("../../examples/capsule/grow_utf8_c.fgx");
+const GROW_STRING_CPP_LIVE: &str = include_str!("../../examples/capsule/grow_utf8_cpp.fgx");
+const GROW_STRING_RUST_LIVE: &str = include_str!("../../examples/capsule/grow_utf8_rust.fgx");
+const GROW_STRING_ZIG_LIVE: &str = include_str!("../../examples/capsule/grow_utf8_zig.fgx");
+const ATOMIC_MUTABLE_C_LIVE: &str = include_str!("../../examples/capsule/atomic_mutable_c.fgx");
 const STRUCT_RUST_LIVE: &str = include_str!("../../examples/capsule/render_params_rust.fgx");
 const STRUCT_ZIG_LIVE: &str = include_str!("../../examples/capsule/render_params_zig.fgx");
 
@@ -147,10 +246,30 @@ fn live_c_capsule_call_returns_a_real_result() {
         .native
         .as_ref()
         .expect("native C calls must record a receipt");
-    assert_eq!(receipt.schema, "forgentex.native_receipt.v1");
+    assert_eq!(receipt.schema, crate::ffi::NATIVE_RECEIPT_SCHEMA);
     assert_eq!(receipt.boundary_hash.len(), 16);
     assert!(receipt.toolchain.contains("gcc") || receipt.toolchain.contains("clang"));
-    assert!(receipt.wall_limit_ms.is_none());
+    assert_eq!(
+        receipt.wall_limit_ms,
+        Some(u128::from(crate::ffi::DEFAULT_NATIVE_WALL_MS))
+    );
+    assert_eq!(receipt.wall_limit_source, "default");
+    assert_eq!(
+        receipt.compile_wall_limit_ms,
+        crate::ffi::NATIVE_COMPILE_WALL_MS
+    );
+    assert_eq!(receipt.compile_containment, "process_tree");
+    assert_eq!(
+        receipt.cpu_limit_ms,
+        Some(crate::ffi::DEFAULT_NATIVE_CPU_MS)
+    );
+    assert_eq!(receipt.cpu_limit_source, "default");
+    assert_eq!(
+        receipt.memory_limit_bytes,
+        Some(crate::ffi::DEFAULT_NATIVE_MEMORY_BYTES)
+    );
+    assert_eq!(receipt.memory_limit_source, "default");
+    assert_eq!(receipt.output_limit_source, "default");
 }
 
 #[test]
@@ -200,6 +319,8 @@ fn warm_native_calls_reuse_compilation_but_keep_fresh_contained_processes() {
     assert!(second.runner_reused);
     assert_eq!(first.containment, "process_tree");
     assert_eq!(second.containment, "process_tree");
+    assert_eq!(first.runner_execution_model, "fresh_process_per_call");
+    assert_eq!(second.runner_execution_model, "fresh_process_per_call");
 }
 
 #[test]
@@ -514,12 +635,492 @@ fn live_c_rust_and_zig_owned_i32_outputs_return_typed_arrays() {
 }
 
 #[test]
-fn live_c_rust_and_zig_owned_strings_return_validated_language_values() {
+fn live_c_rust_and_zig_owned_u64_outputs_preserve_the_full_range() {
+    let cases = [
+        (
+            OWNED_U64_C_LIVE,
+            "ids_from_c",
+            crate::native_build::detect_toolchain().is_some(),
+        ),
+        (
+            OWNED_U64_RUST_LIVE,
+            "ids_from_rust",
+            crate::native_build::detect_rust_toolchain().is_some(),
+        ),
+        (
+            OWNED_U64_ZIG_LIVE,
+            "ids_from_zig",
+            crate::native_build::detect_zig_toolchain().is_some(),
+        ),
+    ];
+    let expected = Some(Value::Array(vec![
+        Value::Int(3_000_000_000),
+        Value::Int(5_000_000_000),
+        Value::Int(7_000_000_000),
+        Value::UInt(u64::MAX),
+    ]));
+    for (source, entry, available) in cases {
+        if !available {
+            continue;
+        }
+        let program = parse_human(source).unwrap();
+        let (value, calls, error) = run_entry_with_capsules(&program, entry, vec![Value::Int(4)]);
+        assert!(error.is_none(), "{entry}: {error:?}");
+        assert_eq!(value, expected);
+        assert_eq!(
+            calls[0]
+                .native
+                .as_ref()
+                .and_then(|receipt| receipt.owned_output_bytes),
+            Some(32)
+        );
+        assert!(calls[0]
+            .native
+            .as_ref()
+            .is_some_and(|receipt| receipt.artifact.is_none()));
+    }
+}
+
+#[test]
+fn live_owned_record_outputs_restore_record_tags_and_exact_unsigned_fields() {
+    let cases = [
+        (
+            include_str!("../../examples/capsule/make_records_c.fgx"),
+            "records_c",
+            crate::native_build::detect_toolchain().is_some(),
+        ),
+        (
+            include_str!("../../examples/capsule/make_records_cpp.fgx"),
+            "records_cpp",
+            crate::native_build::detect_cpp_toolchain().is_some(),
+        ),
+        (
+            include_str!("../../examples/capsule/make_records_rust.fgx"),
+            "records_rust",
+            crate::native_build::detect_rust_toolchain().is_some(),
+        ),
+        (
+            include_str!("../../examples/capsule/make_records_zig.fgx"),
+            "records_zig",
+            crate::native_build::detect_zig_toolchain().is_some(),
+        ),
+    ];
+    for (source, entry, available) in cases {
+        if !available {
+            continue;
+        }
+        let program = parse_human(source).unwrap();
+        let (value, calls, error) = run_entry_with_capsules(&program, entry, Vec::new());
+        assert!(error.is_none(), "{entry}: {error:?}");
+        let Some(Value::Array(records)) = value else {
+            panic!("{entry}: expected an aggregate array");
+        };
+        assert_eq!(records.len(), 2, "{entry}");
+        for record in &records {
+            assert!(
+                matches!(record, Value::Struct(name, _) if name == "NativeRecord"),
+                "{entry}: {record:?}"
+            );
+        }
+        let Value::Struct(_, second) = &records[1] else {
+            unreachable!();
+        };
+        assert_eq!(second.get("id"), Some(&Value::UInt(u64::MAX)), "{entry}");
+        assert_eq!(
+            calls[0]
+                .native
+                .as_ref()
+                .and_then(|receipt| receipt.owned_output_bytes),
+            Some(48),
+            "{entry}"
+        );
+        assert!(calls[0]
+            .native
+            .as_ref()
+            .is_some_and(|receipt| receipt.artifact.is_none()));
+    }
+}
+
+#[test]
+fn live_record_slice_inputs_are_borrowed_copies_across_all_native_languages() {
+    let cases = [
+        (
+            include_str!("../../examples/capsule/record_slice_c.fgx"),
+            "last_id_c",
+            crate::native_build::detect_toolchain().is_some(),
+        ),
+        (
+            include_str!("../../examples/capsule/record_slice_cpp.fgx"),
+            "last_id_cpp",
+            crate::native_build::detect_cpp_toolchain().is_some(),
+        ),
+        (
+            include_str!("../../examples/capsule/record_slice_rust.fgx"),
+            "last_id_rust",
+            crate::native_build::detect_rust_toolchain().is_some(),
+        ),
+        (
+            include_str!("../../examples/capsule/record_slice_zig.fgx"),
+            "last_id_zig",
+            crate::native_build::detect_zig_toolchain().is_some(),
+        ),
+    ];
+    let record = |id, delta, score| {
+        Value::Struct(
+            "InputRecord".to_string(),
+            [
+                ("id".to_string(), Value::UInt(id)),
+                ("delta".to_string(), Value::Int(delta)),
+                ("score".to_string(), Value::Float(score)),
+            ]
+            .into_iter()
+            .collect(),
+        )
+    };
+    for (source, entry, available) in cases {
+        if !available {
+            continue;
+        }
+        let program = parse_human(source).unwrap();
+        let records = Value::Array(vec![record(7, -3, 1.25), record(u64::MAX, 9, -2.5)]);
+        let (value, calls, error) = run_entry_with_capsules(&program, entry, vec![records]);
+        assert!(error.is_none(), "{entry}: {error:?}");
+        assert_eq!(value, Some(Value::UInt(u64::MAX)), "{entry}");
+        assert_eq!(
+            calls[0]
+                .native
+                .as_ref()
+                .and_then(|receipt| receipt.borrowed_input_bytes),
+            Some(48),
+            "{entry}"
+        );
+    }
+}
+
+#[test]
+fn live_mutable_record_slices_copy_back_across_all_native_languages() {
+    let cases = [
+        (
+            include_str!("../../examples/capsule/mutate_records_c.fgx"),
+            "mutate_then_last_c",
+            crate::native_build::detect_toolchain().is_some(),
+        ),
+        (
+            include_str!("../../examples/capsule/mutate_records_cpp.fgx"),
+            "mutate_then_last_cpp",
+            crate::native_build::detect_cpp_toolchain().is_some(),
+        ),
+        (
+            include_str!("../../examples/capsule/mutate_records_rust.fgx"),
+            "mutate_then_last_rust",
+            crate::native_build::detect_rust_toolchain().is_some(),
+        ),
+        (
+            include_str!("../../examples/capsule/mutate_records_zig.fgx"),
+            "mutate_then_last_zig",
+            crate::native_build::detect_zig_toolchain().is_some(),
+        ),
+    ];
+    let record = |id, delta, score| {
+        Value::Struct(
+            "MutableRecord".to_string(),
+            [
+                ("id".to_string(), Value::UInt(id)),
+                ("delta".to_string(), Value::Int(delta)),
+                ("score".to_string(), Value::Float(score)),
+            ]
+            .into_iter()
+            .collect(),
+        )
+    };
+    for (source, entry, available) in cases {
+        if !available {
+            continue;
+        }
+        let program = parse_human(source).unwrap();
+        assert!(crate::typecheck::check(&program).is_empty(), "{entry}");
+        let records = Value::Array(vec![record(7, 3, 1.25), record(9, -4, -2.5)]);
+        let (value, calls, error) = run_entry_with_capsules(&program, entry, vec![records]);
+        assert!(error.is_none(), "{entry}: {error:?}");
+        assert_eq!(value, Some(Value::UInt(u64::MAX)), "{entry}");
+        assert_eq!(
+            calls[0]
+                .native
+                .as_ref()
+                .and_then(|receipt| receipt.borrowed_input_bytes),
+            Some(48),
+            "{entry}"
+        );
+    }
+}
+
+#[test]
+fn json_entry_inputs_restore_record_tags_inside_typed_slices() {
+    let program = parse_human(
+        "@repr(C)\nstruct InputRecord:\n    id: u64\n    delta: i32\n\nfn last_id(records: &[InputRecord]) -> u64:\n    return records[1].id\n",
+    )
+    .unwrap();
+    let result = run_entry_json(
+        &program,
+        "last_id",
+        "[[{\"id\":7,\"delta\":-3},{\"id\":18446744073709551615,\"delta\":9}]]",
+    )
+    .unwrap();
+    assert!(
+        result.contains("\"return\": 18446744073709551615"),
+        "{result}"
+    );
+    assert_eq!(result.matches("\"$struct\": \"InputRecord\"").count(), 2);
+}
+
+#[test]
+fn unsigned_runtime_carrier_roundtrips_json_and_a_live_scalar_boundary() {
+    let pure = parse_human(
+        "fn keep_u64(value: u64) -> u64:\n    return value\n\nfn decrement_u64(value: u64) -> u64:\n    return value - 1\n",
+    )
+    .unwrap();
+    let run = run_entry_json(&pure, "keep_u64", "[18446744073709551615]").unwrap();
+    assert!(run.contains("\"return\": 18446744073709551615"), "{run}");
+    let decremented = run_entry_json(&pure, "decrement_u64", "[18446744073709551615]").unwrap();
+    assert!(
+        decremented.contains("\"return\": 18446744073709551614"),
+        "{decremented}"
+    );
+
+    let cases = [
+        (
+            "foreign echo_u64_c c version \"c11\":\n    input value: u64\n    output result: u64\n    sandbox \"fs.none\"\n    code:\n        #include <stdint.h>\n        uint64_t echo_u64_c(uint64_t value) { return value; }\n\nfn echo_u64_c_live(value: u64) -> u64:\n    return echo_u64_c(value)\n",
+            "echo_u64_c_live",
+            crate::native_build::detect_toolchain().is_some(),
+        ),
+        (
+            "foreign echo_u64_cpp cpp version \"c++17\":\n    input value: u64\n    output result: u64\n    sandbox \"fs.none\"\n    code:\n        #include <cstdint>\n        extern \"C\" std::uint64_t echo_u64_cpp(std::uint64_t value) { return value; }\n\nfn echo_u64_cpp_live(value: u64) -> u64:\n    return echo_u64_cpp(value)\n",
+            "echo_u64_cpp_live",
+            crate::native_build::detect_cpp_toolchain().is_some(),
+        ),
+        (
+            "foreign echo_u64_rust rust version \"2021\":\n    input value: u64\n    output result: u64\n    sandbox \"fs.none\"\n    code:\n        #[unsafe(no_mangle)]\n        pub extern \"C\" fn echo_u64_rust(value: u64) -> u64 { value }\n\nfn echo_u64_rust_live(value: u64) -> u64:\n    return echo_u64_rust(value)\n",
+            "echo_u64_rust_live",
+            crate::native_build::detect_rust_toolchain().is_some(),
+        ),
+        (
+            "foreign echo_u64_zig zig version \"0.14\":\n    input value: u64\n    output result: u64\n    sandbox \"fs.none\"\n    code:\n        pub export fn echo_u64_zig(value: u64) u64 { return value; }\n\nfn echo_u64_zig_live(value: u64) -> u64:\n    return echo_u64_zig(value)\n",
+            "echo_u64_zig_live",
+            crate::native_build::detect_zig_toolchain().is_some(),
+        ),
+    ];
+    for (source, entry, available) in cases {
+        if !available {
+            continue;
+        }
+        let program = parse_human(source).unwrap();
+        let (value, calls, error) =
+            run_entry_with_capsules(&program, entry, vec![Value::UInt(u64::MAX)]);
+        assert!(error.is_none(), "{entry}: {error:?}");
+        assert_eq!(value, Some(Value::UInt(u64::MAX)), "{entry}");
+        assert_eq!(calls.len(), 1, "{entry}");
+    }
+}
+
+#[test]
+fn live_c_rust_and_zig_owned_isize_outputs_return_pointer_width_arrays() {
+    let cases = [
+        (
+            OWNED_ISIZE_C_LIVE,
+            "offsets_from_c",
+            crate::native_build::detect_toolchain().is_some(),
+        ),
+        (
+            OWNED_ISIZE_RUST_LIVE,
+            "offsets_from_rust",
+            crate::native_build::detect_rust_toolchain().is_some(),
+        ),
+        (
+            OWNED_ISIZE_ZIG_LIVE,
+            "offsets_from_zig",
+            crate::native_build::detect_zig_toolchain().is_some(),
+        ),
+    ];
+    let expected = Some(Value::Array(vec![
+        Value::Int(-5_000_000_000),
+        Value::Int(0),
+        Value::Int(5_000_000_000),
+        Value::Int(10_000_000_000),
+    ]));
+    for (source, entry, available) in cases {
+        if !available {
+            continue;
+        }
+        let program = parse_human(source).unwrap();
+        let (value, calls, error) = run_entry_with_capsules(&program, entry, vec![Value::Int(4)]);
+        assert!(error.is_none(), "{entry}: {error:?}");
+        assert_eq!(value, expected);
+        assert_eq!(
+            calls[0]
+                .native
+                .as_ref()
+                .and_then(|receipt| receipt.owned_output_bytes),
+            Some(4 * std::mem::size_of::<isize>())
+        );
+        assert!(calls[0]
+            .native
+            .as_ref()
+            .is_some_and(|receipt| receipt.artifact.is_none()));
+    }
+}
+
+#[test]
+fn live_c_cpp_rust_and_zig_owned_usize_outputs_preserve_the_host_range() {
+    let cases = [
+        (
+            OWNED_USIZE_C_LIVE,
+            "sizes_from_c",
+            crate::native_build::detect_toolchain().is_some(),
+        ),
+        (
+            OWNED_USIZE_CPP_LIVE,
+            "sizes_from_cpp",
+            crate::native_build::detect_cpp_toolchain().is_some(),
+        ),
+        (
+            OWNED_USIZE_RUST_LIVE,
+            "sizes_from_rust",
+            crate::native_build::detect_rust_toolchain().is_some(),
+        ),
+        (
+            OWNED_USIZE_ZIG_LIVE,
+            "sizes_from_zig",
+            crate::native_build::detect_zig_toolchain().is_some(),
+        ),
+    ];
+    let host_max = if usize::BITS == 64 {
+        Value::UInt(usize::MAX as u64)
+    } else {
+        Value::Int(usize::MAX as i64)
+    };
+    let expected = Some(Value::Array(vec![
+        Value::Int(0),
+        Value::Int(3_000_000_000),
+        Value::Int(6_000_000_000),
+        host_max,
+    ]));
+    for (source, entry, available) in cases {
+        if !available {
+            continue;
+        }
+        let program = parse_human(source).unwrap();
+        let (value, calls, error) = run_entry_with_capsules(&program, entry, vec![Value::Int(4)]);
+        assert!(error.is_none(), "{entry}: {error:?}");
+        assert_eq!(value, expected);
+        assert_eq!(
+            calls[0]
+                .native
+                .as_ref()
+                .and_then(|receipt| receipt.owned_output_bytes),
+            Some(4 * std::mem::size_of::<usize>())
+        );
+        assert!(calls[0]
+            .native
+            .as_ref()
+            .is_some_and(|receipt| receipt.artifact.is_none()));
+    }
+}
+
+#[test]
+fn live_c_rust_and_zig_owned_float_outputs_return_typed_arrays() {
+    let f32_expected = Some(Value::Array(vec![
+        Value::Float(f64::from(0.1_f32)),
+        Value::Float(-1.5),
+        Value::Float(1.25),
+        Value::Float(3.5),
+    ]));
+    let f32_cases = [
+        (
+            OWNED_F32_C_LIVE,
+            "gains_from_c",
+            crate::native_build::detect_toolchain().is_some(),
+        ),
+        (
+            OWNED_F32_RUST_LIVE,
+            "gains_from_rust",
+            crate::native_build::detect_rust_toolchain().is_some(),
+        ),
+        (
+            OWNED_F32_ZIG_LIVE,
+            "gains_from_zig",
+            crate::native_build::detect_zig_toolchain().is_some(),
+        ),
+    ];
+    for (source, entry, available) in f32_cases {
+        if !available {
+            continue;
+        }
+        let program = parse_human(source).unwrap();
+        let (value, calls, error) = run_entry_with_capsules(&program, entry, Vec::new());
+        assert!(error.is_none(), "{entry}: {error:?}");
+        assert_eq!(value, f32_expected);
+        assert_eq!(
+            calls[0]
+                .native
+                .as_ref()
+                .and_then(|receipt| receipt.owned_output_bytes),
+            Some(16)
+        );
+    }
+
+    let f64_expected = Some(Value::Array(vec![
+        Value::Float(1.0000000000000002),
+        Value::Float(-2.5),
+        Value::Float(0.0),
+        Value::Float(std::f64::consts::PI),
+    ]));
+    let f64_cases = [
+        (
+            OWNED_F64_C_LIVE,
+            "precise_from_c",
+            crate::native_build::detect_toolchain().is_some(),
+        ),
+        (
+            OWNED_F64_RUST_LIVE,
+            "precise_from_rust",
+            crate::native_build::detect_rust_toolchain().is_some(),
+        ),
+        (
+            OWNED_F64_ZIG_LIVE,
+            "precise_from_zig",
+            crate::native_build::detect_zig_toolchain().is_some(),
+        ),
+    ];
+    for (source, entry, available) in f64_cases {
+        if !available {
+            continue;
+        }
+        let program = parse_human(source).unwrap();
+        let (value, calls, error) = run_entry_with_capsules(&program, entry, Vec::new());
+        assert!(error.is_none(), "{entry}: {error:?}");
+        assert_eq!(value, f64_expected);
+        assert_eq!(
+            calls[0]
+                .native
+                .as_ref()
+                .and_then(|receipt| receipt.owned_output_bytes),
+            Some(32)
+        );
+    }
+}
+
+#[test]
+fn live_c_cpp_rust_and_zig_owned_strings_return_validated_language_values() {
     let cases = [
         (
             OWNED_STRING_C_LIVE,
             "greeting_from_c",
             crate::native_build::detect_toolchain().is_some(),
+        ),
+        (
+            OWNED_STRING_CPP_LIVE,
+            "greeting_from_cpp",
+            crate::native_build::detect_cpp_toolchain().is_some(),
         ),
         (
             OWNED_STRING_RUST_LIVE,
@@ -551,6 +1152,483 @@ fn live_c_rust_and_zig_owned_strings_return_validated_language_values() {
             .native
             .as_ref()
             .is_some_and(|receipt| receipt.artifact.is_none()));
+    }
+}
+
+#[test]
+fn live_c_cpp_rust_and_zig_mutable_strings_copy_back_atomically() {
+    let cases = [
+        (
+            MUT_STRING_C_LIVE,
+            "title_twice_from_c",
+            crate::native_build::detect_toolchain().is_some(),
+        ),
+        (
+            MUT_STRING_CPP_LIVE,
+            "title_twice_from_cpp",
+            crate::native_build::detect_cpp_toolchain().is_some(),
+        ),
+        (
+            MUT_STRING_RUST_LIVE,
+            "title_twice_from_rust",
+            crate::native_build::detect_rust_toolchain().is_some(),
+        ),
+        (
+            MUT_STRING_ZIG_LIVE,
+            "title_twice_from_zig",
+            crate::native_build::detect_zig_toolchain().is_some(),
+        ),
+    ];
+    for (source, entry, available) in cases {
+        if !available {
+            continue;
+        }
+        let program = parse_human(source).unwrap();
+        assert!(crate::typecheck::check(&program).is_empty(), "{entry}");
+        let (value, calls, error) = run_entry_with_capsules(
+            &program,
+            entry,
+            vec![Value::String("forgentex,✓".to_string())],
+        );
+        assert!(error.is_none(), "{entry}: {error:?}");
+        assert_eq!(value, Some(Value::Int(0)), "{entry}");
+        assert_eq!(calls.len(), 2, "{entry}");
+        assert_eq!(
+            calls[0]
+                .native
+                .as_ref()
+                .and_then(|receipt| receipt.borrowed_input_bytes),
+            Some(13)
+        );
+        assert_eq!(
+            calls[1]
+                .native
+                .as_ref()
+                .and_then(|receipt| receipt.borrowed_input_bytes),
+            Some(13)
+        );
+    }
+}
+
+#[test]
+fn live_c_cpp_rust_and_zig_resizable_strings_commit_validated_growth() {
+    let cases = [
+        (
+            GROW_STRING_C_LIVE,
+            "grow_twice_from_c",
+            crate::native_build::detect_toolchain().is_some(),
+        ),
+        (
+            GROW_STRING_CPP_LIVE,
+            "grow_twice_from_cpp",
+            crate::native_build::detect_cpp_toolchain().is_some(),
+        ),
+        (
+            GROW_STRING_RUST_LIVE,
+            "grow_twice_from_rust",
+            crate::native_build::detect_rust_toolchain().is_some(),
+        ),
+        (
+            GROW_STRING_ZIG_LIVE,
+            "grow_twice_from_zig",
+            crate::native_build::detect_zig_toolchain().is_some(),
+        ),
+    ];
+    for (source, entry, available) in cases {
+        if !available {
+            continue;
+        }
+        let program = parse_human(source).unwrap();
+        assert!(crate::typecheck::check(&program).is_empty(), "{entry}");
+        let input = &program.capsules().next().unwrap().inputs[0].ty;
+        assert_eq!(input.to_human(), "&mut String");
+        assert_eq!(input.to_agent(), "&mutString");
+        let (value, calls, error) =
+            run_entry_with_capsules(&program, entry, vec![Value::String("hi".to_string())]);
+        assert!(error.is_none(), "{entry}: {error:?}");
+        assert_eq!(value, Some(Value::Int(4)), "{entry}");
+        assert_eq!(calls.len(), 2, "{entry}");
+        assert_eq!(
+            calls
+                .iter()
+                .map(|call| call
+                    .native
+                    .as_ref()
+                    .and_then(|receipt| receipt.borrowed_input_bytes))
+                .collect::<Vec<_>>(),
+            vec![Some(2), Some(3)],
+            "{entry}"
+        );
+    }
+}
+
+#[test]
+fn live_mixed_mutable_inputs_commit_as_one_transaction() {
+    if crate::native_build::detect_toolchain().is_none() {
+        return;
+    }
+    let program = parse_human(ATOMIC_MUTABLE_C_LIVE).unwrap();
+    assert!(crate::typecheck::check(&program).is_empty());
+    let (value, calls, error) = run_entry_with_capsules(
+        &program,
+        "revise_twice_from_c",
+        vec![
+            Value::String("forgentex".to_string()),
+            Value::Array(vec![Value::Int(1), Value::Int(9)]),
+        ],
+    );
+    assert!(error.is_none(), "{error:?}");
+    assert_eq!(value, Some(Value::Int(0)));
+    assert_eq!(calls.len(), 2);
+    assert!(calls.iter().all(|call| {
+        call.native
+            .as_ref()
+            .and_then(|receipt| receipt.borrowed_input_bytes)
+            == Some(9)
+    }));
+}
+
+#[test]
+fn malformed_later_mutation_cannot_partially_commit_an_earlier_value() {
+    let program = parse_human(ATOMIC_MUTABLE_C_LIVE).unwrap();
+    let capsule = program.capsules().next().unwrap();
+    let source_args = vec![
+        crate::ast::Expr::Var("text".to_string()),
+        crate::ast::Expr::Var("samples".to_string()),
+    ];
+    let mut env = std::collections::HashMap::from([
+        ("text".to_string(), Value::String("before".to_string())),
+        (
+            "samples".to_string(),
+            Value::Array(vec![Value::Int(1), Value::Int(9)]),
+        ),
+    ]);
+    let before = env.clone();
+    let mutations = vec![
+        crate::ffi::NativeMutation {
+            input_index: 0,
+            values: Vec::new(),
+            string: Some("After!".to_string()),
+            records: None,
+        },
+        crate::ffi::NativeMutation {
+            input_index: 1,
+            values: vec![crate::ast::CapsuleValue::Bool(true)],
+            string: None,
+            records: None,
+        },
+    ];
+    let error = crate::interp::apply_native_mutations(
+        &program,
+        capsule,
+        &source_args,
+        &mutations,
+        &mut env,
+    )
+    .unwrap_err();
+    assert!(error.contains("mismatched copy-back"), "{error}");
+    assert_eq!(env, before);
+
+    let resized = vec![
+        crate::ffi::NativeMutation {
+            input_index: 0,
+            values: Vec::new(),
+            string: Some("After!".to_string()),
+            records: None,
+        },
+        crate::ffi::NativeMutation {
+            input_index: 1,
+            values: vec![crate::ast::CapsuleValue::Int(2)],
+            string: None,
+            records: None,
+        },
+    ];
+    let error =
+        crate::interp::apply_native_mutations(&program, capsule, &source_args, &resized, &mut env)
+            .unwrap_err();
+    assert!(error.contains("changed length"), "{error}");
+    assert_eq!(env, before);
+
+    let error = crate::interp::apply_native_mutations(
+        &program,
+        capsule,
+        &source_args,
+        &mutations[..1],
+        &mut env,
+    )
+    .unwrap_err();
+    assert!(error.contains("expected 2"), "{error}");
+    assert_eq!(env, before);
+
+    let duplicate = vec![mutations[0].clone(), mutations[0].clone()];
+    let error = crate::interp::apply_native_mutations(
+        &program,
+        capsule,
+        &source_args,
+        &duplicate,
+        &mut env,
+    )
+    .unwrap_err();
+    assert!(error.contains("repeated mutable input 0"), "{error}");
+    assert_eq!(env, before);
+
+    let alias = vec![
+        crate::ast::Expr::Var("same".to_string()),
+        crate::ast::Expr::Var("same".to_string()),
+    ];
+    let error = crate::interp::validate_native_mutable_targets(capsule, &alias).unwrap_err();
+    assert!(error.contains("native_capsule_mut_alias"), "{error}");
+}
+
+#[test]
+fn malformed_record_copy_back_cannot_partially_commit_an_earlier_slice() {
+    let program = parse_human(
+        "@repr(C)\nstruct TxRecord:\n    id: u64\n    delta: i32\n    score: f64\n\nforeign revise c version \"c11\":\n    input samples: &mut [i16]\n    input records: &mut [TxRecord]\n    output changed: i32\n    sandbox \"fs.none\"\n    code:\n        int revise(void) { return 0; }\n",
+    )
+    .unwrap();
+    let capsule = program.capsules().next().unwrap();
+    let source_args = vec![
+        crate::ast::Expr::Var("samples".to_string()),
+        crate::ast::Expr::Var("records".to_string()),
+    ];
+    let record = |id, delta, score| {
+        Value::Struct(
+            "TxRecord".to_string(),
+            [
+                ("id".to_string(), Value::UInt(id)),
+                ("delta".to_string(), Value::Int(delta)),
+                ("score".to_string(), Value::Float(score)),
+            ]
+            .into_iter()
+            .collect(),
+        )
+    };
+    let mut env = std::collections::HashMap::from([
+        (
+            "samples".to_string(),
+            Value::Array(vec![Value::Int(1), Value::Int(2)]),
+        ),
+        (
+            "records".to_string(),
+            Value::Array(vec![record(7, -3, 1.25)]),
+        ),
+    ]);
+    let before = env.clone();
+    let malformed = vec![
+        crate::ffi::NativeMutation {
+            input_index: 0,
+            values: vec![
+                crate::ast::CapsuleValue::Int(8),
+                crate::ast::CapsuleValue::Int(9),
+            ],
+            string: None,
+            records: None,
+        },
+        crate::ffi::NativeMutation {
+            input_index: 1,
+            values: Vec::new(),
+            string: None,
+            records: Some(vec![vec![
+                crate::ast::CapsuleValue::UInt(11),
+                crate::ast::CapsuleValue::Int(4),
+            ]]),
+        },
+    ];
+    let error = crate::interp::apply_native_mutations(
+        &program,
+        capsule,
+        &source_args,
+        &malformed,
+        &mut env,
+    )
+    .unwrap_err();
+    assert!(error.contains("ended before all scalar leaves"), "{error}");
+    assert_eq!(env, before);
+
+    let mut valid = malformed;
+    valid[1].records = Some(vec![vec![
+        crate::ast::CapsuleValue::UInt(u64::MAX),
+        crate::ast::CapsuleValue::Int(4),
+        crate::ast::CapsuleValue::Float(42.5),
+    ]]);
+    crate::interp::apply_native_mutations(&program, capsule, &source_args, &valid, &mut env)
+        .unwrap();
+    assert_eq!(
+        env.get("samples"),
+        Some(&Value::Array(vec![Value::Int(8), Value::Int(9)]))
+    );
+    let Some(Value::Array(records)) = env.get("records") else {
+        panic!("record array copy-back missing")
+    };
+    let Value::Struct(tag, fields) = &records[0] else {
+        panic!("record tag missing")
+    };
+    assert_eq!(tag, "TxRecord");
+    assert_eq!(fields.get("id"), Some(&Value::UInt(u64::MAX)));
+    assert_eq!(fields.get("delta"), Some(&Value::Int(4)));
+    assert_eq!(fields.get("score"), Some(&Value::Float(42.5)));
+}
+
+#[test]
+fn mutable_record_copy_back_rebuilds_nested_structs_and_fixed_arrays() {
+    let program = parse_human(
+        "@repr(C)\nstruct Pair:\n    values: [i16; 2]\n\n@repr(C)\nstruct Batch:\n    id: u32\n    pair: Pair\n    totals: [i32; 2]\n\nforeign revise_batches c version \"c11\":\n    input batches: &mut [Batch]\n    output changed: i32\n    sandbox \"fs.none\"\n    code:\n        int revise_batches(void) { return 0; }\n",
+    )
+    .unwrap();
+    let capsule = program.capsules().next().unwrap();
+    let source_args = [crate::ast::Expr::Var("batches".to_string())];
+    let pair = |left, right| {
+        Value::Struct(
+            "Pair".to_string(),
+            [(
+                "values".to_string(),
+                Value::Array(vec![Value::Int(left), Value::Int(right)]),
+            )]
+            .into_iter()
+            .collect(),
+        )
+    };
+    let batch = |id, left, right, first, second| {
+        Value::Struct(
+            "Batch".to_string(),
+            [
+                ("id".to_string(), Value::Int(id)),
+                ("pair".to_string(), pair(left, right)),
+                (
+                    "totals".to_string(),
+                    Value::Array(vec![Value::Int(first), Value::Int(second)]),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        )
+    };
+    let mut env = std::collections::HashMap::from([(
+        "batches".to_string(),
+        Value::Array(vec![batch(1, 2, 3, 4, 5)]),
+    )]);
+    let mutations = [crate::ffi::NativeMutation {
+        input_index: 0,
+        values: Vec::new(),
+        string: None,
+        records: Some(vec![vec![
+            crate::ast::CapsuleValue::Int(9),
+            crate::ast::CapsuleValue::Int(-2),
+            crate::ast::CapsuleValue::Int(3),
+            crate::ast::CapsuleValue::Int(100),
+            crate::ast::CapsuleValue::Int(-200),
+        ]]),
+    }];
+    crate::interp::apply_native_mutations(&program, capsule, &source_args, &mutations, &mut env)
+        .unwrap();
+    assert_eq!(
+        env.get("batches"),
+        Some(&Value::Array(vec![batch(9, -2, 3, 100, -200)]))
+    );
+}
+
+#[test]
+fn resizable_string_growth_is_staged_with_every_other_mutation() {
+    let program = parse_human(
+        "foreign resize_pair c version \"c11\":\n    input left: &mut String\n    input right: &mut String\n    output changed: i32\n    sandbox \"fs.none\"\n    code:\n        int resize_pair(void) { return 0; }\n",
+    )
+    .unwrap();
+    let capsule = program.capsules().next().unwrap();
+    let source_args = vec![
+        crate::ast::Expr::Var("left".to_string()),
+        crate::ast::Expr::Var("right".to_string()),
+    ];
+    let mut env = std::collections::HashMap::from([
+        ("left".to_string(), Value::String("a".to_string())),
+        ("right".to_string(), Value::String("b".to_string())),
+    ]);
+    let before = env.clone();
+    let malformed = vec![
+        crate::ffi::NativeMutation {
+            input_index: 0,
+            values: Vec::new(),
+            string: Some("alpha".to_string()),
+            records: None,
+        },
+        crate::ffi::NativeMutation {
+            input_index: 1,
+            values: vec![crate::ast::CapsuleValue::Int(1)],
+            string: Some("beta".to_string()),
+            records: None,
+        },
+    ];
+    let error = crate::interp::apply_native_mutations(
+        &program,
+        capsule,
+        &source_args,
+        &malformed,
+        &mut env,
+    )
+    .unwrap_err();
+    assert!(error.contains("unexpected non-string copy-back"), "{error}");
+    assert_eq!(env, before);
+
+    let valid = vec![
+        crate::ffi::NativeMutation {
+            input_index: 0,
+            values: Vec::new(),
+            string: Some("alpha".to_string()),
+            records: None,
+        },
+        crate::ffi::NativeMutation {
+            input_index: 1,
+            values: Vec::new(),
+            string: Some("beta".to_string()),
+            records: None,
+        },
+    ];
+    crate::interp::apply_native_mutations(&program, capsule, &source_args, &valid, &mut env)
+        .unwrap();
+    assert_eq!(env.get("left"), Some(&Value::String("alpha".to_string())));
+    assert_eq!(env.get("right"), Some(&Value::String("beta".to_string())));
+}
+
+#[test]
+fn live_c_cpp_rust_and_zig_borrow_language_strings_without_ownership_transfer() {
+    let cases = [
+        (
+            BORROWED_STRING_C_LIVE,
+            "checksum_live",
+            crate::native_build::detect_toolchain().is_some(),
+        ),
+        (
+            BORROWED_STRING_CPP_LIVE,
+            "checksum_live_cpp",
+            crate::native_build::detect_cpp_toolchain().is_some(),
+        ),
+        (
+            BORROWED_STRING_RUST_LIVE,
+            "checksum_live_rust",
+            crate::native_build::detect_rust_toolchain().is_some(),
+        ),
+        (
+            BORROWED_STRING_ZIG_LIVE,
+            "checksum_live_zig",
+            crate::native_build::detect_zig_toolchain().is_some(),
+        ),
+    ];
+    let text = "A\0\né";
+    for (source, entry, available) in cases {
+        if !available {
+            continue;
+        }
+        let program = parse_human(source).unwrap();
+        let (value, calls, error) =
+            run_entry_with_capsules(&program, entry, vec![Value::String(text.to_string())]);
+        assert!(error.is_none(), "unexpected: {error:?}");
+        assert_eq!(value, Some(Value::Int(439)));
+        assert_eq!(
+            calls[0]
+                .native
+                .as_ref()
+                .and_then(|receipt| receipt.borrowed_input_bytes),
+            Some(text.len())
+        );
     }
 }
 
@@ -623,12 +1701,50 @@ fn live_c_capsule_honors_declared_wall_time_limit() {
         .native_failure
         .as_ref()
         .expect("timed-out native calls must record failure evidence");
-    assert_eq!(receipt.schema, "forgentex.native_failure.v1");
+    assert_eq!(receipt.schema, crate::ffi::NATIVE_FAILURE_SCHEMA);
     assert_eq!(receipt.kind, "native_capsule_timeout");
     assert_eq!(receipt.phase, "execute");
     assert_eq!(receipt.wall_limit_ms, Some(50));
+    assert_eq!(receipt.wall_limit_source, "declared");
+    assert_eq!(
+        receipt.compile_wall_limit_ms,
+        crate::ffi::NATIVE_COMPILE_WALL_MS
+    );
+    assert_eq!(
+        receipt.cpu_limit_ms,
+        Some(crate::ffi::DEFAULT_NATIVE_CPU_MS)
+    );
+    assert_eq!(receipt.cpu_limit_source, "default");
+    assert_eq!(
+        receipt.memory_limit_bytes,
+        Some(crate::ffi::DEFAULT_NATIVE_MEMORY_BYTES)
+    );
+    assert_eq!(receipt.memory_limit_source, "default");
+    if cfg!(windows) {
+        assert_eq!(
+            receipt.process_limit,
+            Some(crate::native_build::DEFAULT_NATIVE_RUNNER_PROCESS_LIMIT)
+        );
+        assert_eq!(receipt.process_limit_source, "default");
+    } else {
+        assert_eq!(receipt.process_limit, None);
+        assert_eq!(receipt.process_limit_source, "unavailable");
+    }
+    assert_eq!(receipt.output_limit_source, "default");
     assert!(receipt.limits_applied);
     assert_eq!(receipt.containment.as_deref(), Some("process_tree"));
+    assert_eq!(
+        receipt.runner_environment_policy.as_deref(),
+        Some(if cfg!(windows) {
+            "controlled_appcontainer_system_and_toolchain"
+        } else {
+            "clear_except_toolchain_path"
+        })
+    );
+    assert_eq!(
+        receipt.runner_working_directory_policy.as_deref(),
+        Some("private_scratch")
+    );
 }
 
 #[test]
@@ -651,10 +1767,222 @@ fn live_c_capsule_receipt_is_rendered_in_json_audit() {
     assert!(json.contains("\"boundary_hash\""), "{json}");
     assert!(json.contains("\"toolchain\""), "{json}");
     assert!(json.contains("\"duration_ms\""), "{json}");
+    assert!(json.contains("\"wall_limit_ms\": 30000"), "{json}");
+    assert!(
+        json.contains("\"wall_limit_source\": \"default\""),
+        "{json}"
+    );
+    assert!(json.contains("\"compile_wall_limit_ms\": 60000"), "{json}");
+    assert!(
+        json.contains("\"compile_containment\": \"process_tree\""),
+        "{json}"
+    );
     assert!(json.contains("\"containment\": \"process_tree\""), "{json}");
-    assert!(json.contains("\"cpu_limit_ms\": null"), "{json}");
-    assert!(json.contains("\"memory_limit_bytes\": null"), "{json}");
+    assert!(json.contains("\"cpu_limit_ms\": 30000"), "{json}");
+    assert!(json.contains("\"cpu_limit_source\": \"default\""), "{json}");
+    assert!(json.contains("\"memory_limit_bytes\": 536870912"), "{json}");
+    assert!(
+        json.contains("\"memory_limit_source\": \"default\""),
+        "{json}"
+    );
+    if cfg!(windows) {
+        assert!(json.contains("\"process_limit\": 1"), "{json}");
+        assert!(
+            json.contains("\"process_limit_source\": \"default\""),
+            "{json}"
+        );
+        assert!(json.contains("\"peak_tree_processes\":"), "{json}");
+        assert!(json.contains("\"windows_ui_restrictions\": 255"), "{json}");
+        assert!(
+            json.contains("\"ui_isolation_source\": \"job_object\""),
+            "{json}"
+        );
+        assert!(
+            json.contains("\"windows_restricted_token\": true"),
+            "{json}"
+        );
+        assert!(
+            json.contains("\"windows_restricting_sid_count\": 3"),
+            "{json}"
+        );
+        assert!(
+            json.contains("\"windows_integrity_level\": \"low\""),
+            "{json}"
+        );
+        assert!(json.contains("\"windows_appcontainer\": true"), "{json}");
+        assert!(
+            json.contains("\"windows_appcontainer_capability_count\": 0"),
+            "{json}"
+        );
+        assert!(
+            json.contains("\"windows_appcontainer_profile\": \"Forgentex.NativeRunner.0_1\""),
+            "{json}"
+        );
+        assert!(
+            json.contains("\"runner_process_identity_policy\": \"zero_capability_appcontainer_over_restricted_low_integrity_token\""),
+            "{json}"
+        );
+        assert!(json.contains("\"io_limit_bytes\": null"), "{json}");
+        assert!(
+            json.contains("\"io_limit_source\": \"undeclared\""),
+            "{json}"
+        );
+        assert!(json.contains("\"job_read_transfer_bytes\":"), "{json}");
+        assert!(json.contains("\"job_write_transfer_bytes\":"), "{json}");
+        assert!(json.contains("\"job_other_transfer_bytes\":"), "{json}");
+    } else {
+        assert!(json.contains("\"process_limit\": null"), "{json}");
+        assert!(
+            json.contains("\"process_limit_source\": \"unavailable\""),
+            "{json}"
+        );
+        assert!(json.contains("\"windows_ui_restrictions\": null"), "{json}");
+        assert!(
+            json.contains("\"ui_isolation_source\": \"unavailable\""),
+            "{json}"
+        );
+        assert!(
+            json.contains("\"windows_restricted_token\": null"),
+            "{json}"
+        );
+        assert!(
+            json.contains("\"windows_restricting_sid_count\": null"),
+            "{json}"
+        );
+        assert!(json.contains("\"windows_integrity_level\": null"), "{json}");
+        assert!(json.contains("\"windows_appcontainer\": null"), "{json}");
+        assert!(
+            json.contains("\"windows_appcontainer_capability_count\": null"),
+            "{json}"
+        );
+        assert!(
+            json.contains("\"windows_appcontainer_profile\": null"),
+            "{json}"
+        );
+        assert!(
+            json.contains("\"runner_process_identity_policy\": \"inherited_unix_identity\""),
+            "{json}"
+        );
+        assert!(json.contains("\"io_limit_bytes\": null"), "{json}");
+        assert!(
+            json.contains("\"io_limit_source\": \"unavailable\""),
+            "{json}"
+        );
+        assert!(json.contains("\"job_read_transfer_bytes\": null"), "{json}");
+    }
+    assert!(json.contains("\"output_limit_bytes\": 402653184"), "{json}");
+    assert!(
+        json.contains("\"output_limit_source\": \"default\""),
+        "{json}"
+    );
+    assert!(json.contains("\"stdout_bytes\":"), "{json}");
+    assert!(json.contains("\"stderr_bytes\": 0"), "{json}");
     assert!(json.contains("\"runner_reused\": false"), "{json}");
+    assert!(json.contains("\"runner_artifact_sha256\": \""), "{json}");
+    assert!(
+        json.contains("\"runner_cache_status\": \"disabled\""),
+        "{json}"
+    );
+    assert!(
+        json.contains("\"runner_input_transport\": \"anonymous_stdin\""),
+        "{json}"
+    );
+    assert!(
+        json.contains("\"runner_execution_model\": \"fresh_process_per_call\""),
+        "{json}"
+    );
+    assert!(
+        json.contains(if cfg!(windows) {
+            "\"runner_environment_policy\": \"controlled_appcontainer_system_and_toolchain\""
+        } else {
+            "\"runner_environment_policy\": \"clear_except_toolchain_path\""
+        }),
+        "{json}"
+    );
+    assert!(
+        json.contains("\"runner_working_directory_policy\": \"private_scratch\""),
+        "{json}"
+    );
+    if cfg!(windows) {
+        assert!(
+            json.contains(
+                "\"runner_scratch_access_policy\": \"owner_system_restricted_code_appcontainer_rx_protected_dacl\""
+            ),
+            "{json}"
+        );
+    } else if cfg!(unix) {
+        assert!(
+            json.contains("\"runner_scratch_access_policy\": \"owner_mode_0700\""),
+            "{json}"
+        );
+    }
+    assert!(
+        json.contains(if cfg!(windows) {
+            "\"runner_capability_profile\": \"appcontainer_compute_or_host_artifact_only\""
+        } else {
+            "\"runner_capability_profile\": \"compute_or_host_artifact_only\""
+        }),
+        "{json}"
+    );
+    assert!(
+        json.contains(if cfg!(windows) {
+            "\"filesystem_isolation\": \"appcontainer_default_deny_host_files_explicit_runner_rx\""
+        } else {
+            "\"filesystem_isolation\": \"private_working_directory_only\""
+        }),
+        "{json}"
+    );
+    assert!(
+        json.contains(if cfg!(windows) {
+            "\"network_isolation\": \"appcontainer_zero_network_capabilities\""
+        } else {
+            "\"network_isolation\": \"unavailable\""
+        }),
+        "{json}"
+    );
+}
+
+#[test]
+fn live_c_runner_removes_ambient_environment_and_workspace_authority() {
+    if crate::native_build::detect_toolchain().is_none() {
+        return;
+    }
+    let marker = std::path::Path::new(".forgentex-native-workspace-probe");
+    let _ = std::fs::remove_file(marker);
+    std::fs::write(marker, b"workspace-only").unwrap();
+    let program = parse_human(AMBIENT_AUTHORITY_C_LIVE).unwrap();
+    let (value, calls, error) =
+        run_entry_with_capsules(&program, "verify_ambient_authority", Vec::new());
+    let _ = std::fs::remove_file(marker);
+
+    assert!(error.is_none(), "native call failed: {error:?}");
+    let expected = if cfg!(windows) { 7 } else { 3 };
+    assert_eq!(value, Some(Value::Int(expected)));
+    let receipt = calls[0]
+        .native
+        .as_ref()
+        .expect("successful native call must record launch policy");
+    if cfg!(windows) {
+        assert_eq!(
+            receipt.process_limit,
+            Some(crate::native_build::DEFAULT_NATIVE_RUNNER_PROCESS_LIMIT)
+        );
+        assert_eq!(receipt.process_limit_source, "default");
+        assert_eq!(receipt.peak_tree_processes, Some(1));
+    } else {
+        assert_eq!(receipt.process_limit, None);
+        assert_eq!(receipt.process_limit_source, "unavailable");
+        assert_eq!(receipt.peak_tree_processes, None);
+    }
+    assert_eq!(
+        receipt.runner_environment_policy,
+        if cfg!(windows) {
+            "controlled_appcontainer_system_and_toolchain"
+        } else {
+            "clear_except_toolchain_path"
+        }
+    );
+    assert_eq!(receipt.runner_working_directory_policy, "private_scratch");
 }
 
 #[test]
@@ -707,6 +2035,18 @@ fn live_c_capsule_crash_is_contained_and_audited() {
     assert_eq!(receipt.phase, "execute");
     assert!(receipt.limits_applied);
     assert_eq!(receipt.containment.as_deref(), Some("process_tree"));
+    assert_eq!(
+        receipt.runner_environment_policy.as_deref(),
+        Some(if cfg!(windows) {
+            "controlled_appcontainer_system_and_toolchain"
+        } else {
+            "clear_except_toolchain_path"
+        })
+    );
+    assert_eq!(
+        receipt.runner_working_directory_policy.as_deref(),
+        Some("private_scratch")
+    );
 }
 
 #[test]
@@ -855,6 +2195,32 @@ fn live_c_capsule_returns_a_reviewed_repr_c_struct_by_value() {
 }
 
 #[test]
+fn live_c_capsule_returns_multiple_logical_values_as_one_atomic_result_struct() {
+    if crate::native_build::detect_toolchain().is_none() {
+        return;
+    }
+    let program = parse_human(include_str!("../../examples/capsule/dual_output_c.fgx")).unwrap();
+    let diagnostics = crate::typecheck::check(&program);
+    assert!(
+        diagnostics.is_empty(),
+        "unexpected diagnostics: {diagnostics:?}"
+    );
+    let (value, calls, error) =
+        run_entry_with_capsules(&program, "process_value", vec![Value::Int(21)]);
+    assert!(error.is_none(), "unexpected error: {error:?}");
+    let Value::Struct(name, fields) = value.expect("atomic result struct") else {
+        panic!("native result was not a struct");
+    };
+    assert_eq!(name, "DualOutput");
+    assert_eq!(fields.get("result"), Some(&Value::Int(42)));
+    assert_eq!(fields.get("status"), Some(&Value::Int(0)));
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].decision, "allow");
+    assert!(calls[0].output.contains("\"result\":42"));
+    assert!(calls[0].output.contains("\"status\":0"));
+}
+
+#[test]
 fn live_rust_capsule_accepts_and_returns_a_reviewed_repr_c_struct_by_value() {
     if crate::native_build::detect_rust_toolchain().is_none() {
         return;
@@ -877,6 +2243,169 @@ fn live_rust_capsule_accepts_and_returns_a_reviewed_repr_c_struct_by_value() {
     assert_eq!(fields.get("exposure"), Some(&Value::Float(2.5)));
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].language, "rust");
+    assert_eq!(calls[0].decision, "allow");
+}
+
+#[test]
+fn live_c_capsule_preserves_nested_struct_types_across_the_boundary() {
+    if crate::native_build::detect_toolchain().is_none() {
+        return;
+    }
+    let program = parse_human(include_str!("../../examples/capsule/nested_bounds_c.fgx")).unwrap();
+    let mut bounds = std::collections::HashMap::new();
+    bounds.insert("min_x".to_string(), Value::Int(-10));
+    bounds.insert("max_x".to_string(), Value::Int(20));
+    bounds.insert("min_y".to_string(), Value::Int(-30));
+    bounds.insert("max_y".to_string(), Value::Int(40));
+    let mut region = std::collections::HashMap::new();
+    region.insert("id".to_string(), Value::Int(7));
+    region.insert(
+        "bounds".to_string(),
+        Value::Struct("Bounds".to_string(), bounds),
+    );
+    let input = Value::Struct("Region".to_string(), region);
+    let (value, calls, error) = run_entry_with_capsules(&program, "adjust_region", vec![input]);
+    assert!(error.is_none(), "unexpected error: {error:?}");
+    let Value::Struct(name, fields) = value.expect("nested struct result") else {
+        panic!("native result was not a struct");
+    };
+    assert_eq!(name, "Region");
+    let Some(Value::Struct(bounds_name, bounds)) = fields.get("bounds") else {
+        panic!("nested native result field was not a struct");
+    };
+    assert_eq!(bounds_name, "Bounds");
+    assert_eq!(bounds.get("min_x"), Some(&Value::Int(0)));
+    assert_eq!(bounds.get("max_y"), Some(&Value::Int(60)));
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].decision, "allow");
+}
+
+#[test]
+fn live_c_capsule_preserves_fixed_array_fields_across_the_boundary() {
+    if crate::native_build::detect_toolchain().is_none() {
+        return;
+    }
+    let program = parse_human(include_str!("../../examples/capsule/fixed_samples_c.fgx")).unwrap();
+    let mut window = std::collections::HashMap::new();
+    window.insert("id".to_string(), Value::Int(7));
+    window.insert(
+        "samples".to_string(),
+        Value::Array(vec![
+            Value::Int(-10),
+            Value::Int(20),
+            Value::Int(-30),
+            Value::Int(40),
+        ]),
+    );
+    let input = Value::Struct("SampleWindow".to_string(), window);
+    let (value, calls, error) = run_entry_with_capsules(&program, "adjust_samples", vec![input]);
+    assert!(error.is_none(), "unexpected error: {error:?}");
+    let Value::Struct(name, fields) = value.expect("fixed-array struct result") else {
+        panic!("native result was not a struct");
+    };
+    assert_eq!(name, "SampleWindow");
+    assert_eq!(
+        fields.get("samples"),
+        Some(&Value::Array(vec![
+            Value::Int(-9),
+            Value::Int(22),
+            Value::Int(-27),
+            Value::Int(44),
+        ]))
+    );
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].decision, "allow");
+
+    let mut short_window = std::collections::HashMap::new();
+    short_window.insert("id".to_string(), Value::Int(7));
+    short_window.insert(
+        "samples".to_string(),
+        Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)]),
+    );
+    let (_, denied_calls, denied) = run_entry_with_capsules(
+        &program,
+        "adjust_samples",
+        vec![Value::Struct("SampleWindow".to_string(), short_window)],
+    );
+    assert!(
+        denied
+            .as_deref()
+            .is_some_and(|error| error.contains("expects 4 values, got 3")),
+        "unexpected short-array result: {denied:?}"
+    );
+    assert_eq!(denied_calls.len(), 1);
+    assert_eq!(denied_calls[0].decision, "error");
+}
+
+#[test]
+fn live_c_capsule_preserves_struct_array_fields_across_the_boundary() {
+    if crate::native_build::detect_toolchain().is_none() {
+        return;
+    }
+    let program = parse_human(include_str!("../../examples/capsule/struct_array_c.fgx")).unwrap();
+    let point = |x, y| {
+        let mut fields = std::collections::HashMap::new();
+        fields.insert("x".to_string(), Value::Int(x));
+        fields.insert("y".to_string(), Value::Int(y));
+        Value::Struct("NativePoint".to_string(), fields)
+    };
+    let mut batch = std::collections::HashMap::new();
+    batch.insert("id".to_string(), Value::Int(7));
+    batch.insert(
+        "points".to_string(),
+        Value::Array(vec![point(-10, 20), point(-30, 40), point(-50, 60)]),
+    );
+    let input = Value::Struct("PointBatch".to_string(), batch);
+    let (value, calls, error) = run_entry_with_capsules(&program, "shift_points", vec![input]);
+    assert!(error.is_none(), "unexpected error: {error:?}");
+    let Value::Struct(name, fields) = value.expect("struct-array result") else {
+        panic!("native result was not a struct");
+    };
+    assert_eq!(name, "PointBatch");
+    let Some(Value::Array(points)) = fields.get("points") else {
+        panic!("native struct-array result field was not an array");
+    };
+    assert_eq!(points, &vec![point(-9, 19), point(-28, 38), point(-47, 57)]);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].decision, "allow");
+}
+
+#[test]
+fn live_c_capsule_preserves_nested_struct_array_fields_across_the_boundary() {
+    if crate::native_build::detect_toolchain().is_none() {
+        return;
+    }
+    let program = parse_human(include_str!("../../examples/capsule/nested_array_c.fgx")).unwrap();
+    let point = |x, y| {
+        let mut fields = std::collections::HashMap::new();
+        fields.insert("x".to_string(), Value::Int(x));
+        fields.insert("y".to_string(), Value::Int(y));
+        Value::Struct("GridPoint".to_string(), fields)
+    };
+    let mut grid = std::collections::HashMap::new();
+    grid.insert("id".to_string(), Value::Int(9));
+    grid.insert(
+        "points".to_string(),
+        Value::Array(vec![
+            Value::Array(vec![point(-10, 20), point(-30, 40)]),
+            Value::Array(vec![point(-50, 60), point(-70, 80)]),
+        ]),
+    );
+    let input = Value::Struct("PointGrid".to_string(), grid);
+    let (value, calls, error) = run_entry_with_capsules(&program, "shift_grid", vec![input]);
+    assert!(error.is_none(), "unexpected error: {error:?}");
+    let Value::Struct(name, fields) = value.expect("nested struct-array result") else {
+        panic!("native result was not a struct");
+    };
+    assert_eq!(name, "PointGrid");
+    assert_eq!(
+        fields.get("points"),
+        Some(&Value::Array(vec![
+            Value::Array(vec![point(-9, 19), point(-28, 38)]),
+            Value::Array(vec![point(-47, 57), point(-66, 76)]),
+        ]))
+    );
+    assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].decision, "allow");
 }
 

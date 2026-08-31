@@ -95,6 +95,9 @@ fn expr_has_float(expr: &Expr) -> bool {
         Expr::Call { args, .. } => args.iter().any(expr_has_float),
         Expr::Field { base, .. } => expr_has_float(base),
         Expr::Index { base, index } => expr_has_float(base) || expr_has_float(index),
+        Expr::SliceRange { base, start, end } => {
+            expr_has_float(base) || expr_has_float(start) || expr_has_float(end)
+        }
         Expr::Int(_) | Expr::Bool(_) | Expr::String(_) | Expr::Var(_) | Expr::TraitConst { .. } => {
             false
         }

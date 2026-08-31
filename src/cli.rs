@@ -16,6 +16,7 @@ use crate::diagnostic_catalog::{
     build_fix_plan, diagnostic_catalog_json, diagnostic_catalog_text, explain_json, explain_text,
     FixPlanOptions,
 };
+use crate::doctor::doctor_report;
 use crate::effects::{analyze as analyze_effects, effects_to_json};
 use crate::format::{format_agent, format_human};
 use crate::fuzzing::{run_backend_differential, run_fuzz_suite, BackendDifferentialOptions};
@@ -27,7 +28,8 @@ use crate::inline_tests::{run_inline_tests, InlineTestOptions};
 use crate::interp::{run_demo_with_ir, run_entry_json_hosted_with_ir};
 use crate::lexer::lex;
 use crate::package::{
-    build_package_matrix, create_package, generate_lock, publish_dry_run, run_package_tests,
+    build_package_matrix, create_package_with_template, generate_lock, publish_dry_run,
+    run_package_tests, PackageTemplate,
 };
 use crate::parser::{parse_file, parse_file_detailed};
 use crate::patch::{apply_patch_with_options, diagnose_patch_source, PatchOptions};
@@ -45,7 +47,8 @@ use crate::stdlib::{standard_library_json, standard_library_text};
 use crate::targets::{check_program_target, targets_json, targets_text};
 use crate::typecheck::check;
 use crate::workbench::{
-    context_json, context_text, review_json, review_text as workbench_review_text, ContextOptions,
+    context_json, context_text, review_json, review_json_with_codebook,
+    review_text as workbench_review_text, review_text_with_codebook, ContextOptions,
 };
 
 pub fn run(args: Vec<String>) -> Result<(), String> {
@@ -54,6 +57,8 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         return Ok(());
     }
     match args[1].as_str() {
+        "version" | "--version" | "-V" => cmd_version(&args[2..]),
+        "doctor" => cmd_doctor(&args[2..]),
         "ast" => cmd_ast(&args[2..]),
         "parse" => cmd_parse(&args[2..]),
         "diagnose" => cmd_diagnose(&args[2..]),
@@ -77,9 +82,12 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         "contract-review" => cmd_contract_review(&args[2..]),
         "capsule-context" => cmd_capsule_context(&args[2..]),
         "compress" => cmd_compress(&args[2..]),
+        "codebook" => cmd_codebook(&args[2..]),
         "token-report" => cmd_token_report(&args[2..]),
         "edit-bench" => cmd_edit_bench(&args[2..]),
         "capsule-tokens" => cmd_capsule_tokens(&args[2..]),
+        "app-run" => cmd_app_run(&args[2..]),
+        "forgepack" => cmd_forgepack(&args[2..]),
         "io-run" => cmd_io_run(&args[2..]),
         "net-run" => cmd_net_run(&args[2..]),
         "crypto-selftest" => cmd_crypto_selftest(&args[2..]),
@@ -106,6 +114,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         "patch" => cmd_patch(&args[2..]),
         "run" => cmd_run(&args[2..]),
         "debug" => cmd_debug(&args[2..]),
+        "dap" => cmd_dap(&args[2..]),
         "optimize" => cmd_optimize(&args[2..]),
         "map" => cmd_map(&args[2..]),
         "get" => cmd_get(&args[2..]),
@@ -118,12 +127,47 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         "perf-report" => cmd_perf_report(&args[2..]),
         "fix" => cmd_fix(&args[2..]),
         "release-check" => cmd_release_check(&args[2..]),
+        "release-evidence" => cmd_release_evidence(&args[2..]),
+        "dist-manifest" => cmd_dist_manifest(&args[2..]),
         "help" | "--help" | "-h" => {
             print_help();
             Ok(())
         }
         command => Err(format!("unknown command '{command}'\n\n{}", help_text())),
     }
+}
+
+fn cmd_version(args: &[String]) -> Result<(), String> {
+    if let Some(argument) = args.first() {
+        return Err(format!(
+            "unexpected argument '{argument}'\nusage: fgx --version"
+        ));
+    }
+    println!("fgx {}", env!("CARGO_PKG_VERSION"));
+    Ok(())
+}
+
+fn cmd_doctor(args: &[String]) -> Result<(), String> {
+    for argument in args {
+        if argument != "--json" && argument != "--strict" {
+            return Err(format!(
+                "unknown doctor option '{argument}'\nusage: fgx doctor [--json] [--strict]"
+            ));
+        }
+    }
+    let report = doctor_report();
+    if args.iter().any(|argument| argument == "--json") {
+        print!("{}", report.to_json());
+    } else {
+        print!("{}", report.to_text());
+    }
+    if args.iter().any(|argument| argument == "--strict") && !report.is_ready() {
+        return Err(format!(
+            "doctor status is {}; resolve the reported issues before continuing",
+            report.status
+        ));
+    }
+    Ok(())
 }
 
 fn cmd_diagnostics(args: &[String]) -> Result<(), String> {
@@ -618,10 +662,25 @@ fn cmd_build_native(project: &str, args: &[String]) -> Result<(), String> {
 }
 
 fn cmd_new(args: &[String]) -> Result<(), String> {
-    let path = required_arg(args, 0, "new <path> [--name <package>]")?;
-    let created = create_package(Path::new(path), option_value(args, "--name"))?;
+    let path = required_arg(
+        args,
+        0,
+        "new <path> [--name <package>] [--template lib|app]",
+    )?;
+    let template = match option_value(args, "--template") {
+        Some(value) => PackageTemplate::parse(value)?,
+        None => PackageTemplate::default(),
+    };
+    let created =
+        create_package_with_template(Path::new(path), option_value(args, "--name"), template)?;
     println!("created {}", created.manifest.display());
     println!("created {}", created.source.display());
+    for extra in &created.extra {
+        println!("created {}", extra.display());
+    }
+    if template == PackageTemplate::App {
+        println!("run: fgx app-run {path} --arg \"hello from forgentex\" --json");
+    }
     Ok(())
 }
 
@@ -805,6 +864,108 @@ fn cmd_io_run(args: &[String]) -> Result<(), String> {
     }
 }
 
+fn cmd_app_run(args: &[String]) -> Result<(), String> {
+    let project = required_arg(args, 0, "app-run <project> [--arg <v>]... [--json]")?;
+    let json = args.iter().any(|arg| arg == "--json");
+    let report = match crate::application::run_dispatch(
+        Path::new(project),
+        collect_option_values(args, "--arg"),
+    ) {
+        Ok(report) => report,
+        Err(error) => {
+            if json {
+                println!("{}", error.to_json());
+                return Err(format!("application run: {}", error.code));
+            }
+            return Err(error.to_string());
+        }
+    };
+    if json {
+        println!("{}", report.to_json());
+    } else {
+        print!("{}", report.to_text());
+    }
+    if report.is_success() {
+        Ok(())
+    } else {
+        Err(format!("application run: {}", report.status()))
+    }
+}
+
+fn cmd_forgepack(args: &[String]) -> Result<(), String> {
+    let subcommand = required_arg(
+        args,
+        0,
+        "forgepack build <spec> <output> [--json] | forgepack inspect|verify <archive> [--json] | forgepack extract <archive> <directory> [--json] | forgepack evidence [--json] [--strict]",
+    )?;
+    let json = args.iter().any(|arg| arg == "--json");
+    match subcommand {
+        "build" => {
+            let spec = required_arg(args, 1, "forgepack build <spec> <output> [--json]")?;
+            let output = required_arg(args, 2, "forgepack build <spec> <output> [--json]")?;
+            let report = crate::forgepack::build_file(Path::new(spec), output)?;
+            if json {
+                println!("{}", report.to_json());
+            } else {
+                print!("{}", report.to_text());
+            }
+            Ok(())
+        }
+        "verify" => {
+            let archive = required_arg(args, 1, "forgepack verify <archive> [--json]")?;
+            let report = crate::forgepack::verify_file(Path::new(archive))?;
+            if json {
+                println!("{}", report.to_json());
+            } else {
+                print!("{}", report.to_text());
+            }
+            Ok(())
+        }
+        "inspect" => {
+            let archive = required_arg(args, 1, "forgepack inspect <archive> [--json]")?;
+            let report = crate::forgepack::inspect_file(Path::new(archive))?;
+            if json {
+                println!("{}", report.to_json());
+            } else {
+                print!("{}", report.to_text());
+            }
+            Ok(())
+        }
+        "extract" => {
+            let archive =
+                required_arg(args, 1, "forgepack extract <archive> <directory> [--json]")?;
+            let directory =
+                required_arg(args, 2, "forgepack extract <archive> <directory> [--json]")?;
+            let report = crate::forgepack::extract_file(Path::new(archive), Path::new(directory))?;
+            if json {
+                println!("{}", report.to_json());
+            } else {
+                print!("{}", report.to_text());
+            }
+            Ok(())
+        }
+        "evidence" => {
+            let report = crate::forgepack::workflow_evidence();
+            if json {
+                println!("{}", report.to_json());
+            } else {
+                print!("{}", report.to_text());
+            }
+            if args.iter().any(|arg| arg == "--strict") && !report.is_success() {
+                Err(format!(
+                    "forgepack workflow evidence failed: {}",
+                    report.gaps().join("; ")
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        other => Err(format!(
+            "unknown forgepack command '{other}'; expected build, inspect, verify, extract, or evidence"
+        )),
+    }
+}
+
 fn cmd_trust_session(args: &[String]) -> Result<(), String> {
     let capability = option_value(args, "--capability").unwrap_or("optimize.media.h264");
     let payload = option_value(args, "--payload").unwrap_or("patch:add_fast_path");
@@ -842,7 +1003,7 @@ fn cmd_pipeline_run(args: &[String]) -> Result<(), String> {
     let file = required_arg(
         args,
         0,
-        "pipeline-run <file> [--set share=value] [--allow-effects a,b] [--json]",
+        "pipeline-run <file> [--set share=value] [--allow-effects a,b] [--schedule declaration|graph|source] [--cache-dir dir] [--cache-key-file file] [--stop-after-stages n] [--max-stages n] [--max-wall-ms n] [--max-cpu-ms n] [--max-memory-bytes n] [--max-owned-bytes n] [--max-fs-bytes n] [--max-net-bytes n] [--json]",
     )?;
     let program = read_program(file)?;
     let mut overrides = Vec::new();
@@ -865,7 +1026,96 @@ fn cmd_pipeline_run(args: &[String]) -> Result<(), String> {
             .filter(|item| !item.is_empty())
             .collect::<Vec<_>>()
     });
-    let report = crate::pipeline::run(file, &program, overrides, allow);
+    let parse_limit = |name: &str| -> Result<Option<u128>, String> {
+        option_value(args, name)
+            .map(|value| {
+                value
+                    .parse::<u128>()
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .ok_or_else(|| format!("pipeline {name} needs a positive integer"))
+            })
+            .transpose()
+    };
+    let max_stages = parse_limit("--max-stages")?
+        .map(|value| {
+            usize::try_from(value).map_err(|_| "pipeline --max-stages is too large".to_string())
+        })
+        .transpose()?;
+    let stop_after_stages = parse_limit("--stop-after-stages")?
+        .map(|value| {
+            usize::try_from(value)
+                .map_err(|_| "pipeline --stop-after-stages is too large".to_string())
+        })
+        .transpose()?;
+    let max_owned_bytes = parse_limit("--max-owned-bytes")?
+        .map(|value| {
+            usize::try_from(value)
+                .map_err(|_| "pipeline --max-owned-bytes is too large".to_string())
+        })
+        .transpose()?;
+    let max_memory_bytes = parse_limit("--max-memory-bytes")?
+        .map(|value| {
+            u64::try_from(value).map_err(|_| "pipeline --max-memory-bytes is too large".to_string())
+        })
+        .transpose()?;
+    let max_fs_bytes = parse_limit("--max-fs-bytes")?
+        .map(|value| {
+            u64::try_from(value).map_err(|_| "pipeline --max-fs-bytes is too large".to_string())
+        })
+        .transpose()?;
+    let max_net_bytes = parse_limit("--max-net-bytes")?
+        .map(|value| {
+            u64::try_from(value).map_err(|_| "pipeline --max-net-bytes is too large".to_string())
+        })
+        .transpose()?;
+    let schedule = match option_value(args, "--schedule").unwrap_or("declaration") {
+        "declaration" => crate::pipeline::PipelineSchedule::Declaration,
+        "graph" => crate::pipeline::PipelineSchedule::DependencyGraph,
+        "source" => crate::pipeline::PipelineSchedule::SourceGraph,
+        value => {
+            return Err(format!(
+                "pipeline --schedule '{value}' must be declaration, graph, or source"
+            ))
+        }
+    };
+    let limits = crate::pipeline::PipelineLimits {
+        max_stages,
+        max_wall_ms: parse_limit("--max-wall-ms")?,
+        max_cpu_ms: parse_limit("--max-cpu-ms")?,
+        max_memory_bytes,
+        max_owned_bytes,
+        max_fs_bytes,
+        max_net_bytes,
+    };
+    let control = crate::pipeline::PipelineControl {
+        cancellation: None,
+        stop_after_stages,
+    };
+    let cache_root = option_value(args, "--cache-dir");
+    let cache_key_file = option_value(args, "--cache-key-file");
+    if cache_key_file.is_some() && cache_root.is_none() {
+        return Err("pipeline --cache-key-file requires --cache-dir".to_string());
+    }
+    let report = if let Some(root) = cache_root {
+        let mut cache = if let Some(key_file) = cache_key_file {
+            let mut key =
+                read_pipeline_cache_authentication_key(Path::new(root), Path::new(key_file))?;
+            let cache =
+                crate::pipeline::PipelineCache::authenticated_persistent(Path::new(root), &key);
+            key.fill(0);
+            cache?
+        } else {
+            crate::pipeline::PipelineCache::persistent(Path::new(root))?
+        };
+        crate::pipeline::run_with_cache_control(
+            file, &program, overrides, allow, limits, schedule, control, &mut cache,
+        )
+    } else {
+        crate::pipeline::run_with_control(
+            file, &program, overrides, allow, limits, schedule, control,
+        )
+    };
     if args.iter().any(|arg| arg == "--json") {
         println!("{}", report.to_json());
     } else {
@@ -876,6 +1126,61 @@ fn cmd_pipeline_run(args: &[String]) -> Result<(), String> {
     } else {
         Err(format!("pipeline run: {}", report.status))
     }
+}
+
+fn read_pipeline_cache_authentication_key(
+    cache_root: &Path,
+    key_file: &Path,
+) -> Result<Vec<u8>, String> {
+    let metadata = std::fs::symlink_metadata(key_file).map_err(|error| {
+        format!(
+            "pipeline cache authentication key file '{}' is unavailable: {error}",
+            key_file.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!(
+            "pipeline cache authentication key file '{}' must be a non-symlink regular file",
+            key_file.display()
+        ));
+    }
+    if !(32..=4096).contains(&metadata.len()) {
+        return Err(
+            "pipeline cache authentication key file must contain between 32 and 4096 bytes"
+                .to_string(),
+        );
+    }
+    let canonical_root = std::fs::canonicalize(cache_root).map_err(|error| {
+        format!(
+            "pipeline cache directory '{}' cannot be resolved: {error}",
+            cache_root.display()
+        )
+    })?;
+    let canonical_key = std::fs::canonicalize(key_file).map_err(|error| {
+        format!(
+            "pipeline cache authentication key file '{}' cannot be resolved: {error}",
+            key_file.display()
+        )
+    })?;
+    if canonical_key.starts_with(&canonical_root) {
+        return Err(
+            "pipeline cache authentication key file must be outside the cache directory"
+                .to_string(),
+        );
+    }
+    let key = std::fs::read(key_file).map_err(|error| {
+        format!(
+            "pipeline cache authentication key file '{}' cannot be read: {error}",
+            key_file.display()
+        )
+    })?;
+    if !(32..=4096).contains(&key.len()) {
+        return Err(
+            "pipeline cache authentication key file changed while reading or has an invalid size"
+                .to_string(),
+        );
+    }
+    Ok(key)
 }
 
 fn cmd_crypto_selftest(args: &[String]) -> Result<(), String> {
@@ -954,6 +1259,130 @@ fn cmd_token_report(args: &[String]) -> Result<(), String> {
         print!("{}", report.to_text());
     }
     Ok(())
+}
+
+fn cmd_codebook(args: &[String]) -> Result<(), String> {
+    let subcommand = required_arg(
+        args,
+        0,
+        "codebook build|check|measure|stats|encode|decode [project|input] [--codebook <file>] [--previous <file>] [--out <file>] [--budget <n>] [--cryptic] [--json]",
+    )?;
+    let json = args.iter().any(|arg| arg == "--json");
+    let project = args
+        .get(1)
+        .filter(|value| !value.starts_with("--"))
+        .map(String::as_str)
+        .unwrap_or(".");
+    match subcommand {
+        "build" => {
+            let out = option_value(args, "--out").unwrap_or("forgentex.codebook.json");
+            let budget = option_value(args, "--budget")
+                .map(|value| {
+                    value
+                        .parse::<usize>()
+                        .map_err(|_| "codebook --budget needs a positive integer".to_string())
+                })
+                .transpose()?
+                .unwrap_or(crate::codebook::DEFAULT_CODEBOOK_BUDGET);
+            let previous = option_value(args, "--previous")
+                .map(|path| crate::codebook::read(Path::new(path)))
+                .transpose()?;
+            let report = crate::codebook::build_with_previous(
+                Path::new(project),
+                budget,
+                args.iter().any(|arg| arg == "--cryptic"),
+                previous.as_ref(),
+            )?;
+            fs::write(out, report.to_json())
+                .map_err(|error| format!("failed to write codebook {out}: {error}"))?;
+            if json {
+                println!("{}", report.to_json());
+            } else {
+                print!("{}", report.to_text());
+                println!("wrote {out}");
+            }
+            Ok(())
+        }
+        "check" => {
+            let path = option_value(args, "--codebook").unwrap_or("forgentex.codebook.json");
+            let report = crate::codebook::check(Path::new(project), Path::new(path))?;
+            if json {
+                println!("{}", report.to_json());
+            } else {
+                print!("{}", report.to_text());
+            }
+            if report.is_success() {
+                Ok(())
+            } else {
+                Err("codebook check: stale".to_string())
+            }
+        }
+        "measure" => {
+            let path = option_value(args, "--codebook").unwrap_or("forgentex.codebook.json");
+            let codebook = crate::codebook::read(Path::new(path))?;
+            let report = crate::codebook::measure(Path::new(project), &codebook)?;
+            if json {
+                println!("{}", report.to_json());
+            } else {
+                print!("{}", report.to_text());
+            }
+            Ok(())
+        }
+        "stats" => {
+            let path = option_value(args, "--codebook").unwrap_or("forgentex.codebook.json");
+            let report = crate::codebook::read(Path::new(path))?;
+            if json {
+                println!("{}", report.to_json());
+            } else {
+                print!("{}", report.stats_text());
+            }
+            Ok(())
+        }
+        "encode" | "decode" => {
+            let input = required_arg(
+                args,
+                1,
+                "codebook encode|decode <input> --codebook <file> --out <file>",
+            )?;
+            let codebook_path = option_value(args, "--codebook")
+                .ok_or_else(|| "codebook encode/decode requires --codebook <file>".to_string())?;
+            let out = option_value(args, "--out")
+                .ok_or_else(|| "codebook encode/decode requires --out <file>".to_string())?;
+            let codebook = crate::codebook::read(Path::new(codebook_path))?;
+            let source = fs::read_to_string(input)
+                .map_err(|error| format!("failed to read codebook payload {input}: {error}"))?;
+            let (transformed, notice) = if subcommand == "encode" {
+                let admission = if args.iter().any(|arg| arg == "--force-codebook") {
+                    let encoded = codebook.encode_payload(&source)?;
+                    crate::codebook::CodebookPayload {
+                        plain_tokens: crate::tokens::estimate(&source),
+                        encoded_tokens: crate::tokens::estimate(&encoded),
+                        text: encoded,
+                        decision: "forced".to_string(),
+                    }
+                } else {
+                    codebook.encode_payload_if_smaller(&source)?
+                };
+                let notice = format!(
+                    "codebook={} plain_tokens={} encoded_tokens={}",
+                    admission.decision, admission.plain_tokens, admission.encoded_tokens
+                );
+                (admission.text, notice)
+            } else {
+                (
+                    codebook.decode_payload(&source)?,
+                    "codebook=decoded".to_string(),
+                )
+            };
+            fs::write(out, transformed)
+                .map_err(|error| format!("failed to write codebook payload {out}: {error}"))?;
+            println!("wrote {out} {notice}");
+            Ok(())
+        }
+        other => Err(format!(
+            "unknown codebook command '{other}': expected build, check, measure, stats, encode, or decode"
+        )),
+    }
 }
 
 fn cmd_compress(args: &[String]) -> Result<(), String> {
@@ -1074,7 +1503,7 @@ fn cmd_debug(args: &[String]) -> Result<(), String> {
     let file = required_arg(
         args,
         0,
-        "debug <file> --entry <fn> [--json-input <in>] [--break <node-id>] [--max-steps N] [--json]",
+        "debug <file> --entry <fn> [--json-input <in>] [--break <node-id>] [--max-steps N] [--live] [--allow-effects a,b] [--grant-fs a,b] [--grant-net host,...] [--values summary|full] [--tail N] [--break-if <node>=<expr>] [--watch <expr>] [--interactive] [--json]",
     )?;
     let program = read_program(file)?;
     let diagnostics = check(&program);
@@ -1102,13 +1531,188 @@ fn cmd_debug(args: &[String]) -> Result<(), String> {
             .parse::<usize>()
             .map_err(|_| format!("invalid --max-steps value: {max}"))?;
     }
-    let report = crate::interp::debug_entry(&program, entry, &input, options)?;
+    // Runtime reach mirrors `fgx run`: `--live` executes capsules, `--hosted`
+    // plus grants opens scoped filesystem and network access. Both stay off by
+    // default so an ordinary debug run cannot touch the host.
+    let split = |value: &str| {
+        value
+            .split(',')
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect::<Vec<_>>()
+    };
+    options.live = args.iter().any(|arg| arg == "--live");
+    options.allow_effects = option_value(args, "--allow-effects").map(split);
+    if options.allow_effects.is_some() {
+        options.live = true;
+    }
+    options.fs_grants = option_value(args, "--grant-fs")
+        .map(split)
+        .unwrap_or_default();
+    options.net_allow = option_value(args, "--grant-net")
+        .map(split)
+        .unwrap_or_default();
+    options.hosted = !options.fs_grants.is_empty() || !options.net_allow.is_empty();
+    // Traced values are elided by default; a debug run over a multi-megabyte
+    // buffer otherwise renders the whole buffer on every step.
+    if let Some(tail) = option_value(args, "--tail") {
+        options.tail = Some(
+            tail.parse::<usize>()
+                .map_err(|_| format!("invalid --tail value: {tail}"))?,
+        );
+    }
+    match option_value(args, "--values") {
+        Some("full") => options.value_elements = usize::MAX,
+        Some("summary") | None => {}
+        Some(other) => {
+            return Err(format!(
+                "invalid --values value '{other}': expected summary or full"
+            ))
+        }
+    }
+
+    // `--break-if <node>=<expr>` stops at a node only when the expression holds
+    // there; `--watch <expr>` is repeatable and evaluates after every step.
+    if let Some(spec) = option_value(args, "--break-if") {
+        let (node, source) = spec
+            .split_once('=')
+            .ok_or_else(|| format!("debug --break-if needs <node-id>=<expr>, got '{spec}'"))?;
+        let expr = crate::parser::parse_expr(source)
+            .map_err(|err| format!("invalid --break-if expression '{source}': {err}"))?;
+        options.break_if = Some((node.to_string(), expr));
+    }
+    for source in collect_option_values(args, "--watch") {
+        let expr = crate::parser::parse_expr(&source)
+            .map_err(|err| format!("invalid --watch expression '{source}': {err}"))?;
+        options.watches.push((source, expr));
+    }
+
+    if args.iter().any(|arg| arg == "--interactive") {
+        return run_interactive_debug(&program, Path::new(file), entry, &input, options);
+    }
+
+    let mut report = crate::interp::debug_entry(&program, entry, &input, options)?;
+    // Node ids are the tracer's vocabulary; line numbers are resolved from the
+    // source map afterwards so a step can be opened in an editor.
+    let path = Path::new(file);
+    if let Ok(source) = fs::read_to_string(path) {
+        let parsed = crate::parser::parse_file_detailed(path, &source);
+        report.resolve_positions(&parsed.source_map);
+    }
     if args.iter().any(|arg| arg == "--json") {
         println!("{}", report.to_json());
     } else {
         print!("{}", report.to_text());
     }
     Ok(())
+}
+
+/// Drive a paused debug session from stdin.
+///
+/// One command per line: `step`/`s` into calls, `next`/`n` over them,
+/// `out`/`o` until the frame returns, `continue`/`c`, `print <expr>`/`p`, and
+/// `quit`/`q`. End-of-input continues to completion rather than hanging.
+fn run_interactive_debug(
+    program: &crate::ast::Program,
+    file: &Path,
+    entry: &str,
+    input: &str,
+    options: crate::interp::DebugOptions,
+) -> Result<(), String> {
+    use crate::interp::{DebugCommand, DebugEvent};
+    use std::io::Write;
+
+    let source_map = fs::read_to_string(file)
+        .ok()
+        .map(|source| crate::parser::parse_file_detailed(file, &source).source_map);
+    let line_of = |node: &str| {
+        source_map.as_ref().and_then(|map| {
+            map.nodes
+                .iter()
+                .find(|entry| entry.node == node)
+                .map(|entry| entry.span.start_line)
+        })
+    };
+
+    println!("forgentex debug session: step | next | out | continue | print <expr> | quit");
+    let stdin = std::io::stdin();
+    let mut report = None;
+    // The last stop is kept so `locals` can answer after an `print`, which
+    // leaves the session paused at the same place.
+    let mut last_locals: Vec<(String, String)> = Vec::new();
+
+    // Read one command. `print` returns an Evaluate, which leaves the session
+    // paused and produces an Evaluated event that prompts again.
+    let prompt = |locals: &[(String, String)]| -> DebugCommand {
+        loop {
+            print!("(fgx) ");
+            let _ = std::io::stdout().flush();
+            let mut line = String::new();
+            // End of input is not an error: finish the run.
+            if stdin.read_line(&mut line).unwrap_or(0) == 0 {
+                return DebugCommand::Continue;
+            }
+            let line = line.trim();
+            let (head, rest) = line.split_once(' ').unwrap_or((line, ""));
+            match head {
+                "step" | "s" => return DebugCommand::StepIn,
+                "next" | "n" => return DebugCommand::Next,
+                "out" | "o" => return DebugCommand::StepOut,
+                "continue" | "c" | "" => return DebugCommand::Continue,
+                "quit" | "q" => return DebugCommand::Quit,
+                "locals" | "l" => {
+                    for (name, value) in locals {
+                        println!("  {name} = {value}");
+                    }
+                }
+                "print" | "p" if !rest.trim().is_empty() => {
+                    return DebugCommand::Evaluate(rest.trim().to_string())
+                }
+                "print" | "p" => println!("  print needs an expression"),
+                other => println!("  unknown command '{other}'"),
+            }
+        }
+    };
+
+    crate::interp::debug_session(program, entry, input, options, |event| match event {
+        DebugEvent::Stopped(stop) => {
+            let position = line_of(&stop.node)
+                .map(|line| format!("L{line}"))
+                .unwrap_or_else(|| "--".to_string());
+            println!(
+                "stopped {position} {} (depth {})  {}",
+                stop.node, stop.depth, stop.text
+            );
+            last_locals = stop.locals.clone();
+            prompt(&stop.locals)
+        }
+        DebugEvent::Evaluated { source, value } => {
+            match value {
+                Ok(text) => println!("  {source} = {text}"),
+                Err(err) => println!("  {source}: {err}"),
+            }
+            // Still paused at the same place: ask again.
+            prompt(&last_locals)
+        }
+        DebugEvent::Finished(finished) => {
+            report = Some(finished.clone());
+            DebugCommand::Continue
+        }
+    })?;
+
+    if let Some(report) = report {
+        println!("session {}", report.status);
+    }
+    Ok(())
+}
+
+/// Serve one Debug Adapter Protocol session on stdio, for an editor to drive.
+fn cmd_dap(_args: &[String]) -> Result<(), String> {
+    let stdin = std::io::stdin();
+    let mut reader = std::io::BufReader::new(stdin.lock());
+    let stdout = std::io::stdout();
+    let mut writer = std::io::BufWriter::new(stdout.lock());
+    crate::dap::serve(&mut reader, &mut writer)
 }
 
 fn cmd_runtimes(args: &[String]) -> Result<(), String> {
@@ -1363,16 +1967,21 @@ fn cmd_patch(args: &[String]) -> Result<(), String> {
     let source_file = required_arg(
         args,
         0,
-        "patch <source> <patch> --review|--check-only|--emit-review-json",
+        "patch <source> <patch> --review|--check-only|--emit-review-json [--codebook <file>] [--project <path>]",
     )?;
     let patch_file = required_arg(
         args,
         1,
-        "patch <source> <patch> --review|--check-only|--emit-review-json",
+        "patch <source> <patch> --review|--check-only|--emit-review-json [--codebook <file>] [--project <path>]",
     )?;
     let program = read_program(source_file)?;
-    let patch_source = fs::read_to_string(patch_file)
+    let mut patch_source = fs::read_to_string(patch_file)
         .map_err(|err| format!("failed to read patch {patch_file}: {err}"))?;
+    if let Some(path) = option_value(args, "--codebook") {
+        let codebook = crate::codebook::read(Path::new(path))?;
+        codebook.ensure_current(Path::new(project_value(args)))?;
+        patch_source = codebook.decode_payload(&patch_source)?;
+    }
     let check_only = args.iter().any(|arg| arg == "--check-only");
     let emit_review_json = args.iter().any(|arg| arg == "--emit-review-json");
     let result = apply_patch_with_options(program, &patch_source, PatchOptions { check_only })?;
@@ -1482,15 +2091,46 @@ fn cmd_map(args: &[String]) -> Result<(), String> {
     let options = ProjectMapOptions {
         include_targets: args.iter().any(|arg| arg == "--include-targets"),
     };
-    let map = if args.iter().any(|arg| arg == "--project") {
+    let project_mode = args.iter().any(|arg| arg == "--project");
+    let mut codebook_notice = None;
+    let mut map = if project_mode {
         generate_project_map_with_options(Path::new(project_value(args)), options)?
     } else {
         let root = required_arg(args, 0, "map <dir> --out <file>")?;
         generate_map_with_options(Path::new(root), options)?
     };
+    if let Some(path) = option_value(args, "--codebook") {
+        if !project_mode {
+            return Err(
+                "map --codebook requires --project so corpus currency can be verified".to_string(),
+            );
+        }
+        let codebook = crate::codebook::read(Path::new(path))?;
+        codebook.ensure_current(Path::new(project_value(args)))?;
+        let admission = if args.iter().any(|arg| arg == "--force-codebook") {
+            let encoded = codebook.encode_payload(&map)?;
+            crate::codebook::CodebookPayload {
+                plain_tokens: crate::tokens::estimate(&map),
+                encoded_tokens: crate::tokens::estimate(&encoded),
+                text: encoded,
+                decision: "forced".to_string(),
+            }
+        } else {
+            codebook.encode_payload_if_smaller(&map)?
+        };
+        codebook_notice = Some(format!(
+            "codebook={} plain_tokens={} encoded_tokens={}",
+            admission.decision, admission.plain_tokens, admission.encoded_tokens
+        ));
+        map = admission.text;
+    }
     if let Some(out) = option_value(args, "--out") {
         fs::write(out, &map).map_err(|err| format!("failed to write map {out}: {err}"))?;
-        println!("wrote {out}");
+        if let Some(notice) = codebook_notice {
+            println!("wrote {out} {notice}");
+        } else {
+            println!("wrote {out}");
+        }
     } else {
         print!("{map}");
     }
@@ -1509,11 +2149,36 @@ fn cmd_context(args: &[String]) -> Result<(), String> {
     let symbol = required_arg(
         args,
         0,
-        "context <symbol> --deps types,effects,tests [--json]",
+        "context <symbol> --deps types,effects,tests [--max-tokens <n>] [--since <context.json>] [--codebook <file>] [--force-codebook] [--out <context.json>] [--json]",
     )?;
     let project = project_value(args);
-    let options = ContextOptions::from_csv(option_value(args, "--deps"));
-    if args.iter().any(|arg| arg == "--json") {
+    let max_tokens = option_value(args, "--max-tokens")
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .ok()
+                .filter(|value| *value > 0)
+                .ok_or_else(|| "context --max-tokens needs a positive integer".to_string())
+        })
+        .transpose()?;
+    let mut options =
+        ContextOptions::from_csv(option_value(args, "--deps")).with_max_tokens(max_tokens);
+    if let Some(path) = option_value(args, "--codebook") {
+        options = options
+            .with_codebook(crate::codebook::read(Path::new(path))?)
+            .with_force_codebook(args.iter().any(|arg| arg == "--force-codebook"));
+    }
+    if let Some(path) = option_value(args, "--since") {
+        let baseline = fs::read_to_string(path)
+            .map_err(|error| format!("failed to read context baseline {path}: {error}"))?;
+        options = options.with_baseline_json(&baseline)?;
+    }
+    if let Some(path) = option_value(args, "--out") {
+        let json = context_json(Path::new(project), symbol, options)?;
+        fs::write(path, json)
+            .map_err(|error| format!("failed to write context packet {path}: {error}"))?;
+        println!("wrote {path}");
+    } else if args.iter().any(|arg| arg == "--json") {
         println!("{}", context_json(Path::new(project), symbol, options)?);
     } else {
         print!("{}", context_text(Path::new(project), symbol, options)?);
@@ -1522,18 +2187,43 @@ fn cmd_context(args: &[String]) -> Result<(), String> {
 }
 
 fn cmd_review(args: &[String]) -> Result<(), String> {
-    let patch = required_arg(args, 0, "review <patch> [--source <file>] [--json]")?;
+    let patch = required_arg(
+        args,
+        0,
+        "review <patch> [--source <file>] [--project <path>] [--codebook <file>] [--json]",
+    )?;
     let project = project_value(args);
     let source = option_value(args, "--source").map(Path::new);
+    let codebook = option_value(args, "--codebook")
+        .map(|path| crate::codebook::read(Path::new(path)))
+        .transpose()?;
     if args.iter().any(|arg| arg == "--json") {
         println!(
             "{}",
-            review_json(Path::new(patch), source, Path::new(project))?
+            if codebook.is_some() {
+                review_json_with_codebook(
+                    Path::new(patch),
+                    source,
+                    Path::new(project),
+                    codebook.as_ref(),
+                )?
+            } else {
+                review_json(Path::new(patch), source, Path::new(project))?
+            }
         );
     } else {
         print!(
             "{}",
-            workbench_review_text(Path::new(patch), source, Path::new(project))?
+            if codebook.is_some() {
+                review_text_with_codebook(
+                    Path::new(patch),
+                    source,
+                    Path::new(project),
+                    codebook.as_ref(),
+                )?
+            } else {
+                workbench_review_text(Path::new(patch), source, Path::new(project))?
+            }
         );
     }
     Ok(())
@@ -1794,11 +2484,35 @@ fn cmd_release_check(args: &[String]) -> Result<(), String> {
     } else {
         print!("{}", report.to_text());
     }
-    if args.iter().any(|arg| arg == "--strict") && !report.is_v1_ready() {
+    if args.iter().any(|arg| arg == "--strict") && !report.is_target_ready() {
         Err(format!("release target '{target}' is not ready"))
     } else {
         Ok(())
     }
+}
+
+fn cmd_release_evidence(args: &[String]) -> Result<(), String> {
+    let report = crate::public_compat::public_0_1_evidence();
+    if args.iter().any(|arg| arg == "--json") {
+        println!("{}", report.to_json());
+    } else {
+        print!("{}", report.to_text());
+    }
+    if args.iter().any(|arg| arg == "--strict") && report.status != "pass" {
+        Err("public 0.1 evidence has unresolved gaps".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn cmd_dist_manifest(args: &[String]) -> Result<(), String> {
+    let manifest = crate::distribution::distribution_manifest();
+    if args.iter().any(|arg| arg == "--json") {
+        println!("{}", manifest.to_json());
+    } else {
+        print!("{}", manifest.to_text());
+    }
+    Ok(())
 }
 
 fn read_program(file: &str) -> Result<crate::ast::Program, String> {
@@ -1862,6 +2576,8 @@ fn help_text() -> String {
     "Forgentex demo CLI\n\
 \n\
 Commands:\n\
+  fgx --version\n\
+  fgx doctor [--json] [--strict]\n\
   fgx ast <file> --canonical\n\
   fgx parse <file> --emit-ast\n\
   fgx diagnose <file> --json\n\
@@ -1887,15 +2603,22 @@ Commands:\n\
   fgx contract-review <file> [--json] [--strict]\n\
   fgx capsule-context <file> [--capsule <name>] [--json]\n\
   fgx compress <file> [--emit] [--json]\n\
+  fgx codebook build|check|measure|stats|encode|decode [project|input] [--codebook <file>] [--previous <file>] [--out <file>] [--budget <n>] [--cryptic] [--force-codebook] [--json]\n\
   fgx token-report <file> [--json]\n\
   fgx build <project> --native [--emit obj|shared] [--out <dir>] [--json]\n\
   fgx edit-bench <file> [--edits <n>] [--json]\n\
   fgx capsule-tokens <file> [--json]\n\
+  fgx app-run <project> [--arg <v>]... [--json]\n\
+  fgx forgepack build <spec> <output> [--json]\n\
+  fgx forgepack evidence [--json] [--strict]\n\
+  fgx forgepack extract <archive> <directory> [--json]\n\
+  fgx forgepack inspect <archive> [--json]\n\
+  fgx forgepack verify <archive> [--json]\n\
   fgx io-run <file> --entry <fn> [--grant fs.read] [--grant fs.write] [--arg <v>]... [--json]\n\
   fgx net-run <file> --entry <fn> [--allow <host:port>]... [--arg <v>]... [--json]\n\
   fgx crypto-selftest [--json]\n\
   fgx polyglot-run <file> [--out <dir>] [--json]\n\
-  fgx pipeline-run <file> [--set share=value] [--allow-effects a,b] [--json]\n\
+  fgx pipeline-run <file> [--set share=value] [--allow-effects a,b] [--schedule declaration|graph|source] [--cache-dir dir] [--cache-key-file file] [--stop-after-stages n] [--max-stages n] [--max-wall-ms n] [--max-cpu-ms n] [--max-memory-bytes n] [--max-owned-bytes n] [--max-fs-bytes n] [--max-net-bytes n] [--json]\n\
   fgx trust-session [--capability <cap>] [--payload <p>] [--json]\n\
   fgx asm-check <file> --target <triple> [--json]\n\
   fgx abi <file> --target <triple> [--json]\n\
@@ -1908,7 +2631,7 @@ Commands:\n\
   fgx targets [--json]\n\
   fgx build <project> --backend c|zig [--out <dir>]\n\
   fgx build <project> --backend c|zig --target <triple>|--all-targets [--profile dev] [--json]\n\
-  fgx new <path> [--name <package>]\n\
+  fgx new <path> [--name <package>] [--template lib|app]\n\
   fgx lock [project] [--out <file>] [--json]\n\
   fgx test <file> [--filter <name>] [--target <triple>] [--json]\n\
   fgx test [--project <path>] [--target <triple>|--all-targets] [--json]\n\
@@ -1917,13 +2640,15 @@ Commands:\n\
   fgx verify [project] [--json]\n\
   fgx api --public [--project <path>]\n\
   fgx effects <file> --json\n\
-  fgx patch <source> <patch> --review|--check-only|--emit-review-json\n\
+  fgx patch <source> <patch> --review|--check-only|--emit-review-json [--codebook <file>] [--project <path>]\n\
   fgx run <file> [--entry <function> --json-input <file> --backend interp]\n\
+  fgx dap
+\n  fgx debug <file> --entry <fn> [--json-input <in>] [--break <node-id>] [--max-steps N] [--live] [--allow-effects a,b] [--grant-fs a,b] [--grant-net host,...] [--values summary|full] [--tail N] [--break-if <node>=<expr>] [--watch <expr>] [--interactive] [--json]\n\
   fgx map <dir> --out <file> [--include-targets]\n\
-  fgx map --project [path] --out <file> [--include-targets]\n\
+  fgx map --project [path] --out <file> [--include-targets] [--codebook <file>] [--force-codebook]\n\
   fgx get <symbol> --from <dir> --deps types\n\
-  fgx context <symbol> --deps types,effects,tests [--project <path>] [--json]\n\
-  fgx review <patch> [--source <file>] [--project <path>] [--json]\n\
+  fgx context <symbol> --deps types,effects,tests [--max-tokens <n>] [--since <context.json>] [--codebook <file>] [--force-codebook] [--out <context.json>] [--project <path>] [--json]\n\
+  fgx review <patch> [--source <file>] [--project <path>] [--codebook <file>] [--json]\n\
   fgx graph dump <project|dir|file> [--out <file>]\n\
   fgx graph validate <graph> [--json]\n\
   fgx graph view <graph> --to fgx|fgai\n\
@@ -1936,7 +2661,9 @@ Commands:\n\
   fgx bench <file> --entry <function> --json-input <file> --target <triple> [--iterations <n>] [--json]\n\
   fgx perf-report --scalar <file> --optimized <file> --entry <function> --optimized-entry <function> --json-input <file> [--iterations <n>] [--json]\n\
   fgx fix --plan <file|project> [--target <triple>] [--json]\n\
-  fgx release-check [--target v1.0] [--json] [--strict]"
+  fgx release-check [--target v1.0|0.1] [--json] [--strict]\n\
+  fgx release-evidence [--json] [--strict]\n\
+  fgx dist-manifest [--json]"
         .to_string()
 }
 
@@ -1950,7 +2677,8 @@ fn diagnose_json(
 ) -> String {
     let ast = canonical_ast.unwrap_or("null");
     format!(
-        "{{\n  \"file\": \"{}\",\n  \"kind\": \"{}\",\n  \"diagnostics\": {},\n  \"tokens\": {},\n  \"source_map\": {},\n  \"canonical_ast\": {}\n}}",
+        "{{\n  \"schema\": \"{}\",\n  \"file\": \"{}\",\n  \"kind\": \"{}\",\n  \"diagnostics\": {},\n  \"tokens\": {},\n  \"source_map\": {},\n  \"canonical_ast\": {}\n}}",
+        crate::public_compat::DIAGNOSE_SCHEMA,
         escape_json(file),
         escape_json(kind),
         parse_diagnostics_to_json(diagnostics),

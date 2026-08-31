@@ -1261,6 +1261,23 @@ fn symbol_from_item(
             targets: Vec::new(),
             tests: Vec::new(),
         },
+        Item::Pipeline(pipeline) => GraphSymbol {
+            kind: "pipeline".to_string(),
+            name: pipeline.name.clone(),
+            id: pipeline.id.clone(),
+            module: module.to_string(),
+            public: public_ids.contains(&pipeline.id),
+            unsafe_fn: false,
+            asm: false,
+            params: pipeline.stages.len(),
+            return_type: "pipeline".to_string(),
+            fields: pipeline.edges.len(),
+            xfail: false,
+            expectations: 0,
+            effects: Vec::new(),
+            targets: pipeline.stages.clone(),
+            tests: Vec::new(),
+        },
     }
 }
 

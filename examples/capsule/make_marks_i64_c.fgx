@@ -1,0 +1,32 @@
+# Native data boundaries: C returns an owned Vec[i64] with values beyond 32 bits.
+
+foreign make_marks_i64_c c version "c11" effects [alloc]:
+    input count: i32
+    output marks: Vec[i64]
+    sandbox "fs.none"
+    code:
+        #include "types.h"
+        #include <stdint.h>
+        #include <stdlib.h>
+
+        FgxOwnedI64 make_marks_i64_c(int32_t count) {
+            FgxOwnedI64 result = { NULL, 0, 0 };
+            if (count <= 0) return result;
+            result.ptr = (int64_t *)malloc((size_t)count * sizeof(int64_t));
+            if (result.ptr == NULL) return result;
+            result.len = (size_t)count;
+            result.capacity = (size_t)count;
+            for (size_t i = 0; i < result.len; ++i) {
+                result.ptr[i] = ((int64_t)i - 1) * 5000000000LL;
+            }
+            return result;
+        }
+
+        void make_marks_i64_c_free(int64_t *ptr, size_t len, size_t capacity) {
+            (void)len;
+            (void)capacity;
+            free(ptr);
+        }
+
+fn marks_from_c(count: i32) -> Vec[i64] effects [alloc]:
+    return make_marks_i64_c(count)

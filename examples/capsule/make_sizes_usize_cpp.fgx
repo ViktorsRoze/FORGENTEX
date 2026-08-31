@@ -1,0 +1,41 @@
+# Native data boundaries: C++ returns an owned pointer-width unsigned Vec[usize].
+
+foreign make_sizes_usize_cpp cpp version "c++17" effects [alloc]:
+    input count: i32
+    output sizes: Vec[usize]
+    sandbox "fs.none"
+    code:
+        #include "types.h"
+        #include <cstddef>
+        #include <cstdint>
+        #include <cstdlib>
+
+        extern "C" FgxOwnedUsize make_sizes_usize_cpp(std::int32_t count) {
+            FgxOwnedUsize result = { nullptr, 0, 0 };
+            if (count <= 0) return result;
+            result.ptr = static_cast<std::size_t *>(
+                std::malloc(static_cast<std::size_t>(count) * sizeof(std::size_t))
+            );
+            if (result.ptr == nullptr) return result;
+            result.len = static_cast<std::size_t>(count);
+            result.capacity = static_cast<std::size_t>(count);
+            for (std::size_t i = 0; i < result.len; ++i) {
+                result.ptr[i] = i + 1 == result.len
+                    ? SIZE_MAX
+                    : i * static_cast<std::size_t>(3000000000ULL);
+            }
+            return result;
+        }
+
+        extern "C" void make_sizes_usize_cpp_free(
+            std::size_t *ptr,
+            std::size_t len,
+            std::size_t capacity
+        ) {
+            (void)len;
+            (void)capacity;
+            std::free(ptr);
+        }
+
+fn sizes_from_cpp(count: i32) -> Vec[usize] effects [alloc]:
+    return make_sizes_usize_cpp(count)

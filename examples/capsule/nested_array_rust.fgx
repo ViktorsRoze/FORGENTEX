@@ -1,0 +1,43 @@
+# Native data boundaries: a nested fixed array of reviewed structs crosses Rust by value.
+
+@repr(C)
+struct GridPoint:
+    x: i16
+    y: i16
+
+@repr(C)
+struct PointGrid:
+    id: i32
+    points: [[GridPoint; 2]; 2]
+
+foreign shift_grid_rust rust version "2021":
+    input grid: PointGrid
+    output shifted: PointGrid
+    sandbox "fs.none"
+    code:
+        #[repr(C)]
+        pub struct GridPoint {
+            pub x: i16,
+            pub y: i16,
+        }
+
+        #[repr(C)]
+        pub struct PointGrid {
+            pub id: i32,
+            pub points: [[GridPoint; 2]; 2],
+        }
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn shift_grid_rust(mut grid: PointGrid) -> PointGrid {
+            for (row, points) in grid.points.iter_mut().enumerate() {
+                for (column, point) in points.iter_mut().enumerate() {
+                    let delta = (row * 2 + column + 1) as i16;
+                    point.x += delta;
+                    point.y -= delta;
+                }
+            }
+            grid
+        }
+
+fn shift_grid(grid: PointGrid) -> PointGrid:
+    return shift_grid_rust(grid)

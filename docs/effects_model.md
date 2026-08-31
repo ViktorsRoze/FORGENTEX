@@ -59,6 +59,9 @@ crypto.nonce
 ledger.mock
 agent.payment
 agent.patch
+concurrency.task
+concurrency.channel
+concurrency.timer
 gpu.render
 media.encode
 memory.raw
@@ -84,6 +87,15 @@ The checker infers effects from:
 - Stage 17 standard runtime calls such as `core_fs_read_text`,
   `core_fs_copy_text`, `core_net_http_get`, `core_net_tcp_send`,
   `core_serialize_text_len`, and `core_stream_count_bytes`.
+- Canonical JSON, UTF-8, and fixed-width little-endian operations in
+  `core.serialize` are pure bounded memory transforms and infer no effect;
+  only the historical demo helper `core_serialize_text_len` retains the
+  `serialize` effect.
+- hosted application calls such as `core_io_read_bytes`,
+  `core_io_list_dir`, `core_io_write_bytes_atomic`, and
+  `core_io_publish_bytes_artifact`, whose `fs.read`/`fs.write` effects are
+  additionally constrained by manifest roots and byte/entry budgets at
+  runtime.
 - Stage 18 mock crypto and agent-economy calls such as
   `core_crypto_sign_ed25519`, `core_crypto_hash_blake3`,
   `core_agent_payment_receipt`, and `core_agent_signed_patch_hash`.
@@ -202,6 +214,11 @@ Explicit unsafe wrappers remain available for review-only escape hatches.
 `ledger.mock`, `agent.payment`, and `agent.patch` describe deterministic mock
 ledger receipts and signed semantic patch helpers. These effects are rejected by
 the C backend along with other runtime-only effects.
+
+`concurrency.task`, `concurrency.channel`, and `concurrency.timer` distinguish
+cooperative execution, bounded communication, and explicit logical-time
+control. They are deterministic interpreter/runtime effects and do not imply
+host threads, wall-clock access, or asynchronous OS I/O.
 
 ## Semantic Patches
 

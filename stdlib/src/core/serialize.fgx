@@ -2,3 +2,36 @@ module core.serialize
 
 export fn core_serialize_text_len(value: str) -> usize effects [serialize]:
     return core_runtime_serialize_text_len(value)
+
+export fn core_serialize_json_canonical(value: str) -> str:
+    return core_runtime_serialize_json_canonical(value)
+
+export fn core_serialize_json_is_canonical(value: str) -> bool:
+    return core_runtime_serialize_json_is_canonical(value)
+
+export fn core_serialize_utf8_encode(value: str) -> Vec[u8]:
+    return core_runtime_serialize_utf8_encode(value)
+
+export fn core_serialize_utf8_decode(bytes: Vec[u8]) -> str:
+    return core_runtime_serialize_utf8_decode(bytes)
+
+export fn core_serialize_u16_le(value: u16) -> Vec[u8]:
+    return core_runtime_serialize_u16_le(value)
+
+export fn core_serialize_u32_le(value: u32) -> Vec[u8]:
+    return core_runtime_serialize_u32_le(value)
+
+export fn core_serialize_i32_le(value: i32) -> Vec[u8]:
+    return core_runtime_serialize_i32_le(value)
+
+export fn core_serialize_read_u16_le(bytes: Vec[u8], offset: usize) -> u16:
+    return core_runtime_serialize_read_u16_le(bytes, offset)
+
+export fn core_serialize_read_u32_le(bytes: Vec[u8], offset: usize) -> u32:
+    return core_runtime_serialize_read_u32_le(bytes, offset)
+
+export fn core_serialize_read_i32_le(bytes: Vec[u8], offset: usize) -> i32:
+    return core_runtime_serialize_read_i32_le(bytes, offset)
+
+export fn core_serialize_concat(left: Vec[u8], right: Vec[u8]) -> Vec[u8]:
+    return core_runtime_serialize_concat(left, right)

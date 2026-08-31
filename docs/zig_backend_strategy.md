@@ -30,8 +30,18 @@ The Stage 28 Zig backend lowers:
 - arithmetic, comparisons, casts, calls, indexing, field access, and `.len`
 - bounded borrowed-string byte length, containment, and content equality through
   allocation-free helpers shared semantically with the C backend
-- fresh annotated function-local `Vec[i32]` with explicit `effects [alloc]`, a
-  1,048,576-element cap, checked access, and lexical `defer` cleanup
+- fresh annotated function-, branch-, loop-, or match-arm-local `Vec[T]` for `bool`, every signed/unsigned
+  integer width (including pointer-sized integers), `f32`/`f64`, and declared
+  data-less or payload enums, backend-lowerable named structs, and borrowed
+  immutable `str` views and immutable scalar slices, plus recursively fixed-size
+  arrays of scalar, declared enum, backend-lowerable named-struct, or immutable
+  borrowed string/scalar-slice leaves with at most 16 dimensions and 1,024
+  total value leaves, with
+  explicit `effects [alloc]`, a 1,048,576-element cap, discarded, immediately
+  consumed, or stored-local `Option[T]` pop values handled by
+  `is_some`/`is_none`/`unwrap_or` or returned unchanged; direct returned pops,
+  checked access, and
+  lexical `defer` cleanup across normal scope exit, `break`, `continue`, and return
 - deterministic traps and bounds checks matching interpreter/C behavior
 
 The backend should reject:
@@ -39,8 +49,11 @@ The backend should reject:
 - `unsafe fn`
 - structured assembly
 - unsupported generic runtime values, including Vec aliases/escapes,
-  signatures/returns, nested declarations, non-`i32` elements, and
-  value-returning pop
+  signatures/returns, mutable-view or other unsupported owned/generic array
+  leaves, other owned/generic element layouts, option parameters, reassignment,
+  immediate untyped construction, parameter/callee-derived returns, and
+  state-dependent pop fallbacks. Context-typed `Some`/`None` locals and proven
+  direct or unmodified-local returns use Zig `?T` for supported value layouts
 - runtime-only effects such as filesystem, networking, streaming,
   serialization, and implicit allocation
 - owned/allocating String operations and String operations returning Option or

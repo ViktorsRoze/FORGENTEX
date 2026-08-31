@@ -18,3 +18,22 @@ fn cancel_scores() -> usize effects [concurrency.task]:
     let first: bool = task_group_spawn(group, score, 1)
     let second: bool = task_group_spawn(group, score, 2)
     return task_group_cancel(group)
+
+fn incremental_scores() -> i32 effects [concurrency.task]:
+    let group: TaskGroup[i32] = task_group_new(2)
+    let first: bool = task_group_spawn(group, score, 1)
+    let second: bool = task_group_spawn(group, score, 2)
+    let next: i32 = unwrap_or(task_group_await_next(group), 0)
+    let third: bool = task_group_spawn(group, score, 3)
+    let remaining: Vec[i32] = task_group_await_all(group)
+    if !first || !second || !third:
+        return -1
+    return next + remaining[0] + remaining[1]
+
+fn backpressured_scores() -> i32 effects [concurrency.task]:
+    let group: TaskGroup[i32] = task_group_new(2)
+    let first_done: i32 = unwrap_or(task_group_spawn_wait(group, score, 1), 0)
+    let second_done: i32 = unwrap_or(task_group_spawn_wait(group, score, 2), 0)
+    let released: i32 = unwrap_or(task_group_spawn_wait(group, score, 3), 0)
+    let remaining: Vec[i32] = task_group_await_all(group)
+    return first_done + second_done + released + remaining[0] + remaining[1]

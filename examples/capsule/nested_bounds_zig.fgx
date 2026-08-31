@@ -1,0 +1,42 @@
+# Native data boundaries: pinned Zig 0.14 accepts and returns nested extern structs.
+
+@repr(C)
+struct Bounds:
+    min_x: i16
+    max_x: i16
+    min_y: i16
+    max_y: i16
+
+@repr(C)
+struct Region:
+    id: i32
+    bounds: Bounds
+
+foreign nested_bounds_zig zig version "0.14":
+    input region: Region
+    output adjusted: Region
+    sandbox "fs.none"
+    code:
+        pub const Bounds = extern struct {
+            min_x: i16,
+            max_x: i16,
+            min_y: i16,
+            max_y: i16,
+        };
+
+        pub const Region = extern struct {
+            id: i32,
+            bounds: Bounds,
+        };
+
+        pub export fn nested_bounds_zig(region: Region) Region {
+            var adjusted = region;
+            adjusted.bounds.min_x += 10;
+            adjusted.bounds.max_x += 10;
+            adjusted.bounds.min_y += 20;
+            adjusted.bounds.max_y += 20;
+            return adjusted;
+        }
+
+fn adjust_region(region: Region) -> Region:
+    return nested_bounds_zig(region)

@@ -153,6 +153,41 @@ caller's instance budget, and the cue/action validator requires matching IDs.
 - `core_fs_write_text(scope, path, contents) -> Result[usize,str]`
 - `core_fs_copy_text(scope, source, dest) -> Result[usize,str]`
 
+`core.path`:
+
+- `core_path_parse(value) -> Path`
+- `core_path_join(base, child) -> Path`
+- `core_path_parent(path) -> Option[Path]`
+- `core_path_file_name(path) -> str`
+- `core_path_extension(path) -> str`
+- `core_path_to_str(path) -> str`
+- `core_path_starts_with(path, base) -> bool`
+
+`Path` is a statically distinct immutable portable path. `DirEntry` contains a
+typed path, kind, and regular-file size for collected directory listings.
+
+`core.io` (hosted by `io-run` or the manifest-backed application runtime):
+
+- `core_io_read_file(path) -> str`
+- `core_io_read_bytes(path) -> Vec[u8]`
+- `core_io_write_file(path, contents) -> usize`
+- `core_io_write_file_atomic(path, contents) -> usize`
+- `core_io_write_bytes_atomic(path, bytes) -> usize`
+- `core_io_publish_text_artifact(name, path: Path, contents) -> usize`
+- `core_io_publish_bytes_artifact(name, path: Path, bytes) -> usize`
+- `core_io_copy_file(source, destination) -> usize`
+- `core_io_copy_file_atomic(source, destination) -> usize`
+- `core_io_list_dir(path: Path) -> Vec[DirEntry]`
+
+The application host constrains these calls with canonical permission roots
+and cumulative byte/entry budgets. Directory listings are sorted and
+all-or-error. Atomic variants publish only new destinations and refuse to
+replace an existing path.
+Artifact variants additionally require a matching manifest declaration,
+enforce its narrower root and byte ceiling, and return versioned
+size/hash/media evidence through `fgx app-run`; ordinary writes never become
+artifact receipts.
+
 `core.net`:
 
 - `core_net_http_get(scope, url) -> Result[str,str]`
@@ -164,6 +199,24 @@ caller's instance budget, and the cue/action validator requires matching IDs.
 `core.serialize`:
 
 - `core_serialize_text_len(value) -> usize`
+- `core_serialize_json_canonical(value) -> str`
+- `core_serialize_json_is_canonical(value) -> bool`
+- `core_serialize_utf8_encode(value) -> Vec[u8]`
+- `core_serialize_utf8_decode(bytes) -> str`
+- `core_serialize_u16_le(value) -> Vec[u8]`
+- `core_serialize_u32_le(value) -> Vec[u8]`
+- `core_serialize_i32_le(value) -> Vec[u8]`
+- `core_serialize_read_u16_le(bytes, offset) -> u16`
+- `core_serialize_read_u32_le(bytes, offset) -> u32`
+- `core_serialize_read_i32_le(bytes, offset) -> i32`
+- `core_serialize_concat(left, right) -> Vec[u8]`
+
+The JSON codec emits the Forgentex canonical JSON profile: compact output,
+sorted object keys, decoded/re-encoded Unicode, strict duplicate/malformed
+input rejection, and deterministic normalization through the current
+`i64`/`f64` value model. JSON and variable-size byte transforms have a 16 MiB
+per-value ceiling; JSON nesting is capped at 128 containers. The new codec
+operations are deterministic memory transforms and declare no effect.
 
 `core.stream`:
 
@@ -264,9 +317,9 @@ Later libraries, after the ownership and allocation story is stronger:
 | --- | --- | --- |
 | `core.alloc` | Explicit allocator and fixed-buffer allocation policies. | Needs mature ownership, lifetimes, and allocator effects. |
 | `core.collections` | Small vectors, maps, ring buffers, and sets. | Needs allocation/fixed-buffer policy and generic APIs. |
-| `core.time` | Mock clock, monotonic time, durations, and timers. | Real time is platform/runtime dependent; deterministic mock time comes first. |
+| `core.time` | Copyable shared deterministic `AsyncClock`, bounded one-shot logical timers, stable deadline ordering, wake-token integration, waiter-safe cancellation/rescheduling, fixed-rate `IntervalTimer` cadence, and immediate losing-timer reclamation through deterministic token selection in the interpreter. | Real monotonic/wall time and host reactor integration remain platform/runtime dependent. |
 | `core.log` | Structured logging and trace events. | Needs stable effect and output policy for production use. |
-| `core.concurrent` | Deterministic cooperative `Task[T]`, bounded affine `TaskGroup[T]`, and bounded `Channel[T]` interpreter primitives; ordered joins, group cancellation propagation, and explicit concurrency effects. | Partial: real parallel scheduling, nested scopes, suspension, atomics, timers, and async I/O remain deferred. |
+| `core.concurrent` | Deterministic cooperative `Task[T]` with explicit parked/woken state, retry-safe nonblocking `task_poll`, logical-timer-aware blocking `task_wait`, bounded consuming `task_race`, consuming logical `task_timeout`, atomic wake-source rebinding through `task_wait_on`, and bounded typed `task_then` continuation chains; bounded shared one-shot `WakeToken`, bounded nonblocking token selection with stable winner/loser cancellation, heterogeneous source-preserving timeout waits, borrowed channel read/send readiness, hosted capability-confined regular-file read and no-clobber create availability, logical timer wake integration, bounded affine `TaskGroup[T]`, and bounded `Channel[T]` interpreter primitives; full or incremental ordered joins, capacity release, cooperative FIFO backpressure, cancellation propagation, and explicit concurrency effects. | Partial: real parallel scheduling, nested scopes, statement-frame suspension, open-stream/socket readiness, OS/reactor wake sources, atomics, wall-clock timers, and async I/O remain deferred. |
 
 The butterfly ray-grid benchmark described in
 [`docs/token_efficiency_benchmarks.md`](token_efficiency_benchmarks.md) should be

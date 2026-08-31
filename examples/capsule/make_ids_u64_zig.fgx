@@ -1,0 +1,40 @@
+# Native data boundaries: Zig returns a bounded owned Vec[u64].
+
+foreign make_ids_u64_zig zig version "0.14" effects [alloc]:
+    input count: i32
+    output ids: Vec[u64]
+    sandbox "fs.none"
+    code:
+        const std = @import("std");
+
+        pub const FgxOwnedU64 = extern struct {
+            ptr: ?[*]u64,
+            len: usize,
+            capacity: usize,
+        };
+
+        pub export fn make_ids_u64_zig(count: i32) FgxOwnedU64 {
+            const len: usize = @intCast(@max(count, 0));
+            if (len == 0) return .{ .ptr = null, .len = 0, .capacity = 0 };
+            const values = std.heap.page_allocator.alloc(u64, len) catch
+                return .{ .ptr = null, .len = 0, .capacity = 0 };
+            for (values, 0..) |*value, index| {
+                value.* = if (index + 1 == len)
+                    std.math.maxInt(u64)
+                else
+                    3_000_000_000 + @as(u64, @intCast(index)) * 2_000_000_000;
+            }
+            return .{ .ptr = values.ptr, .len = values.len, .capacity = values.len };
+        }
+
+        pub export fn make_ids_u64_zig_free(
+            ptr: ?[*]u64,
+            len: usize,
+            capacity: usize,
+        ) void {
+            _ = len;
+            if (ptr) |values| std.heap.page_allocator.free(values[0..capacity]);
+        }
+
+fn ids_from_zig(count: i32) -> Vec[u64] effects [alloc]:
+    return make_ids_u64_zig(count)

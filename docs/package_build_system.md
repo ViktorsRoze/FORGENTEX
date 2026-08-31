@@ -94,6 +94,19 @@ optimize = "none"
 debug = true
 ```
 
+An executable file-tool package may additionally declare `[application]`,
+`[application.limits]`, `[application.artifact.<name>]`, and scoped
+`[permissions]`. `fgx app-run` uses those sections as runtime policy rather
+than accepting broader CLI grants. See
+[the application runtime contract](application_runtime.md).
+
+`max_read_bytes` and `max_write_bytes` bound cumulative file payloads.
+Applications using `core_io_list_dir` must also opt into a positive cumulative
+`max_directory_entries`; normalized paths returned by a snapshot consume the
+read-byte budget.
+Artifact declarations add a narrower portable output root, media type,
+per-artifact byte ceiling, required flag, and create-new publication mode.
+
 Only local path dependencies are resolved in Stage 23. The dependency version is
 recorded for review and lock output, but it is not a solver constraint yet.
 

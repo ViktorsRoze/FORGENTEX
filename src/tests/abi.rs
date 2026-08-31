@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::abi::{abi_json, abi_text, analyze_abi, generate_header};
+use crate::abi::{abi_json, abi_text, analyze_abi, generate_header, generate_struct_header};
 use crate::format::{format_agent, format_human};
 use crate::parser::parse_file;
 use crate::typecheck::check;
@@ -89,6 +89,53 @@ fn header_generation_includes_layout_and_c_abi_declarations() {
     assert!(header.contains("uint8_t _pad0[3];"));
     assert!(header.contains("#pragma pack(push, 1)"));
     assert!(header.contains("FGX_EXTERN size_t inspect_packet(const AbiPacket * packet);"));
+}
+
+#[test]
+fn selected_struct_header_orders_embedded_dependencies_before_users() {
+    let source = r#"
+@repr(C)
+struct AOuter:
+    nested: ZNested
+
+@repr(C)
+struct ZNested:
+    value: i32
+"#;
+    let program = parse_file(Path::new("nested_header.fgx"), source).unwrap();
+    let header = generate_struct_header(
+        &program,
+        "x86_64-unknown-linux-gnu",
+        &["AOuter".to_string(), "ZNested".to_string()],
+    )
+    .unwrap();
+    let nested = header.find("typedef struct ZNested").unwrap();
+    let outer = header.find("typedef struct AOuter").unwrap();
+    assert!(nested < outer, "embedded type must be declared first");
+}
+
+#[test]
+fn selected_struct_header_emits_native_multidimensional_array_declarators() {
+    let source = r#"
+@repr(C)
+struct Point:
+    x: i16
+
+@repr(C)
+struct Grid:
+    points: [[Point; 2]; 3]
+"#;
+    let program = parse_file(Path::new("nested_array_header.fgx"), source).unwrap();
+    let header = generate_struct_header(
+        &program,
+        "x86_64-unknown-linux-gnu",
+        &["Grid".to_string(), "Point".to_string()],
+    )
+    .unwrap();
+    assert!(header.contains("Point points[3][2];"), "{header}");
+    assert!(
+        header.find("typedef struct Point").unwrap() < header.find("typedef struct Grid").unwrap()
+    );
 }
 
 #[test]

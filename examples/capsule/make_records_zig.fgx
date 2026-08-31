@@ -1,0 +1,41 @@
+# Native data boundaries: Zig returns an owned buffer of reviewed records.
+
+@repr(C)
+struct NativeRecord:
+    id: u64
+    delta: i32
+    score: f64
+
+foreign make_records_zig zig version "0.14" effects [alloc]:
+    output records: Vec[NativeRecord]
+    sandbox "fs.none"
+    code:
+        const std = @import("std");
+
+        pub const NativeRecord = extern struct {
+            id: u64,
+            delta: i32,
+            score: f64,
+        };
+
+        pub const FgxOwnedNativeRecord = extern struct {
+            ptr: ?[*]NativeRecord,
+            len: usize,
+            capacity: usize,
+        };
+
+        pub export fn make_records_zig() FgxOwnedNativeRecord {
+            const records = std.heap.page_allocator.alloc(NativeRecord, 2) catch
+                return .{ .ptr = null, .len = 0, .capacity = 0 };
+            records[0] = .{ .id = 7, .delta = -3, .score = 1.25 };
+            records[1] = .{ .id = std.math.maxInt(u64), .delta = 9, .score = -2.5 };
+            return .{ .ptr = records.ptr, .len = records.len, .capacity = records.len };
+        }
+
+        pub export fn make_records_zig_free(ptr: ?[*]NativeRecord, len: usize, capacity: usize) void {
+            _ = len;
+            if (capacity > 0) std.heap.page_allocator.free(ptr.?[0..capacity]);
+        }
+
+fn records_zig() -> Vec[NativeRecord]:
+    return make_records_zig()

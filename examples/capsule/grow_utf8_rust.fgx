@@ -1,0 +1,22 @@
+foreign grow_utf8_rust rust version "2021":
+    input text: &mut String
+    output length: usize
+    sandbox "fs.none"
+    code:
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn grow_utf8_rust(
+            text: *mut u8,
+            text_len: *mut usize,
+            text_capacity: usize,
+        ) -> usize {
+            if *text_len >= text_capacity {
+                return *text_len;
+            }
+            *text.add(*text_len) = b'!';
+            *text_len += 1;
+            *text_len
+        }
+
+fn grow_twice_from_rust(text: &mut String) -> usize:
+    let first_length: usize = grow_utf8_rust(text)
+    return grow_utf8_rust(text)

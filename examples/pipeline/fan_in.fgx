@@ -1,0 +1,43 @@
+share left_seed: i32 = 3
+share right_seed: i32 = 4
+share left: i32
+share right: i32
+share total: i32 = 0
+
+foreign combine c version "c11" effects [cpu]:
+    input left_value: i32
+    input right_value: i32
+    output result: i32
+    sandbox "fs.none"
+    sandbox "limit.wall_ms 1000"
+    sandbox "limit.cpu_ms 1000"
+    sandbox "limit.mem_mb 256"
+    bind left read
+    bind right read
+    bind total rw
+    code:
+        int combine(int left_value, int right_value) { return left_value + right_value; }
+
+foreign produce_left c version "c11" effects [cpu]:
+    input value: i32
+    output result: i32
+    sandbox "fs.none"
+    sandbox "limit.wall_ms 1000"
+    sandbox "limit.cpu_ms 1000"
+    sandbox "limit.mem_mb 256"
+    bind left_seed read
+    bind left rw
+    code:
+        int produce_left(int value) { return value * 2; }
+
+foreign produce_right c version "c11" effects [cpu]:
+    input value: i32
+    output result: i32
+    sandbox "fs.none"
+    sandbox "limit.wall_ms 1000"
+    sandbox "limit.cpu_ms 1000"
+    sandbox "limit.mem_mb 256"
+    bind right_seed read
+    bind right rw
+    code:
+        int produce_right(int value) { return value * 3; }

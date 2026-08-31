@@ -1,7 +1,7 @@
 //! Shared typed namespace validation and reporting (v2.2).
 //!
 //! `share` declarations are Forgentex-owned typed values; capsules `bind`
-//! them by name under read or rw mode with snapshot-in / write-back-out
+//! them by name under read, move, or rw mode with transactional handoff
 //! semantics. v2.2 owns the contract rules: bindings must resolve to a
 //! declared share, a shared name may have at most one writer (until a real
 //! concurrency model exists), and a share default must match its type.
@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::ast::{Program, ShareMode};
+use crate::ast::{split_share_reference, Program, ShareMode};
 use crate::diag::Diagnostic;
 use crate::json;
 
@@ -46,22 +46,45 @@ pub fn validate(program: &Program) -> Vec<Diagnostic> {
     let mut writers: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for capsule in program.capsules() {
         for binding in &capsule.bindings {
-            if !shares.contains_key(binding.name.as_str()) {
+            let (base_name, version) = match split_share_reference(&binding.name) {
+                Ok(reference) => reference,
+                Err(message) => {
+                    diagnostics.push(
+                        Diagnostic::new("share_invalid_version", &capsule.id, message)
+                            .suggest("use `<share>@<version>` with a canonical unsigned version"),
+                    );
+                    continue;
+                }
+            };
+            if !shares.contains_key(base_name) {
                 diagnostics.push(
                     Diagnostic::new(
                         "share_unknown_binding",
                         &capsule.id,
                         format!(
                             "capsule '{}' binds unknown shared value '{}'",
-                            capsule.name, binding.name
+                            capsule.name, base_name
                         ),
                     )
                     .suggest("declare the shared value with `share <name>: <type>`"),
                 );
             }
+            if version.is_some() && binding.mode == ShareMode::Rw {
+                diagnostics.push(
+                    Diagnostic::new(
+                        "share_versioned_writer",
+                        &capsule.id,
+                        format!(
+                            "capsule '{}' cannot use explicit version reference '{}' for an rw binding",
+                            capsule.name, binding.name
+                        ),
+                    )
+                    .suggest("write the declared share name; update bindings create later versions"),
+                );
+            }
             if binding.mode.is_writer() {
                 writers
-                    .entry(binding.name.clone())
+                    .entry(base_name.to_string())
                     .or_default()
                     .push(capsule.name.clone());
             }
@@ -106,6 +129,8 @@ pub struct SharedEntry {
     pub ty: String,
     pub default: Option<String>,
     pub readers: Vec<String>,
+    pub movers: Vec<String>,
+    pub updaters: Vec<String>,
     pub writers: Vec<String>,
     pub diagnostics: Vec<String>,
 }
@@ -115,14 +140,21 @@ pub fn analyze(file: &str, program: &Program) -> NamespaceReport {
     let mut shared = Vec::new();
     for share in program.shares() {
         let mut readers = Vec::new();
+        let mut movers = Vec::new();
+        let mut updaters = Vec::new();
         let mut writers = Vec::new();
         for capsule in program.capsules() {
             for binding in &capsule.bindings {
-                if binding.name != share.name {
+                let Ok((base_name, _)) = split_share_reference(&binding.name) else {
+                    continue;
+                };
+                if base_name != share.name {
                     continue;
                 }
                 match binding.mode {
                     ShareMode::Read => readers.push(capsule.name.clone()),
+                    ShareMode::Move => movers.push(capsule.name.clone()),
+                    ShareMode::Update => updaters.push(capsule.name.clone()),
                     ShareMode::Rw => writers.push(capsule.name.clone()),
                 }
             }
@@ -138,13 +170,17 @@ pub fn analyze(file: &str, program: &Program) -> NamespaceReport {
             ty: share.ty.to_agent(),
             default: share.default.as_ref().map(|value| value.to_literal()),
             readers,
+            movers,
+            updaters,
             writers,
             diagnostics,
         });
     }
     let status = if !all_diagnostics.is_empty() {
         "rejected"
-    } else if shared.iter().any(|entry| !entry.writers.is_empty()) {
+    } else if shared.iter().any(|entry| {
+        !entry.writers.is_empty() || !entry.movers.is_empty() || !entry.updaters.is_empty()
+    }) {
         // Mutable shared state always warrants review.
         "review_required"
     } else {
@@ -182,8 +218,10 @@ impl NamespaceReport {
                 entry.default.as_deref().unwrap_or("none")
             ));
             out.push_str(&format!(
-                "      readers=[{}] writers=[{}]\n",
+                "      readers=[{}] movers=[{}] updaters=[{}] writers=[{}]\n",
                 entry.readers.join(","),
+                entry.movers.join(","),
+                entry.updaters.join(","),
                 entry.writers.join(",")
             ));
             if !entry.diagnostics.is_empty() {
@@ -218,6 +256,14 @@ impl NamespaceReport {
             out.push_str(&format!(
                 "      \"readers\": {},\n",
                 json::string_array(&entry.readers)
+            ));
+            out.push_str(&format!(
+                "      \"movers\": {},\n",
+                json::string_array(&entry.movers)
+            ));
+            out.push_str(&format!(
+                "      \"updaters\": {},\n",
+                json::string_array(&entry.updaters)
             ));
             out.push_str(&format!(
                 "      \"writers\": {},\n",

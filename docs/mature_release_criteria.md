@@ -1,8 +1,10 @@
 # Forgentex Mature Release Criteria
 
-Stage 26 defines what "mature enough for serious use" means. It does not claim
-that the current v0 demo is production-ready; it gives the project a stable
-release-readiness contract that humans, CI, and agents can inspect.
+Stage 26 defines the historical internal v1 maturity contract. Passing it does
+not claim that the current advanced demo/early-alpha project is production-ready
+or that the separate public 0.1 distribution contract has passed; it gives the
+project a stable internal readiness contract that humans, CI, and agents can
+inspect.
 
 ## Command
 
@@ -105,14 +107,17 @@ gates. v0.24 requires:
 - `borrow_escape_hatch_conformance`: borrow conformance covers the RC cases for
   raw pointer parameters, conditional lifetime escape, projection aliasing,
   loop-carried borrow liveness, and conditional borrow-state joins. It also
-  executes at least 510 independently modeled root/field move programs and
-  requires zero production-checker mismatches.
+  executes at least 526 independently modeled move programs, 610 alias programs,
+  and 292 lifetime-provenance programs, including recursively normalized
+  associated-type ownership shapes, and requires zero production-checker
+  mismatches.
 - `target_decision_consistency`: the release decision is derived from the
   requested target and current gate statuses.
 
-The v0.24 through v0.26 hardening target is healthy when `hardening_fail=0`. That
-does not make v1.0 ready by itself; the ownership and borrowing gate must still
-move from `partial` to `pass`.
+The v0.24 through v0.26 hardening target is healthy when `hardening_fail=0`.
+That condition and the ownership/borrowing gate now pass for the historical
+internal v1 contract. Public distribution and application-production readiness
+remain separate gates.
 
 ## Release Labels
 
@@ -146,7 +151,7 @@ The release labels are:
 | `v0.24` | v1.0 release candidate hardening | completed |
 | `v0.25` | loop-carried borrow liveness | completed |
 | `v0.26` | conditional borrow state joins | completed |
-| `v1.0` | stable language core, tooling contracts, and production-quality safety guarantees | planned |
+| `v1.0` | historical internal stable-core/tooling/safety maturity contract; not a public distribution or production-app claim | completed |
 
 ## Required Release Check Sequence
 

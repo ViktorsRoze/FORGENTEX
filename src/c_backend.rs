@@ -1,10 +1,11 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::ast::{EnumDecl, Expr, FunctionDecl, Item, Param, Pattern, Program, StructDecl, Type};
 use crate::backend::{
-    is_native_function_type, BackendIr, IrEnum, IrFunction, IrInstruction, IrStruct,
+    is_native_function_type, is_native_vec_array_element, BackendIr, IrEnum, IrFunction,
+    IrInstruction, IrStruct,
 };
 use crate::diag::diagnostics_to_json;
 use crate::parser::parse_expr;
@@ -122,13 +123,25 @@ fn generate_header(project: &Project, header_name: &str, ir: &BackendIr) -> Resu
     out.push_str("static inline size_t fgx_str_len(const char *value) { if (!value) fgx_trap(\"null_string\"); size_t len = 0; while (len < FGX_STR_MAX_BYTES && value[len] != '\\0') ++len; if (len == FGX_STR_MAX_BYTES) fgx_trap(\"string_too_large\"); return len; }\n");
     out.push_str("static inline bool fgx_str_eq(const char *left, const char *right) { size_t left_len = fgx_str_len(left); size_t right_len = fgx_str_len(right); return left_len == right_len && memcmp(left, right, left_len) == 0; }\n");
     out.push_str("static inline bool fgx_str_contains(const char *text, const char *needle) { size_t text_len = fgx_str_len(text); size_t needle_len = fgx_str_len(needle); if (needle_len == 0) return true; if (needle_len > text_len) return false; for (size_t i = 0; i <= text_len - needle_len; ++i) if (memcmp(text + i, needle, needle_len) == 0) return true; return false; }\n");
-    out.push_str("#define FGX_VEC_I32_MAX_ELEMENTS ((size_t)1048576)\n");
-    out.push_str("typedef struct { int32_t *data; size_t len; size_t capacity; } fgx_vec_i32;\n");
-    out.push_str("static inline fgx_vec_i32 fgx_vec_i32_new(void) { return (fgx_vec_i32){ .data = NULL, .len = 0, .capacity = 0 }; }\n");
-    out.push_str("static inline void fgx_vec_i32_free(fgx_vec_i32 *vec) { free(vec->data); vec->data = NULL; vec->len = 0; vec->capacity = 0; }\n");
-    out.push_str("static inline void fgx_vec_i32_reserve_for_push(fgx_vec_i32 *vec) { if (vec->len >= FGX_VEC_I32_MAX_ELEMENTS) fgx_trap(\"vec_capacity_exceeded\"); if (vec->len < vec->capacity) return; size_t next = vec->capacity == 0 ? 4 : vec->capacity * 2; if (next > FGX_VEC_I32_MAX_ELEMENTS) next = FGX_VEC_I32_MAX_ELEMENTS; int32_t *data = (int32_t *)realloc(vec->data, next * sizeof(int32_t)); if (!data) fgx_trap(\"allocation_failed\"); vec->data = data; vec->capacity = next; }\n");
-    out.push_str("static inline void fgx_vec_i32_push(fgx_vec_i32 *vec, int32_t value) { fgx_vec_i32_reserve_for_push(vec); vec->data[vec->len++] = value; }\n");
-    out.push_str("static inline void fgx_vec_i32_pop(fgx_vec_i32 *vec) { if (vec->len != 0) --vec->len; }\n\n");
+    for (suffix, c_element) in [
+        ("bool", "bool"),
+        ("i8", "int8_t"),
+        ("i16", "int16_t"),
+        ("i32", "int32_t"),
+        ("i64", "int64_t"),
+        ("isize", "ptrdiff_t"),
+        ("u8", "uint8_t"),
+        ("u16", "uint16_t"),
+        ("u32", "uint32_t"),
+        ("u64", "uint64_t"),
+        ("usize", "size_t"),
+        ("f32", "float"),
+        ("f64", "double"),
+        ("str", "const char *"),
+    ] {
+        out.push_str(&emit_native_vec_decl(suffix, c_element));
+    }
+    out.push('\n');
 
     for typedef in types.typedefs() {
         out.push_str(&typedef);
@@ -138,9 +151,39 @@ fn generate_header(project: &Project, header_name: &str, ir: &BackendIr) -> Resu
         out.push('\n');
     }
 
+    for ((_, len), elem) in &types.arrays {
+        let array = Type::Array {
+            elem: Box::new(elem.clone()),
+            len: *len,
+        };
+        if is_native_vec_array_element(&array) && array_named_leaf(&array).is_none() {
+            let suffix = format!("array_{}_{}", type_suffix(elem)?, len);
+            let element = array_type_name(elem, *len)?;
+            out.push_str(&emit_native_vec_decl(&suffix, &element));
+        }
+    }
+
+    for ((mutable, _), elem) in &types.slices {
+        if !*mutable && native_vec_slice_element(elem) {
+            let suffix = format!("slice_{}", type_suffix(elem)?);
+            let element = slice_type_name(elem, false)?;
+            out.push_str(&emit_native_vec_decl(&suffix, &element));
+        }
+    }
+
     for decl in program.enums() {
         out.push_str(&emit_enum_decl_from_ir(ir_enum_for_ast(ir, decl)?)?);
         out.push('\n');
+    }
+
+    for decl in program.enums() {
+        emit_native_named_array_layouts(&types, &decl.name, &mut out)?;
+    }
+
+    for decl in program.enums() {
+        let suffix = ident(&decl.name);
+        let element = ident(&decl.name);
+        out.push_str(&emit_native_vec_decl(&suffix, &element));
     }
 
     for decl in program.structs() {
@@ -148,6 +191,15 @@ fn generate_header(project: &Project, header_name: &str, ir: &BackendIr) -> Resu
         if ir_struct.public {
             out.push_str(&emit_struct_decl_from_ir(ir_struct)?);
             out.push('\n');
+            emit_native_named_array_layouts(&types, &decl.name, &mut out)?;
+        }
+    }
+
+    for decl in program.structs() {
+        let ir_struct = ir_struct_for_ast(ir, decl)?;
+        if ir_struct.public {
+            let suffix = ident(&decl.name);
+            out.push_str(&emit_native_vec_decl(&suffix, &suffix));
         }
     }
 
@@ -162,8 +214,27 @@ fn generate_header(project: &Project, header_name: &str, ir: &BackendIr) -> Resu
     Ok(out)
 }
 
+fn emit_native_vec_decl(suffix: &str, element: &str) -> String {
+    let upper = suffix.to_ascii_uppercase();
+    format!(
+        "#define FGX_VEC_{upper}_MAX_ELEMENTS ((size_t)1048576)\n\
+typedef struct {{ {element} *data; size_t len; size_t capacity; }} fgx_vec_{suffix};\n\
+typedef struct {{ bool has_value; {element} value; }} fgx_option_{suffix};\n\
+static inline fgx_vec_{suffix} fgx_vec_{suffix}_new(void) {{ return (fgx_vec_{suffix}){{ .data = NULL, .len = 0, .capacity = 0 }}; }}\n\
+static inline void fgx_vec_{suffix}_free(fgx_vec_{suffix} *vec) {{ free(vec->data); vec->data = NULL; vec->len = 0; vec->capacity = 0; }}\n\
+static inline void fgx_vec_{suffix}_reserve_for_push(fgx_vec_{suffix} *vec) {{ if (vec->len >= FGX_VEC_{upper}_MAX_ELEMENTS) fgx_trap(\"vec_capacity_exceeded\"); if (vec->len < vec->capacity) return; size_t next = vec->capacity == 0 ? 4 : vec->capacity * 2; if (next > FGX_VEC_{upper}_MAX_ELEMENTS) next = FGX_VEC_{upper}_MAX_ELEMENTS; {element} *data = ({element} *)realloc(vec->data, next * sizeof({element})); if (!data) fgx_trap(\"allocation_failed\"); vec->data = data; vec->capacity = next; }}\n\
+static inline void fgx_vec_{suffix}_push(fgx_vec_{suffix} *vec, {element} value) {{ fgx_vec_{suffix}_reserve_for_push(vec); vec->data[vec->len++] = value; }}\n\
+static inline void fgx_vec_{suffix}_pop(fgx_vec_{suffix} *vec) {{ if (vec->len != 0) --vec->len; }}\n\
+static inline fgx_option_{suffix} fgx_vec_{suffix}_pop_value(fgx_vec_{suffix} *vec) {{ if (vec->len == 0) return (fgx_option_{suffix}){{ .has_value = false }}; return (fgx_option_{suffix}){{ .has_value = true, .value = vec->data[--vec->len] }}; }}\n\
+static inline bool fgx_vec_{suffix}_pop_has_value(fgx_vec_{suffix} *vec) {{ if (vec->len == 0) return false; --vec->len; return true; }}\n\
+static inline {element} fgx_vec_{suffix}_pop_or(fgx_vec_{suffix} *vec, {element} fallback) {{ if (vec->len == 0) return fallback; return vec->data[--vec->len]; }}\n"
+    )
+}
+
 fn generate_source(project: &Project, header_name: &str, ir: &BackendIr) -> Result<String, String> {
     let program = combined_program(project);
+    let mut types = TypeRegistry::default();
+    types.collect_program(&program);
     let mut out = String::new();
     out.push_str("/* Generated by fgx build --backend c. */\n");
     out.push_str(&fir_signature_comment(ir));
@@ -174,6 +245,15 @@ fn generate_source(project: &Project, header_name: &str, ir: &BackendIr) -> Resu
         if !ir_struct.public {
             out.push_str(&emit_struct_decl_from_ir(ir_struct)?);
             out.push('\n');
+            emit_native_named_array_layouts(&types, &decl.name, &mut out)?;
+        }
+    }
+
+    for decl in program.structs() {
+        let ir_struct = ir_struct_for_ast(ir, decl)?;
+        if !ir_struct.public {
+            let suffix = ident(&decl.name);
+            out.push_str(&emit_native_vec_decl(&suffix, &suffix));
         }
     }
 
@@ -413,6 +493,7 @@ fn emit_fir_if(
     *cursor += 1;
 
     let mut then_env = env.clone();
+    let scope_vec_base = env.owned_vecs.len();
     match emit_fir_instructions(
         instructions,
         cursor,
@@ -423,6 +504,7 @@ fn emit_fir_if(
         &["else", "endif"],
     )? {
         FirCursorStop::Terminator(op) if op == "else" => {
+            emit_vec_cleanup_from(&then_env, scope_vec_base, level + 1, out);
             *cursor += 1;
             out.push_str(&format!("{pad}}} else {{\n"));
             let mut else_env = env.clone();
@@ -436,6 +518,7 @@ fn emit_fir_if(
                 &["endif"],
             )? {
                 FirCursorStop::Terminator(op) if op == "endif" => {
+                    emit_vec_cleanup_from(&else_env, scope_vec_base, level + 1, out);
                     *cursor += 1;
                     out.push_str(&format!("{pad}}}\n"));
                     Ok(true)
@@ -444,6 +527,7 @@ fn emit_fir_if(
             }
         }
         FirCursorStop::Terminator(op) if op == "endif" => {
+            emit_vec_cleanup_from(&then_env, scope_vec_base, level + 1, out);
             *cursor += 1;
             out.push_str(&format!("{pad}}}\n"));
             Ok(true)
@@ -484,6 +568,8 @@ fn emit_fir_for(
     *cursor += 1;
     let mut loop_env = env.clone();
     loop_env.insert(var, Type::Primitive("usize".to_string()));
+    let loop_vec_base = env.owned_vecs.len();
+    loop_env.loop_vec_bases.push(loop_vec_base);
     match emit_fir_instructions(
         instructions,
         cursor,
@@ -494,6 +580,7 @@ fn emit_fir_for(
         &["endfor"],
     )? {
         FirCursorStop::Terminator(op) if op == "endfor" => {
+            emit_vec_cleanup_from(&loop_env, loop_vec_base, level + 1, out);
             *cursor += 1;
             out.push_str(&format!("{pad}}}\n"));
             Ok(true)
@@ -525,6 +612,8 @@ fn emit_fir_while(
     ));
     *cursor += 1;
     let mut loop_env = env.clone();
+    let loop_vec_base = env.owned_vecs.len();
+    loop_env.loop_vec_bases.push(loop_vec_base);
     match emit_fir_instructions(
         instructions,
         cursor,
@@ -535,6 +624,7 @@ fn emit_fir_while(
         &["endwhile"],
     )? {
         FirCursorStop::Terminator(op) if op == "endwhile" => {
+            emit_vec_cleanup_from(&loop_env, loop_vec_base, level + 1, out);
             *cursor += 1;
             out.push_str(&format!("{pad}}}\n"));
             Ok(true)
@@ -601,6 +691,7 @@ fn emit_fir_match(
             let Some(pattern) = parse_fir_pattern(pattern_text) else {
                 return Ok(false);
             };
+            let scope_vec_base = env.owned_vecs.len();
             let mut arm_env = env.clone();
             match &pattern {
                 Pattern::Wildcard => out.push_str(&format!("{case_pad}default: {{\n")),
@@ -638,6 +729,7 @@ fn emit_fir_match(
                 &["case", "endmatch"],
             )? {
                 FirCursorStop::Terminator(op) if op == "case" || op == "endmatch" => {
+                    emit_vec_cleanup_from(&arm_env, scope_vec_base, level + 3, out);
                     out.push_str(&format!("{case_pad}}} break;\n"));
                     if op == "endmatch" {
                         *cursor += 1;
@@ -679,6 +771,7 @@ fn emit_fir_match(
         }
 
         *cursor += 1;
+        let scope_vec_base = env.owned_vecs.len();
         let mut arm_env = env.clone();
         match emit_fir_instructions(
             instructions,
@@ -690,6 +783,7 @@ fn emit_fir_match(
             &["case", "endmatch"],
         )? {
             FirCursorStop::Terminator(op) if op == "case" || op == "endmatch" => {
+                emit_vec_cleanup_from(&arm_env, scope_vec_base, level + 2, out);
                 out.push_str(&format!("{case_pad}}} break;\n"));
                 if op == "endmatch" {
                     *cursor += 1;
@@ -742,13 +836,31 @@ fn emit_fir_instruction(
                 .as_deref()
                 .map(Type::parse)
                 .unwrap_or_else(|| inferred_c_type(&expr, env, structs));
-            let value = emit_expr(&expr, env, structs)?;
+            let value = match (&expr, native_vec_suffix(&ty), native_option_suffix(&ty)) {
+                (Expr::Call { .. }, _, Some(_)) if is_native_option_constructor(&expr) => {
+                    emit_native_option_constructor(&expr, &ty, env, structs)?
+                }
+                (Expr::Call { name, args }, _, Some(suffix))
+                    if name == "pop" && args.len() == 1 =>
+                {
+                    format!(
+                        "fgx_vec_{suffix}_pop_value(&{})",
+                        emit_expr(&args[0], env, structs)?
+                    )
+                }
+                (Expr::Call { name, args }, Some(suffix), _)
+                    if name == "vec_new" && args.is_empty() =>
+                {
+                    format!("fgx_vec_{suffix}_new()")
+                }
+                _ => emit_expr(&expr, env, structs)?,
+            };
             out.push_str(&format!(
                 "{pad}{} {} = {value};\n",
                 c_type(&ty)?,
                 ident(name)
             ));
-            if is_native_vec_i32(&ty) {
+            if is_native_vec(&ty) {
                 env.owned_vecs.push(name.clone());
             }
             env.insert(name, ty);
@@ -763,7 +875,20 @@ fn emit_fir_instruction(
                     Ok(expr) => expr,
                     Err(_) => return Ok(false),
                 };
-                let value = emit_expr(&expr, env, structs)?;
+                let value = match (&expr, native_option_suffix(&env.return_type)) {
+                    (Expr::Call { .. }, Some(_)) if is_native_option_constructor(&expr) => {
+                        emit_native_option_constructor(&expr, &env.return_type, env, structs)?
+                    }
+                    (Expr::Call { name, args }, Some(suffix))
+                        if name == "pop" && args.len() == 1 =>
+                    {
+                        format!(
+                            "fgx_vec_{suffix}_pop_value(&{})",
+                            emit_expr(&args[0], env, structs)?
+                        )
+                    }
+                    _ => emit_expr(&expr, env, structs)?,
+                };
                 if env.owned_vecs.is_empty() {
                     out.push_str(&format!("{pad}return {value};\n"));
                 } else {
@@ -815,8 +940,14 @@ fn emit_fir_instruction(
             };
             out.push_str(&format!("{pad}{};\n", emit_expr(&expr, env, structs)?));
         }
-        "break" => out.push_str(&format!("{pad}break;\n")),
-        "continue" => out.push_str(&format!("{pad}continue;\n")),
+        "break" => {
+            emit_loop_vec_cleanup(env, level, out)?;
+            out.push_str(&format!("{pad}break;\n"));
+        }
+        "continue" => {
+            emit_loop_vec_cleanup(env, level, out)?;
+            out.push_str(&format!("{pad}continue;\n"));
+        }
         _ => return Ok(false),
     }
     Ok(true)
@@ -855,6 +986,9 @@ fn emit_expr(
 ) -> Result<String, String> {
     match expr {
         Expr::Lambda { .. } => Err("C backend cannot lower closures yet".to_string()),
+        Expr::SliceRange { .. } => {
+            Err("C backend cannot lower slice-range expressions yet".to_string())
+        }
         Expr::Int(value) => Ok(value.to_string()),
         Expr::Float(value) => Ok(c_float(*value)),
         Expr::Bool(value) => Ok(value.to_string()),
@@ -925,6 +1059,56 @@ fn emit_expr(
             if is_cpu_feature_probe(name) || name == "aligned" {
                 return Ok("false".to_string());
             }
+            if matches!(name.as_str(), "is_some" | "is_none" | "unwrap_or") {
+                if let Some(Expr::Call {
+                    name: pop_name,
+                    args: pop_args,
+                }) = args.first()
+                {
+                    if pop_name == "pop" && pop_args.len() == 1 {
+                        let vec = &pop_args[0];
+                        let suffix = native_vec_suffix(&inferred_c_type(vec, env, structs))
+                            .ok_or_else(|| {
+                                "C backend value pop requires a supported local native Vec"
+                                    .to_string()
+                            })?;
+                        let vec = emit_expr(vec, env, structs)?;
+                        match (name.as_str(), args.as_slice()) {
+                            ("is_some", [_]) => {
+                                return Ok(format!("fgx_vec_{suffix}_pop_has_value(&{vec})"));
+                            }
+                            ("is_none", [_]) => {
+                                return Ok(format!("(!fgx_vec_{suffix}_pop_has_value(&{vec}))"));
+                            }
+                            ("unwrap_or", [_, fallback]) => {
+                                return Ok(format!(
+                                    "fgx_vec_{suffix}_pop_or(&{vec}, {})",
+                                    emit_expr(fallback, env, structs)?
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if let Some(option) = args.first() {
+                    if native_option_suffix(&inferred_c_type(option, env, structs)).is_some() {
+                        let option = emit_expr(option, env, structs)?;
+                        match (name.as_str(), args.as_slice()) {
+                            ("is_some", [_]) => return Ok(format!("({option}).has_value")),
+                            ("is_none", [_]) => {
+                                return Ok(format!("(!({option}).has_value)"));
+                            }
+                            ("unwrap_or", [_, fallback]) => {
+                                return Ok(format!(
+                                    "(({option}).has_value ? ({option}).value : {})",
+                                    emit_expr(fallback, env, structs)?
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
             if matches!(
                 name.as_str(),
                 "Some"
@@ -941,16 +1125,31 @@ fn emit_expr(
                     "C backend does not lower interpreter-only intrinsic '{name}' yet"
                 ));
             }
+            let vec_suffix = args
+                .first()
+                .and_then(|arg| native_vec_suffix(&inferred_c_type(arg, env, structs)));
             let values = args
                 .iter()
                 .map(|arg| emit_expr(arg, env, structs))
                 .collect::<Result<Vec<_>, _>>()?;
             match (name.as_str(), values.as_slice()) {
-                ("vec_new", []) => return Ok("fgx_vec_i32_new()".to_string()),
-                ("push", [vec, value]) => {
-                    return Ok(format!("fgx_vec_i32_push(&{vec}, {value})"));
+                ("vec_new", []) => {
+                    return Err(
+                        "C backend vec_new requires an annotated supported local Vec".to_string(),
+                    );
                 }
-                ("pop", [vec]) => return Ok(format!("fgx_vec_i32_pop(&{vec})")),
+                ("push", [vec, value]) => {
+                    let suffix = vec_suffix.ok_or_else(|| {
+                        "C backend push requires a supported local native Vec".to_string()
+                    })?;
+                    return Ok(format!("fgx_vec_{suffix}_push(&{vec}, {value})"));
+                }
+                ("pop", [vec]) => {
+                    let suffix = vec_suffix.ok_or_else(|| {
+                        "C backend pop requires a supported local native Vec".to_string()
+                    })?;
+                    return Ok(format!("fgx_vec_{suffix}_pop(&{vec})"));
+                }
                 ("str_len", [value]) => return Ok(format!("fgx_str_len({value})")),
                 ("str_contains", [text, needle]) => {
                     return Ok(format!("fgx_str_contains({text}, {needle})"));
@@ -991,8 +1190,12 @@ fn emit_expr(
         Expr::Index { base, index } => {
             let base_text = emit_expr(base, env, structs)?;
             let index_text = emit_expr(index, env, structs)?;
+            let len = match inferred_c_type(base, env, structs) {
+                Type::Array { len, .. } => len.to_string(),
+                _ => format!("{base_text}.len"),
+            };
             Ok(format!(
-                "{base_text}.data[fgx_bounds_index((size_t)({index_text}), {base_text}.len)]"
+                "{base_text}.data[fgx_bounds_index((size_t)({index_text}), {len})]"
             ))
         }
     }
@@ -1082,7 +1285,12 @@ fn c_type(ty: &Type) -> Result<String, String> {
             other => Err(format!("C backend does not know primitive type '{other}'")),
         },
         Type::Named(name) => Ok(ident(name)),
-        ty @ Type::Generic { name, .. } if is_native_vec_i32(ty) => Ok("fgx_vec_i32".to_string()),
+        ty @ Type::Generic { name, .. } if is_native_vec(ty) => {
+            Ok(format!("fgx_vec_{}", native_vec_suffix(ty).unwrap()))
+        }
+        ty @ Type::Generic { name, .. } if native_option_suffix(ty).is_some() => {
+            Ok(format!("fgx_option_{}", native_option_suffix(ty).unwrap()))
+        }
         ty @ Type::Generic { name, .. } if name == "Fn" && is_native_function_type(ty) => {
             function_type_name(ty)
         }
@@ -1112,7 +1320,7 @@ fn ensure_c_lowerable(function: &FunctionDecl) -> Result<(), String> {
     }
     for effect in &function.effects {
         if is_runtime_only_effect(effect)
-            && !(effect == "alloc" && function_has_native_vec_i32(function))
+            && !(effect == "alloc" && function_has_native_vec(function))
         {
             return Err(format!(
                 "C backend cannot lower runtime effect '{}' in function '{}'",
@@ -1131,16 +1339,29 @@ fn combined_program(project: &Project) -> Program {
     Program { items }
 }
 
-fn function_has_native_vec_i32(function: &FunctionDecl) -> bool {
-    function.body.iter().any(|stmt| {
-        matches!(
-            stmt,
-            crate::ast::Stmt::Let {
-                ty: Some(ty),
-                expr: Expr::Call { name, args },
-                ..
-            } if is_native_vec_i32(ty) && name == "vec_new" && args.is_empty()
-        )
+fn function_has_native_vec(function: &FunctionDecl) -> bool {
+    stmts_have_native_vec(&function.body)
+}
+
+fn stmts_have_native_vec(body: &[crate::ast::Stmt]) -> bool {
+    body.iter().any(|stmt| match stmt {
+        crate::ast::Stmt::Let {
+            ty: Some(ty),
+            expr: Expr::Call { name, args },
+            ..
+        } => is_native_vec(ty) && name == "vec_new" && args.is_empty(),
+        crate::ast::Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => stmts_have_native_vec(then_body) || stmts_have_native_vec(else_body),
+        crate::ast::Stmt::For { body, .. } | crate::ast::Stmt::While { body, .. } => {
+            stmts_have_native_vec(body)
+        }
+        crate::ast::Stmt::Match { arms, .. } => {
+            arms.iter().any(|arm| stmts_have_native_vec(&arm.body))
+        }
+        _ => false,
     })
 }
 
@@ -1153,6 +1374,7 @@ struct Env {
     function_returns: HashMap<String, Type>,
     return_type: Type,
     owned_vecs: Vec<String>,
+    loop_vec_bases: Vec<usize>,
     return_temps: usize,
 }
 
@@ -1173,6 +1395,7 @@ impl Env {
             function_returns: function_returns.clone(),
             return_type: return_type.clone(),
             owned_vecs: Vec::new(),
+            loop_vec_bases: Vec::new(),
             return_temps: 0,
         }
     }
@@ -1231,7 +1454,7 @@ fn inferred_c_type(expr: &Expr, env: &Env, structs: &HashMap<String, StructDecl>
         Expr::Field { base, field } if field == "len" => {
             let base_ty = inferred_c_type(base, env, structs);
             if matches!(base_ty, Type::Slice { .. } | Type::Array { .. })
-                || is_native_vec_i32(&base_ty)
+                || is_native_vec(&base_ty)
                 || base_ty == Type::Primitive("str".to_string())
             {
                 Type::Primitive("usize".to_string())
@@ -1242,6 +1465,14 @@ fn inferred_c_type(expr: &Expr, env: &Env, structs: &HashMap<String, StructDecl>
         Expr::Index { base, .. } => inferred_c_type(base, env, structs)
             .element_type()
             .unwrap_or(Type::Unknown),
+        Expr::SliceRange { base, .. } => match inferred_c_type(base, env, structs) {
+            Type::Slice { mutable, elem } => Type::Slice { mutable, elem },
+            Type::Array { elem, .. } => Type::Slice {
+                mutable: false,
+                elem,
+            },
+            _ => Type::Unknown,
+        },
         Expr::Unary { expr, .. } => inferred_c_type(expr, env, structs),
         Expr::Binary { left, right, .. } => {
             let left = inferred_c_type(left, env, structs);
@@ -1258,20 +1489,122 @@ fn inferred_c_type(expr: &Expr, env: &Env, structs: &HashMap<String, StructDecl>
     }
 }
 
-fn is_native_vec_i32(ty: &Type) -> bool {
-    matches!(
-        ty,
-        Type::Generic { name, args }
-            if name == "Vec"
-                && args.as_slice() == [Type::Primitive("i32".to_string())]
-    )
+fn native_vec_suffix(ty: &Type) -> Option<String> {
+    let Type::Generic { name, args } = ty else {
+        return None;
+    };
+    let [element] = args.as_slice() else {
+        return None;
+    };
+    if name != "Vec" {
+        return None;
+    }
+    match element {
+        Type::Bool => Some("bool".to_string()),
+        Type::Primitive(element) => match element.as_str() {
+            "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize"
+            | "f32" | "f64" | "str" => Some(element.clone()),
+            _ => None,
+        },
+        Type::Named(element) => Some(ident(element)),
+        Type::Slice {
+            mutable: false,
+            elem,
+        } if native_vec_slice_element(elem) => Some(format!("slice_{}", type_suffix(elem).ok()?)),
+        element @ Type::Array { elem, len } if is_native_vec_array_element(element) => {
+            Some(format!("array_{}_{}", type_suffix(elem).ok()?, len))
+        }
+        _ => None,
+    }
+}
+
+fn native_option_suffix(ty: &Type) -> Option<String> {
+    let Type::Generic { name, args } = ty else {
+        return None;
+    };
+    if name != "Option" || args.len() != 1 {
+        return None;
+    }
+    native_vec_suffix(&Type::Generic {
+        name: "Vec".to_string(),
+        args: args.clone(),
+    })
+}
+
+fn is_native_option_constructor(expr: &Expr) -> bool {
+    matches!(expr, Expr::Call { name, args } if (name == "Some" && args.len() == 1) || (name == "None" && args.is_empty()))
+}
+
+fn emit_native_option_constructor(
+    expr: &Expr,
+    ty: &Type,
+    env: &Env,
+    structs: &HashMap<String, StructDecl>,
+) -> Result<String, String> {
+    let suffix = native_option_suffix(ty).ok_or_else(|| {
+        "C backend Option constructor requires a supported value type".to_string()
+    })?;
+    match expr {
+        Expr::Call { name, args } if name == "Some" && args.len() == 1 => Ok(format!(
+            "(fgx_option_{suffix}){{ .has_value = true, .value = {} }}",
+            emit_expr(&args[0], env, structs)?
+        )),
+        Expr::Call { name, args } if name == "None" && args.is_empty() => {
+            Ok(format!("(fgx_option_{suffix}){{ .has_value = false }}"))
+        }
+        _ => Err("C backend received an invalid Option constructor".to_string()),
+    }
+}
+
+fn native_vec_slice_element(ty: &Type) -> bool {
+    match ty {
+        Type::Bool => true,
+        Type::Primitive(element) => matches!(
+            element.as_str(),
+            "i8" | "i16"
+                | "i32"
+                | "i64"
+                | "isize"
+                | "u8"
+                | "u16"
+                | "u32"
+                | "u64"
+                | "usize"
+                | "f32"
+                | "f64"
+        ),
+        _ => false,
+    }
+}
+
+fn is_native_vec(ty: &Type) -> bool {
+    native_vec_suffix(ty).is_some()
 }
 
 fn emit_vec_cleanup(env: &Env, level: usize, out: &mut String) {
+    emit_vec_cleanup_from(env, 0, level, out);
+}
+
+fn emit_vec_cleanup_from(env: &Env, base: usize, level: usize, out: &mut String) {
     let pad = indent(level);
-    for name in env.owned_vecs.iter().rev() {
-        out.push_str(&format!("{pad}fgx_vec_i32_free(&{});\n", ident(name)));
+    for name in env.owned_vecs[base..].iter().rev() {
+        let suffix = env
+            .values
+            .get(name)
+            .and_then(native_vec_suffix)
+            .expect("owned native Vec must retain its concrete element layout");
+        out.push_str(&format!("{pad}fgx_vec_{suffix}_free(&{});\n", ident(name)));
     }
+}
+
+fn emit_loop_vec_cleanup(env: &Env, level: usize, out: &mut String) -> Result<(), String> {
+    let base = env
+        .loop_vec_bases
+        .last()
+        .copied()
+        .ok_or_else(|| "C backend received loop control outside a loop".to_string())?;
+    emit_vec_cleanup_from(env, base, level, out);
+    Ok(())
 }
 
 fn is_runtime_only_effect(effect: &str) -> bool {
@@ -1283,6 +1616,7 @@ fn is_runtime_only_effect(effect: &str) -> bool {
         || effect.starts_with("crypto.")
         || effect.starts_with("ledger.")
         || effect.starts_with("agent.")
+        || effect.starts_with("concurrency.")
         || effect == "serialize"
         || effect == "stream"
 }
@@ -1338,7 +1672,8 @@ impl TypeRegistry {
                 | Item::TraitImpl(_)
                 | Item::Test(_)
                 | Item::Capsule(_)
-                | Item::Share(_) => {}
+                | Item::Share(_)
+                | Item::Pipeline(_) => {}
             }
         }
     }
@@ -1424,24 +1759,25 @@ impl TypeRegistry {
                 }
             }
         }
+        let mut emitted_wrappers = BTreeSet::new();
         for ((_, len), elem) in &self.arrays {
-            if let Ok(name) = array_type_name(elem, *len) {
-                if let Ok(c_elem) = c_type(elem) {
-                    out.push(format!(
-                        "typedef struct {name} {{ {c_elem} data[{len}]; }} {name};"
-                    ));
-                }
+            let array = Type::Array {
+                elem: Box::new(elem.clone()),
+                len: *len,
+            };
+            if array_named_leaf(&array).is_none() {
+                emit_wrapper_typedef(&array, &mut emitted_wrappers, &mut out);
             }
         }
         for ((mutable, _), elem) in &self.slices {
-            if let Ok(name) = slice_type_name(elem, *mutable) {
-                if let Ok(c_elem) = c_type(elem) {
-                    let qualifier = if *mutable { "" } else { "const " };
-                    out.push(format!(
-                        "typedef struct {name} {{ {qualifier}{c_elem} *data; size_t len; }} {name};"
-                    ));
-                }
-            }
+            emit_wrapper_typedef(
+                &Type::Slice {
+                    mutable: *mutable,
+                    elem: Box::new(elem.clone()),
+                },
+                &mut emitted_wrappers,
+                &mut out,
+            );
         }
         out
     }
@@ -1449,6 +1785,85 @@ impl TypeRegistry {
     fn is_empty(&self) -> bool {
         self.slices.is_empty() && self.arrays.is_empty() && self.functions.is_empty()
     }
+}
+
+fn array_named_leaf(ty: &Type) -> Option<&str> {
+    match ty {
+        Type::Array { elem, .. } => match elem.as_ref() {
+            Type::Named(name) => Some(name),
+            nested @ Type::Array { .. } => array_named_leaf(nested),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn emit_native_named_array_layouts(
+    types: &TypeRegistry,
+    named_leaf: &str,
+    out: &mut String,
+) -> Result<(), String> {
+    let arrays = types
+        .arrays
+        .iter()
+        .filter_map(|((_, len), elem)| {
+            let array = Type::Array {
+                elem: Box::new(elem.clone()),
+                len: *len,
+            };
+            (array_named_leaf(&array) == Some(named_leaf) && is_native_vec_array_element(&array))
+                .then_some(array)
+        })
+        .collect::<Vec<_>>();
+    let mut typedefs = Vec::new();
+    let mut emitted_wrappers = BTreeSet::new();
+    for array in &arrays {
+        emit_wrapper_typedef(array, &mut emitted_wrappers, &mut typedefs);
+    }
+    for typedef in typedefs {
+        out.push_str(&typedef);
+        out.push('\n');
+    }
+    for array in arrays {
+        let Type::Array { elem, len } = array else {
+            unreachable!();
+        };
+        let suffix = format!("array_{}_{}", type_suffix(&elem)?, len);
+        let element = array_type_name(&elem, len)?;
+        out.push_str(&emit_native_vec_decl(&suffix, &element));
+    }
+    Ok(())
+}
+
+fn emit_wrapper_typedef(ty: &Type, emitted: &mut BTreeSet<String>, out: &mut Vec<String>) {
+    let (name, elem) = match ty {
+        Type::Array { elem, len } => (array_type_name(elem, *len), elem.as_ref()),
+        Type::Slice { mutable, elem } => (slice_type_name(elem, *mutable), elem.as_ref()),
+        _ => return,
+    };
+    let Ok(name) = name else { return };
+    if emitted.contains(&name) {
+        return;
+    }
+    if matches!(elem, Type::Array { .. } | Type::Slice { .. }) {
+        emit_wrapper_typedef(elem, emitted, out);
+    }
+    let Ok(c_elem) = c_type(elem) else {
+        return;
+    };
+    match ty {
+        Type::Array { len, .. } => out.push(format!(
+            "typedef struct {name} {{ {c_elem} data[{len}]; }} {name};"
+        )),
+        Type::Slice { mutable, .. } => {
+            let qualifier = if *mutable { "" } else { "const " };
+            out.push(format!(
+                "typedef struct {name} {{ {qualifier}{c_elem} *data; size_t len; }} {name};"
+            ));
+        }
+        _ => unreachable!(),
+    }
+    emitted.insert(name);
 }
 
 fn function_type_name(ty: &Type) -> Result<String, String> {

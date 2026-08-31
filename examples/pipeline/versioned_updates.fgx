@@ -1,0 +1,91 @@
+# Explicit versions make sequential updates deterministic while retaining old snapshots.
+
+share sample_count: i32 = 4
+share samples: Vec[i16]
+share scaled_sum: i32 = 0
+share original_sum: i32 = 0
+share shifted_sum: i32 = 0
+
+foreign make_versioned_samples c version "c11" effects [alloc]:
+    input count: i32
+    output samples: Vec[i16]
+    sandbox "fs.none"
+    bind sample_count read
+    bind samples rw
+    code:
+        #include "types.h"
+        #include <stdint.h>
+        #include <stdlib.h>
+
+        FgxOwnedI16 make_versioned_samples(int32_t count) {
+            FgxOwnedI16 result = { NULL, 0, 0 };
+            if (count <= 0) return result;
+            result.ptr = (int16_t *)malloc((size_t)count * sizeof(int16_t));
+            if (result.ptr == NULL) return result;
+            result.len = (size_t)count;
+            result.capacity = (size_t)count;
+            for (size_t i = 0; i < result.len; ++i) {
+                result.ptr[i] = (int16_t)(((int32_t)i - 2) * 100);
+            }
+            return result;
+        }
+
+        void make_versioned_samples_free(int16_t *ptr, size_t len, size_t capacity) {
+            (void)len;
+            (void)capacity;
+            free(ptr);
+        }
+
+foreign scale_version_zero c version "c11" effects [cpu]:
+    input samples: &mut[i16]
+    output sum: i32
+    sandbox "fs.none"
+    bind samples@0 update
+    bind scaled_sum rw
+    code:
+        #include <stddef.h>
+        #include <stdint.h>
+
+        int32_t scale_version_zero(int16_t *samples, size_t samples_len) {
+            int32_t sum = 0;
+            for (size_t i = 0; i < samples_len; ++i) {
+                samples[i] = (int16_t)(samples[i] * 2);
+                sum += samples[i];
+            }
+            return sum;
+        }
+
+foreign sum_original_snapshot c version "c11" effects [cpu]:
+    input samples: &[i16]
+    output sum: i32
+    sandbox "fs.none"
+    bind samples@0 read
+    bind original_sum rw
+    code:
+        #include <stddef.h>
+        #include <stdint.h>
+
+        int32_t sum_original_snapshot(const int16_t *samples, size_t samples_len) {
+            int32_t sum = 0;
+            for (size_t i = 0; i < samples_len; ++i) sum += samples[i];
+            return sum;
+        }
+
+foreign shift_version_one c version "c11" effects [cpu]:
+    input samples: &mut[i16]
+    output sum: i32
+    sandbox "fs.none"
+    bind samples@1 update
+    bind shifted_sum rw
+    code:
+        #include <stddef.h>
+        #include <stdint.h>
+
+        int32_t shift_version_one(int16_t *samples, size_t samples_len) {
+            int32_t sum = 0;
+            for (size_t i = 0; i < samples_len; ++i) {
+                samples[i] = (int16_t)(samples[i] + 10);
+                sum += samples[i];
+            }
+            return sum;
+        }

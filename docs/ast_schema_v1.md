@@ -23,10 +23,33 @@ The root object always contains:
 ```text
 Item
   Struct
+  Enum
   Trait
   TraitImpl
   Function
+  Test
+  Capsule
+  Share
+  Pipeline
 ```
+
+Authored pipeline graphs use this canonical item shape:
+
+```json
+{
+  "kind": "pipeline",
+  "id": "@pipeline.preview",
+  "name": "preview",
+  "stages": ["produce", "consume"],
+  "edges": [
+    {"from": "produce", "to": "consume", "share": "middle"}
+  ],
+  "annotations": []
+}
+```
+
+The stage array preserves the authored ready-node tie-break order. Edges
+preserve source order and bind producer, consumer, and shared value explicitly.
 
 User-defined interfaces use two canonical item shapes:
 
@@ -160,6 +183,7 @@ call
 cast
 field
 index
+slice_range
 trait_const
 ```
 
@@ -171,6 +195,10 @@ role:
 @function.mix_samples.stmt.2.cond.left
 @function.mix_samples.stmt.2.body.0.expr.arg.1
 ```
+
+An `index` expression has `base` and `index` children. A `slice_range`
+expression has `base`, `start`, and `end` children and represents a half-open
+borrowed-slice projection.
 
 ## Types
 

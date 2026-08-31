@@ -1,13 +1,14 @@
 # 3d-text-music-visualizar
 
-**Status:** governed pixel-preview, encoder-handoff, and deterministic music-
-timeline foundations shipped. Forgentex can model, check, review, and execute
-a bounded scene-to-raw-frame-to-image pipeline with linked render/encode
-receipts, and `core.music` now defines bar/beat/tick conversion, cue
+**Status:** governed preview/final render dispatch, encoder handoff, and
+deterministic music-timeline foundations shipped. Forgentex can model, check,
+review, and execute a bounded scene-to-raw-frame-to-image pipeline with linked
+render/encode receipts. `core.music` now defines bar/beat/tick conversion, cue
 quantization, a bounded two-segment tempo map, and a versioned `MusicCue` with
 deterministic conflict resolution plus bounded `SceneAction` entries. Real
-text/3D graphics, physics, production codecs, GPU rendering, and 4K output
-remain planned governed capsules and must not be claimed as shipped.
+text/3D graphics, physics, production audio/video codecs, GPU rendering, and
+demonstrated 4K output remain planned governed capsules and must not be claimed
+as shipped.
 
 ## Project description
 
@@ -156,9 +157,9 @@ some remain proposed extensions to the existing effect vocabulary.
 
 `gpu.compute` already has a review model for CUDA capsules. `gpu.render` is a
 first-class effect for governed render contracts, and `media.encode` now gates
-the bounded PPM encoder proof. `media.decode`, `llm.infer`, and
-`physics.simulate` remain to be added; production codec profiles and manifests
-also remain future work.
+bounded PPM plus standards-based deterministic PNG encoding. `media.decode`,
+`llm.infer`, and `physics.simulate` remain to be added; production audio/video
+codec profiles and manifests also remain future work.
 
 ## Honest implementation plan
 
@@ -192,11 +193,138 @@ then a separately gated `media.encode` capsule persists the deterministic PPM.
 `forgentex.encode_receipt.v1` binds its exact input hash to the raw render hash,
 plus the final output hash, encoder/toolchain identity, effects, and budgets.
 
+`render_encode_final.fgx` adds a separately authorized `final` render profile.
+The runtime keeps preview requests at or below 1920x1080, admits final requests
+through 3840x2160, rejects out-of-profile dimensions before native dispatch,
+and records the selected profile in the render receipt. Its 64x36 executable
+fixture deliberately keeps tests inexpensive while exercising the complete
+scene-to-raw-frame-to-PPM path; it is not a 4K performance claim.
+
+The raw-frame boundary is now host-validated rather than trusted by label. Its
+eight-byte little-endian width/height header must describe the exact RGB8
+payload and match the scene dimensions before the renderer can commit the
+handoff. The encoder repeats structural validation before native dispatch, and
+its receipt records the verified input width, height, and format. A renderer
+cannot therefore obtain linked evidence for a dimension-confused frame, nor
+can an arbitrary malformed byte producer reach the PPM encoder by declaring
+the raw-RGB media type.
+
+`render_encode_png.fgx` advances the codec side from a diagnostic PPM to a real
+PNG container. Profile/media-type matching is exact, and the contained encoder
+emits RGB8 IHDR, a CRC-protected `sRGB` chunk with perceptual intent,
+deterministic stored DEFLATE data, Adler-32, and IEND. Conformance independently
+reconstructs the PNG, validates the color chunk, and compares every decoded
+pixel to the renderer output. It intentionally omits compression tuning beyond
+the exact stored-block mode, alpha/palettes, color conversion, wide-gamut/ICC
+profiles, animation, and video.
+
+That PNG fixture also carries the first selected-frame manifest: scene-bound
+frame index 12 of 240 at 30 FPS. The three policy declarations—index field,
+count field, and FPS—are all-or-nothing; indices/counts and the 1–240 FPS range
+are checked before dispatch, and the receipt binds the values to the scene
+hash. Renderers without a manifest retain frame 0 of 1 with no FPS. This makes
+an independently dispatched frame auditable but does not schedule, store,
+restore, or reuse a sequence; the identity-only cache-key contract below
+builds on it.
+
+Its quality manifest additionally binds 256 samples per pixel and a half-frame
+Q16 shutter from distinct scene fields. Preview is capped at 64 samples, final
+at 4096, and shutter at the inclusive 0–65536 fraction; invalid values fail
+before native dispatch. The settings appear in the render receipt and affect
+the fixture's decoded pixels. They establish governed quality intent, not a
+claim of physical motion blur, adaptive sampling, or production render quality.
+
+Adaptive intent now extends that quality contract with scene-bound minimum
+samples `32` and Q16 noise threshold `655`. The pair is atomic, requires the
+base samples/shutter pair, and is range-checked before native dispatch against
+the authored 256-sample ceiling. Both values appear in the render receipt and
+affect decoded fixture pixels. This proves governed delivery, not adaptive
+convergence behavior or performance.
+
+The renderer and encoder now also declare the same exact `srgb` color space.
+The pipeline rejects a missing declaration on either side before encoder
+dispatch, both receipts preserve the value, and the PNG container carries the
+matching standard chunk. Legacy pairs remain valid with `null` color metadata;
+no broader color-space conversion or compositing claim is made.
+
+The same renderer now selects `render.device cpu`. Device intent is optional
+for legacy policies, but when present it must be `cpu` or `gpu` and agree with
+exactly one matching render effect; ambiguous or mismatched policies fail
+validation. The receipt records `cpu`. A `gpu` manifest can be reviewed, but
+live native GPU capability remains denied before compiler lookup, so this is a
+device-selection contract rather than GPU execution.
+
+Renderer implementation identity is now explicit as well. The fixture declares
+`forgentex_software_rgb8@1.0.0`; engine name and exact core version are atomic,
+validated, included in the reviewed boundary hash, and recorded in the render
+receipt. Legacy policies remain `null / null`. This binds a declared engine
+version but does not identify a publisher, driver, or physical device.
+
+Every successful renderer and encoder receipt now also records the SHA-256 of
+the exact native runner executable verified immediately before launch. The PNG
+fixture proves distinct 64-character renderer/encoder binary identities and
+stable hashes across identical reruns. This closes executable-byte identity;
+it does not provide publisher signatures, a trusted-vendor chain, driver
+attestation, or physical-device identity.
+
+Encoder semantic identity now matches the renderer-side contract. The PNG
+fixture declares `forgentex_png_rgb8@1.0.0`; name and exact core version are
+atomic, validated, boundary-bound, and receipted beside its exact executable
+hash. Legacy PPM encoders retain `null / null`. This does not broaden the PNG
+compression/profile surface or establish publisher provenance.
+
+PNG compression behavior is now declared rather than inferred. The fixture's
+atomic `stored_deflate / 0` pair is PNG-only, validated, and carried by the
+encode receipt; PPM remains null. The independent PNG parser already rejects
+any non-stored DEFLATE block, so the declared control is checked against actual
+container behavior. Fixed/dynamic Huffman coding and levels 1–9 remain open.
+
+The PNG layout is now explicit too: atomic `rgb8 / none` declares 8-bit
+truecolor output without interlacing. Encode receipts carry the pair, legacy
+PPM remains null, and independent IHDR checks prove bit depth 8, color type 2,
+standard compression/filter methods, and interlace method 0. Alpha, palettes,
+grayscale, higher bit depths, and Adam7 remain open.
+
+Scanline filtering is now declared independently as PNG-only
+`encode.scanline_filter none`. The value is validated and receipted, and the
+conformance parser inflates IDAT to prove every row actually uses filter type
+0 rather than inferring that choice from IHDR's filter-method byte. Sub, Up,
+Average, Paeth, and adaptive row selection remain open.
+
+PNG integrity is also explicit through the atomic PNG-only
+`encode.chunk_checksum crc32` / `encode.stream_checksum adler32` pair.
+Receipts preserve both algorithms, while independent parsing recomputes every
+chunk CRC and the zlib
+stream's Adler-32 value. This proves container error detection, not artifact
+authenticity or publisher identity.
+
+The PNG container layout is fixed as well through
+`encode.chunk_order ihdr_srgb_idat_iend`. Independent conformance requires
+exactly one chunk of each kind in that sequence, binding the receipt to the
+emitted structure. Extra ancillary chunks and split IDAT sequences remain
+outside this narrow deterministic profile.
+
+The fixture now also declares sequence ID `visualizer_final_v1`. A sequence ID
+is valid only beside the complete frame index/count/FPS manifest. Each
+successful frame receipt carries a deterministic cache-key SHA-256 over the
+sequence, canonical scene and exact render settings, declared engine, native
+boundary/toolchain/runner identity, and raw artifact contract. Repeating frame
+12 preserves the key while frame 13 changes it. This is a cache lookup identity,
+not cache storage, restoration, sequence scheduling, resume, or frame reuse.
+
+The raw-frame edge now identifies one bounded RGB8 visualization pass as well.
+The fixture declares `render.pass beauty` and `encode.input_pass beauty`; the
+pipeline rejects unknown passes or a missing declaration on either side before
+encoder dispatch, and both receipts preserve the selection. `depth`, `normal`,
+and `object_id` are reviewable display visualizations, not floating-point or
+lossless data passes. Multi-pass/AOV output remains open.
+
 This closes visual.0's pixel-proof edge and its first deterministic authored-
-time edge. The `ScenePlan` is four scalar fields, the output is one PPM image,
-and the timing module does not decode or analyze audio. There is no text
-geometry, animated scene/cue schema, GPU dispatch, production codec, or richer
-nested scene boundary yet.
+time edge. The baseline `ScenePlan` remains four scalar fields; the sequence-
+aware PNG fixture adds frame index/count and two quality scalars. The timing
+module does not decode or analyze audio. There is no text geometry, animated
+scene/cue execution, GPU dispatch, production video codec, or richer nested
+scene boundary yet.
 
 ### visual.1 - Governed domain contracts
 
@@ -205,19 +333,34 @@ shaping/text mesh generation, a deterministic physics engine, a wgpu/Vulkan or
 Blender-compatible renderer, and an FFmpeg-style encoder. Pin every dependency
 and expose their effects, buffers, GPU targets, and sandbox/resource limits.
 
-### visual.2 - Preview renderer
+### visual.2 - Preview and final render profiles
 
-Implement live capsule invocation and a graphics runtime capable of loading the
-validated `ScenePlan`, generating text/symbol geometry, simulating the planned
-events, and producing an approval preview. Keep preview quality and final
-quality as distinct `RenderProfile`s.
+The first profile boundary is shipped: live capsule invocation loads a bounded
+`ScenePlan`, `preview` and `final` are distinct receipt identities, and their
+1920x1080 / 3840x2160 dimension ceilings fail closed before dispatch. Optional
+frame index/count plus FPS are now scene-bound and receipted. Still implement a
+graphics runtime capable of generating text/symbol geometry, simulating planned
+events, scheduling and reusing cached sequences, and attaching richer color-space,
+multi-pass/AOV, device-identity, and adaptive-algorithm settings to `RenderProfile`
+manifests. Samples and Q16 shutter are now bounded and receipted, and the first
+exact end-to-end sRGB contract is shipped; linear-light, wide-gamut, ICC, and
+conversion policies remain open. CPU/GPU device intent is also receipted with
+exact effect matching, and one bounded RGB8 visualization pass is linked across
+render and encode receipts. Minimum samples and Q16 noise intent are bounded
+and receipted; engine name/core version are declared and boundary-bound. A
+bounded sequence ID and deterministic per-frame cache lookup key are shipped,
+and both renderer and encoder receipts expose their exact verified executable
+SHA-256; both sides also expose declared engine/core-version identity. Actual
+storage/hits/resume, publisher/device attestation, convergence proof,
+multi-pass data, and a governed GPU runner remain open.
 
 ### visual.3 - Offline 4K master render
 
 Add robust audio decoding/beat analysis, shader/material support, cascades and
 deterministic physics, depth-of-field and motion blur, translucent materials,
 advanced lighting, frame-sequence caching, color-managed compositing, and a
-bounded encoder pipeline. A final render is accepted only when its asset hashes,
+bounded encoder pipeline with production compression and pixel-layout choices.
+A final render is accepted only when its asset hashes,
 seed, renderer version, GPU target, capability grants, and output profile are
 captured in the manifest.
 
@@ -226,10 +369,10 @@ captured in the manifest.
 | Needed feature | Current position | Forgentex plan |
 | --- | --- | --- |
 | 3D graphics/GPU runtime | CUDA/GPU capsules are reviewable, but a live graphics runtime is not yet available. | Deliver `dom.4`: a pinned Rust/C capsule around wgpu/Vulkan, with typed scene buffers, GPU architecture/resource review, and live native dispatch. |
-| Audio/video codecs | A separately governed PPM encoder proves raw-frame handoff, `media.encode` gating, persistence, and linked receipts; full media decode and production image/video codecs are not available. | Add governed codec capsules (for example an FFmpeg-compatible boundary), bounded codec/profile policies, and `media.decode`. Keep codec implementation outside the trusted core. |
+| Audio/video codecs | Separately governed PPM and deterministic non-interlaced RGB8 PNG encoders prove exact profile, stored compression, no-filter scanline dispatch, declared CRC-32/Adler-32 integrity, exact single-IDAT chunk order, raw-frame handoff, `media.encode` gating, persistence, linked receipts, and decoded-pixel conformance. Full media decode and audio/video codecs are not available. | Add governed codec capsules (for example an FFmpeg-compatible boundary), broader bounded compression/filter/container/profile policies, and `media.decode`. Keep codec implementation outside the trusted core. |
 | Physics | No scene-physics API exists. | Bind a deterministic physics engine through a capsule, define stable body/constraint/event types, seed all stochastic behavior, and add golden-state tests. |
 | LLM orchestration | Managed capsules can provide a typed boundary, but no music-visual planner schema or provider policy exists. | Add `llm.infer`, a versioned `ScenePlan` JSON schema, strict output validation, model/version audit data, and a no-arbitrary-code policy. |
-| Real 4K render jobs | A deterministic software pixel preview, raw-frame handoff, PPM encoder, and governed receipts are live, but there is no 3D/GPU renderer, async I/O, caching, production codec, or job runtime. | Add richer scene/frame boundaries, then queueing, cancellation, budgets, production encoding, and cache manifests as governed services. |
+| Real 4K render jobs | Deterministic software preview/final dispatch, a 3840x2160 final-profile ceiling, raw-frame handoff, PPM/PNG encoding, governed receipts, and frame-cache lookup identities are live, but no 4K workload is claimed and there is no 3D/GPU renderer, cache storage/reuse, production video codec, or media job runtime. | Add richer scene/frame and quality-profile boundaries, then queueing, cancellation, production video encoding, and cache storage/restoration as governed services. |
 | Music-aware timing | `core.music` now provides typed musical positions, one bounded two-segment tempo map, `MusicCue` version 1, and bounded `SceneAction` entries. Cue/action IDs must match; emitters require deterministic seeds and all actions obey caller instance limits. It does not decode audio or schedule collections. | Define the action-table manifest and cue collection/section schema, generalize ordered tempo maps after native collection lowering, add the audio-feature boundary, then bind validated cues/actions into render receipts. |
 
 ## Demo success criteria

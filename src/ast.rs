@@ -15,6 +15,7 @@ pub enum Item {
     Test(TestDecl),
     Capsule(Capsule),
     Share(ShareDecl),
+    Pipeline(PipelineDecl),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -262,6 +263,13 @@ pub enum Expr {
         base: Box<Expr>,
         index: Box<Expr>,
     },
+    /// A half-open slice projection, `base[start .. end]`. V3 initially
+    /// requires both bounds; omitted and inclusive bounds remain future work.
+    SliceRange {
+        base: Box<Expr>,
+        start: Box<Expr>,
+        end: Box<Expr>,
+    },
     /// An anonymous function (lang.4 closures): typed parameters and a single
     /// expression body. Free variables are captured by value at creation.
     Lambda {
@@ -334,6 +342,37 @@ pub struct ShareDecl {
     pub attrs: Vec<Attribute>,
 }
 
+/// An authored deterministic pipeline graph. Runtime validation requires its
+/// stages and edges to match the capsule share-binding dataflow exactly.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PipelineDecl {
+    pub id: String,
+    pub name: String,
+    pub stages: Vec<String>,
+    pub edges: Vec<PipelineEdgeDecl>,
+    pub attrs: Vec<Attribute>,
+}
+
+impl PipelineDecl {
+    pub fn new(name: String) -> Self {
+        let id = format!("@pipeline.{name}");
+        Self {
+            id,
+            name,
+            stages: Vec::new(),
+            edges: Vec::new(),
+            attrs: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PipelineEdgeDecl {
+    pub from: String,
+    pub to: String,
+    pub share: String,
+}
+
 impl ShareDecl {
     pub fn new(name: String, ty: Type, default: Option<CapsuleValue>) -> Self {
         let id = format!("@share.{name}");
@@ -350,6 +389,8 @@ impl ShareDecl {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShareMode {
     Read,
+    Move,
+    Update,
     Rw,
 }
 
@@ -357,6 +398,8 @@ impl ShareMode {
     pub fn as_str(&self) -> &'static str {
         match self {
             ShareMode::Read => "read",
+            ShareMode::Move => "move",
+            ShareMode::Update => "update",
             ShareMode::Rw => "rw",
         }
     }
@@ -364,6 +407,8 @@ impl ShareMode {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "read" => Some(ShareMode::Read),
+            "move" => Some(ShareMode::Move),
+            "update" => Some(ShareMode::Update),
             "rw" => Some(ShareMode::Rw),
             _ => None,
         }
@@ -372,13 +417,42 @@ impl ShareMode {
     pub fn is_writer(&self) -> bool {
         matches!(self, ShareMode::Rw)
     }
+
+    pub fn is_source(&self) -> bool {
+        matches!(self, ShareMode::Read | ShareMode::Move | ShareMode::Update)
+    }
 }
 
 /// A capsule's binding of a shared name into its runtime.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CapsuleShareBinding {
+    /// The declared share name, optionally suffixed with an explicit
+    /// pipeline version (`samples@2`). Versioned references are resolved by
+    /// the pipeline runtime; other shared-namespace consumers use the base
+    /// name returned by `split_share_reference`.
     pub name: String,
     pub mode: ShareMode,
+}
+
+/// Split a shared binding reference into its declared base name and optional
+/// explicit pipeline version. The spelling is deliberately canonical: zero is
+/// `@0`, while positive versions may not contain leading zeroes.
+pub fn split_share_reference(value: &str) -> Result<(&str, Option<u64>), String> {
+    let Some((name, version_text)) = value.rsplit_once('@') else {
+        return Ok((value, None));
+    };
+    if name.is_empty() || name.contains('@') || version_text.is_empty() {
+        return Err(format!("invalid shared version reference '{value}'"));
+    }
+    if version_text.len() > 1 && version_text.starts_with('0') {
+        return Err(format!(
+            "shared version reference '{value}' is not canonical; remove leading zeroes"
+        ));
+    }
+    let version = version_text.parse::<u64>().map_err(|_| {
+        format!("shared version reference '{value}' requires an unsigned 64-bit version")
+    })?;
+    Ok((name, Some(version)))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -398,6 +472,7 @@ pub struct CapsuleFixture {
 #[derive(Clone, Debug, PartialEq)]
 pub enum CapsuleValue {
     Int(i64),
+    UInt(u64),
     Float(f64),
     Bool(bool),
     Str(String),
@@ -407,6 +482,7 @@ impl CapsuleValue {
     pub fn type_name(&self) -> &'static str {
         match self {
             CapsuleValue::Int(_) => "int",
+            CapsuleValue::UInt(_) => "uint",
             CapsuleValue::Float(_) => "float",
             CapsuleValue::Bool(_) => "bool",
             CapsuleValue::Str(_) => "str",
@@ -422,6 +498,7 @@ impl CapsuleValue {
             (CapsuleValue::Int(_), Type::Primitive(name)) => {
                 is_integer_primitive(name) || is_float_primitive(name)
             }
+            (CapsuleValue::UInt(_), Type::Primitive(name)) => name == "u64" || name == "usize",
             (CapsuleValue::Float(_), Type::Primitive(name)) => is_float_primitive(name),
             (CapsuleValue::Str(_), Type::Primitive(name)) => name == "str",
             (CapsuleValue::Str(_), Type::Named(name)) => name == "str",
@@ -434,6 +511,7 @@ impl CapsuleValue {
     pub fn to_literal(&self) -> String {
         match self {
             CapsuleValue::Int(value) => value.to_string(),
+            CapsuleValue::UInt(value) => value.to_string(),
             CapsuleValue::Float(value) => {
                 let text = format!("{value}");
                 if text.contains('.') || text.contains('e') || text.contains("inf") {
@@ -608,6 +686,13 @@ impl Program {
         })
     }
 
+    pub fn pipelines(&self) -> impl Iterator<Item = &PipelineDecl> {
+        self.items.iter().filter_map(|item| match item {
+            Item::Pipeline(pipeline) => Some(pipeline),
+            _ => None,
+        })
+    }
+
     pub fn to_json(&self) -> String {
         let mut out = String::new();
         out.push_str("{\n  \"items\": [\n");
@@ -728,6 +813,18 @@ impl Type {
         if compact == "bool" {
             return Type::Bool;
         }
+        if compact == "&mutstr" {
+            return Type::Slice {
+                mutable: true,
+                elem: Box::new(Type::Primitive("str".to_string())),
+            };
+        }
+        if compact == "&mutString" {
+            return Type::Slice {
+                mutable: true,
+                elem: Box::new(Type::Named("$String".to_string())),
+            };
+        }
         if let Some(array) = parse_array_type(&compact) {
             return array;
         }
@@ -783,7 +880,13 @@ impl Type {
             }
             Type::Array { elem, len } => format!("[{}; {len}]", elem.to_human()),
             Type::Slice { mutable, elem } => {
-                if *mutable {
+                if *mutable && matches!(elem.as_ref(), Type::Primitive(name) if name == "str") {
+                    "&mut str".to_string()
+                } else if *mutable
+                    && matches!(elem.as_ref(), Type::Named(name) if name == "$String")
+                {
+                    "&mut String".to_string()
+                } else if *mutable {
                     format!("&mut [{}]", elem.to_human())
                 } else {
                     format!("&[{}]", elem.to_human())
@@ -815,7 +918,13 @@ impl Type {
             }
             Type::Array { elem, len } => format!("[{};{len}]", elem.to_agent()),
             Type::Slice { mutable, elem } => {
-                if *mutable {
+                if *mutable && matches!(elem.as_ref(), Type::Primitive(name) if name == "str") {
+                    "&mutstr".to_string()
+                } else if *mutable
+                    && matches!(elem.as_ref(), Type::Named(name) if name == "$String")
+                {
+                    "&mutString".to_string()
+                } else if *mutable {
                     format!("&mut[{}]", elem.to_agent())
                 } else {
                     format!("&[{}]", elem.to_agent())
@@ -860,7 +969,8 @@ impl Type {
         }
     }
 
-    /// Decode a first-class function type. The pure form is `Fn[P..., R]`;
+    /// Decode a first-class callable type. The copyable form is `Fn[P..., R]`
+    /// and the affine, one-shot form is `FnOnce[P..., R]`;
     /// `forall[T: Bound]` may appear first and `effects[E...]` may appear last.
     /// Both markers reuse generic type nodes and are excluded from the returned
     /// parameter/return slices.
@@ -868,7 +978,7 @@ impl Type {
         let Type::Generic { name, args } = self else {
             return None;
         };
-        if name != "Fn" || args.is_empty() {
+        if !matches!(name.as_str(), "Fn" | "FnOnce") || args.is_empty() {
             return None;
         }
         let (signature, effects) = match args.last() {
@@ -893,7 +1003,7 @@ impl Type {
         let Type::Generic { name, args } = self else {
             return None;
         };
-        if name != "Fn" {
+        if !matches!(name.as_str(), "Fn" | "FnOnce") {
             return None;
         }
         let Some(Type::Generic {
@@ -1345,6 +1455,28 @@ fn item_to_json(item: &Item, indent: usize) -> String {
                     .unwrap_or_else(|| "null".to_string())
             )
         }
+        Item::Pipeline(pipeline) => format!(
+            "{pad}{{\n{pad}  \"kind\": \"pipeline\",\n{pad}  \"id\": \"{}\",\n{pad}  \"name\": \"{}\",\n{pad}  \"stages\": [{}],\n{pad}  \"edges\": [{}]\n{pad}}}",
+            escape(&pipeline.id),
+            escape(&pipeline.name),
+            pipeline
+                .stages
+                .iter()
+                .map(|stage| format!("\"{}\"", escape(stage)))
+                .collect::<Vec<_>>()
+                .join(", "),
+            pipeline
+                .edges
+                .iter()
+                .map(|edge| format!(
+                    "{{\"from\":\"{}\",\"to\":\"{}\",\"share\":\"{}\"}}",
+                    escape(&edge.from),
+                    escape(&edge.to),
+                    escape(&edge.share)
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 
@@ -1358,6 +1490,7 @@ fn item_to_canonical_json(out: &mut String, item: &Item, indent: usize) {
         Item::Test(test) => test_to_canonical_json(out, test, indent),
         Item::Capsule(capsule) => capsule_to_canonical_json(out, capsule, indent),
         Item::Share(share) => share_to_canonical_json(out, share, indent),
+        Item::Pipeline(pipeline) => pipeline_to_canonical_json(out, pipeline, indent),
     }
 }
 
@@ -1525,6 +1658,37 @@ fn share_to_canonical_json(out: &mut String, share: &ShareDecl, indent: usize) {
         .map(|value| value.to_literal())
         .unwrap_or_else(|| "null".to_string());
     push_prop(out, indent + 1, "default", &default, false);
+    push_line(out, indent, "}");
+}
+
+fn pipeline_to_canonical_json(out: &mut String, pipeline: &PipelineDecl, indent: usize) {
+    push_line(out, indent, "{");
+    push_prop(out, indent + 1, "kind", &quoted("pipeline"), true);
+    push_prop(out, indent + 1, "id", &quoted(&pipeline.id), true);
+    push_prop(out, indent + 1, "name", &quoted(&pipeline.name), true);
+    let stages = pipeline
+        .stages
+        .iter()
+        .map(|stage| quoted(stage))
+        .collect::<Vec<_>>()
+        .join(", ");
+    push_prop(out, indent + 1, "stages", &format!("[{stages}]"), true);
+    push_array_block_start(out, indent + 1, "edges");
+    for (idx, edge) in pipeline.edges.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(",\n");
+        }
+        push_indent(out, indent + 2);
+        out.push_str(&format!(
+            "{{\"from\": {}, \"to\": {}, \"share\": {}}}",
+            quoted(&edge.from),
+            quoted(&edge.to),
+            quoted(&edge.share)
+        ));
+    }
+    out.push('\n');
+    push_line(out, indent + 1, "],");
+    push_attributes(out, indent + 1, "annotations", &pipeline.attrs, false);
     push_line(out, indent, "}");
 }
 
@@ -2193,6 +2357,19 @@ fn expr_to_canonical_json(out: &mut String, expr: &Expr, id: &str, indent: usize
                 false,
             );
         }
+        Expr::SliceRange { base, start, end } => {
+            push_prop(out, indent + 1, "kind", &quoted("slice_range"), true);
+            push_expr_prop(out, indent + 1, "base", base, &format!("{id}.base"), true);
+            push_expr_prop(
+                out,
+                indent + 1,
+                "start",
+                start,
+                &format!("{id}.start"),
+                true,
+            );
+            push_expr_prop(out, indent + 1, "end", end, &format!("{id}.end"), false);
+        }
         Expr::Lambda { params, body } => {
             push_prop(out, indent + 1, "kind", &quoted("lambda"), true);
             let params_json = params
@@ -2439,6 +2616,12 @@ fn expr_to_inline_text(expr: &Expr) -> String {
                 expr_to_inline_text(index)
             )
         }
+        Expr::SliceRange { base, start, end } => format!(
+            "{}[{} .. {}]",
+            expr_to_inline_text(base),
+            expr_to_inline_text(start),
+            expr_to_inline_text(end)
+        ),
         Expr::Lambda { params, body } => format!(
             "|{}| {}",
             params

@@ -37,7 +37,14 @@ fn vscode_extension_package_declares_languages_commands_and_grammars() {
 #[test]
 fn vscode_grammars_cover_patches_node_ids_unsafe_and_architectures() {
     let fgx = read("syntaxes/fgx.tmLanguage.json");
-    assert!(fgx.contains("@(?:function|struct|module|statement|expression)"));
+    // Assert the node-ID alternation covers each kind rather than matching one
+    // exact string, so widening it to new declaration kinds is not a failure.
+    for kind in ["function", "struct", "module", "statement", "expression"] {
+        assert!(
+            fgx.contains(&format!("{kind}|")) || fgx.contains(&format!("|{kind})")),
+            "node-id pattern does not cover {kind}"
+        );
+    }
     assert!(fgx.contains("unsafe"));
     assert!(fgx.contains("asm|ASM"));
     assert!(fgx.contains("x86_64"));

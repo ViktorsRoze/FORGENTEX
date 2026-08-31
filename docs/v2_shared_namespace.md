@@ -8,7 +8,7 @@ there: foreign code stays external, typed, effect-declared, pinned,
 sandboxed, and reviewable.
 
 > **Status: implemented in v2.2.** `share <name>: <type> [= default]`
-> declarations and capsule `bind <name> read|rw` clauses parse in both
+> declarations and capsule `bind <name> read|move|update|rw` clauses parse in both
 > `.fgx` and `.fgai`, roundtrip through one canonical AST, validate at
 > `fgx check` (unknown binding, multiple writers, default type), and report
 > through `fgx namespace` (`forgentex.shared_namespace.v1`). The
@@ -37,7 +37,14 @@ foreign frontend javascript version "node-22" effects [network.write]:
         export function render(count) { ... }
 ```
 
-Agent form uses `SHARE <name> <type> [= default]` and `BIND <name> read|rw`.
+Agent form uses `SHARE <name> <type> [= default]` and
+`BIND <name> read|move|update|rw`.
+
+The pipeline runtime additionally accepts canonical source references such as
+`BIND samples@0 update`. Version zero is a declaration/default or `rw` output;
+a successful explicit update retains that snapshot and atomically publishes
+`samples@1`. Explicit versions are source-only: `rw` always names the declared
+base share.
 
 ## Validation (blocking at `fgx check`)
 
@@ -46,6 +53,8 @@ Agent form uses `SHARE <name> <type> [= default]` and `BIND <name> read|rw`.
 | `share_unknown_binding` | a capsule binds a name with no `share` declaration |
 | `shared_multiple_writers` | a shared name has more than one `rw` binding |
 | `share_default_type` | a share default literal must match its declared type |
+| `share_invalid_version` | a binding version must be a canonical unsigned integer |
+| `share_versioned_writer` | explicit versions are not valid on `rw` bindings |
 
 The single-writer rule is the v2.2 stand-in for a real concurrency model:
 until concurrent capsule execution is defined, at most one capsule may hold
@@ -120,6 +129,13 @@ must declare a name, resolve to a `share` declaration, and declare a mode.
 ## Binding modes and consistency rules
 
 - `read`: snapshot-in only. Writes inside the capsule do not commit.
+- `move`: exclusive snapshot-in; the source is removed only when the pipeline
+  atomically commits the capsule's distinct `rw` target. Failure or cancellation
+  retains it.
+- `update`: unversioned bindings are exclusive fixed-length reviewed-vector
+  mutations; an explicit `name@N` binding retains `N` and publishes `N+1`.
+  Validated copy-back and the distinct `rw` target commit together or neither
+  commits.
 - `rw`: snapshot-in plus write-back-out at successful exit.
 - One `rw` binding per shared name may be active at a time. Two capsules
   that could run concurrently with `rw` bindings of the same name are a
@@ -180,7 +196,8 @@ Semantic patch review must treat shared-namespace changes as high-signal:
 
 - adding or removing a `share` declaration
 - changing a shared type or default
-- adding a binding, or escalating `read` to `rw`
+- adding a binding, changing its explicit version, or changing `read`, `move`,
+  `update`, or `rw` ownership mode
 - any boundary mapping marked lossy or opt-in
 
 ## Non-goals

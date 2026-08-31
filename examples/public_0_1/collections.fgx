@@ -1,0 +1,8 @@
+export fn public_collection_score() -> i32 effects [alloc]:
+    let values: Vec[i32] = vec_new()
+    push(values, 2)
+    push(values, 5)
+    let weights: Map[str, i32] = map_new()
+    map_set(weights, "fgx", 3)
+    let label: str = str_concat("fg", "x!")
+    return values[0] + values[1] + unwrap_or(map_get(weights, "fgx"), 0) + i32(label.len)

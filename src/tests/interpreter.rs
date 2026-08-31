@@ -172,3 +172,98 @@ fn bad_div(a: i32, b: i32) -> i32:
     assert!(index_err.contains("trap: index_out_of_bounds"));
     assert!(div_err.contains("trap: division_by_zero"));
 }
+
+#[test]
+fn an_owned_vector_lends_immutable_slice_views_without_moving() {
+    // An owned `Vec[T]` reads as `&[T]`, so a buffer can be lent to helpers
+    // repeatedly and still be used by its owner afterwards. Windows of it
+    // project to the same immutable view.
+    let source = "fn total(values: &[i32]) -> i32:\n    let sum: i32 = 0\n    let at: usize = 0\n    let stop: usize = values.len\n    while at < stop:\n        sum = sum + values[at]\n        at = at + 1\n    return sum\n\nfn driver() -> i32 effects [alloc]:\n    let owned: Vec[i32] = vec_new()\n    push(owned, 10)\n    push(owned, 20)\n    push(owned, 30)\n    push(owned, 40)\n    let whole: i32 = total(owned)\n    let window: i32 = total(owned[1 .. 3])\n    return whole + window + owned[0]\n";
+    let program = parse_file(Path::new("lend.fgx"), source).expect("source should parse");
+    assert!(check(&program).is_empty(), "{:?}", check(&program));
+
+    // 100 (whole) + 50 (window) + 10 (still owned) == 160
+    let output = run_entry_json(&program, "driver", r#"{ "args": {} }"#).unwrap();
+    assert!(output.contains("160"), "unexpected result: {output}");
+}
+
+#[test]
+fn lending_a_vector_does_not_weaken_move_checking() {
+    // The shared borrow must not turn into a licence to use a moved value:
+    // passing the buffer by value still moves it.
+    let source = "fn consume(values: Vec[i32]) -> i32:\n    return values[0]\n\nfn driver() -> i32 effects [alloc]:\n    let owned: Vec[i32] = vec_new()\n    push(owned, 3)\n    let taken: i32 = consume(owned)\n    return taken + owned[0]\n";
+    let program = parse_file(Path::new("moved.fgx"), source).expect("source should parse");
+    let diagnostics = check(&program);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "use_after_move"),
+        "expected use_after_move, got {diagnostics:?}"
+    );
+}
+
+#[test]
+fn an_owned_vector_crosses_the_native_boundary_whole_and_windowed() {
+    if crate::native_build::detect_toolchain().is_none() {
+        return;
+    }
+    // The reviewed native boundary takes `&[T]`, so lending an owned buffer
+    // (and a bounded window of it) is what lets real payloads reach native
+    // code without a copy through an intermediate binding.
+    let source = "foreign sum_c c version \"c11\" effects [alloc]:\n    input values: &[i32]\n    output total: i32\n    sandbox \"fs.none\"\n    code:\n        #include <stddef.h>\n        #include <stdint.h>\n\n        int32_t sum_c(const int32_t *values, size_t values_len) {\n            int32_t total = 0;\n            for (size_t i = 0; i < values_len; ++i) total += values[i];\n            return total;\n        }\n\nfn driver() -> i32 effects [alloc]:\n    let owned: Vec[i32] = vec_new()\n    push(owned, 10)\n    push(owned, 20)\n    push(owned, 30)\n    push(owned, 40)\n    let whole: i32 = sum_c(owned)\n    let window: i32 = sum_c(owned[1 .. 3])\n    return whole + window\n";
+    let program = parse_file(Path::new("native_lend.fgx"), source).expect("source should parse");
+    assert!(check(&program).is_empty(), "{:?}", check(&program));
+
+    // 100 (whole) + 50 (window)
+    let output = crate::interp::run_entry_json_live(&program, "driver", r#"{ "args": {} }"#, None)
+        .expect("live native call");
+    assert!(output.contains("150"), "unexpected native result: {output}");
+}
+
+#[test]
+fn windowing_a_large_owned_vector_stays_linear() {
+    // `Expr::SliceRange` used to clone the whole base out of the environment
+    // before projecting, so taking N windows of one buffer cost O(N * len)
+    // even when every window was small. This takes 512 windows of a 32k
+    // buffer; before the fix that copied ~16.8M elements.
+    let source = "fn width(window: &[i32]) -> i32:\n    return i32(window.len)\n\nfn driver(limit: i32) -> i32 effects [alloc]:\n    let owned: Vec[i32] = vec_new()\n    let i: i32 = 0\n    while i < limit:\n        push(owned, i)\n        i = i + 1\n    let total: i32 = 0\n    let at: usize = 0\n    while at < 512:\n        total = total + width(owned[at .. at + 8])\n        at = at + 1\n    return total\n";
+    let program = parse_file(Path::new("window.fgx"), source).expect("source should parse");
+    assert!(check(&program).is_empty());
+
+    let started = std::time::Instant::now();
+    let output = run_entry_json(&program, "driver", r#"{ "args": { "limit": 32768 } }"#).unwrap();
+    let elapsed = started.elapsed();
+
+    assert!(output.contains("4096"), "unexpected width total: {output}");
+    assert!(
+        elapsed < std::time::Duration::from_secs(30),
+        "windowing took {elapsed:?}, which suggests slice ranges regressed to cloning the base"
+    );
+}
+
+#[test]
+fn scanning_a_large_owned_vector_stays_linear() {
+    // Reading `values[at]` used to evaluate the base expression first, which
+    // cloned the whole vector for every element and made a linear scan
+    // O(n^2): 2.6 MB of bytes took over ten minutes. The scan below is ~65k
+    // index reads; before the fix it copied ~2.1e9 elements. The generous
+    // bound still separates linear behaviour from quadratic by orders of
+    // magnitude, so it will not flake on a loaded host.
+    let source = "fn scan(limit: i32) -> i32 effects [alloc]:\n    let values: Vec[i32] = vec_new()\n    let i: i32 = 0\n    while i < limit:\n        push(values, i)\n        i = i + 1\n    let total: i32 = 0\n    let at: usize = 0\n    let stop: usize = values.len\n    while at < stop:\n        total = total + values[at]\n        at = at + 1\n    return total\n";
+    let program = parse_file(Path::new("scan.fgx"), source).expect("source should parse");
+    assert!(check(&program).is_empty());
+
+    let started = std::time::Instant::now();
+    let output = run_entry_json(&program, "scan", r#"{ "args": { "limit": 32768 } }"#).unwrap();
+    let elapsed = started.elapsed();
+
+    // 0 + 1 + ... + 32767
+    assert!(
+        output.contains("536854528"),
+        "unexpected scan result: {output}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(30),
+        "large-vector scan took {elapsed:?}, which suggests indexing regressed to O(n) per read"
+    );
+}

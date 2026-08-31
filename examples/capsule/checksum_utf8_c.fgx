@@ -1,0 +1,19 @@
+# Native-call v1.24: `str` is a borrowed UTF-8 pointer-length pair.
+# The pointer is valid only for the duration of the call and may contain NUL.
+
+foreign checksum_utf8_c c version "c11" effects [cpu.avx2]:
+    input text: str
+    output checksum: i32
+    sandbox "fs.none"
+    code:
+        #include <stdint.h>
+        #include <stddef.h>
+
+        int32_t checksum_utf8_c(const uint8_t *text, size_t text_len) {
+            int32_t checksum = 0;
+            for (size_t i = 0; i < text_len; ++i) checksum += text[i];
+            return checksum;
+        }
+
+fn checksum_live(text: str) -> i32 effects [cpu.avx2]:
+    return checksum_utf8_c(text)

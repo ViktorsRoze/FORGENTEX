@@ -155,6 +155,22 @@ fixed schema.
     why (`excluded: 14 symbols, no dep path`), so agents don't spend turns
     asking for things the server already ruled out.
 
+Implementation update: `fgx context` now accepts `--max-tokens`, uses the
+shared `heuristic-v1` estimator, admits optional dependency categories only as
+complete slices, and emits explicit inclusion/exclusion and budget evidence.
+Requested effects are safety-mandatory and cause a stable budget-floor error
+rather than being elided. Project maps now carry per-symbol semantic estimates.
+This completes the local-tooling portion of items 7, 8, and 20; provider-level
+prompt budgeting and real-tokenizer calibration remain separate integration
+work.
+
+Item 3 now has a local stateful implementation as well. Full context packets
+carry section hashes and a packet hash; `fgx context --since <packet>` verifies
+the baseline symbol/state and omits only byte-identical symbol/map/type/test
+sections. Effects remain explicit. Logical/transmitted/saved token evidence and
+the serialized-packet benchmark prevent hash/framing overhead from being hidden.
+Long-lived provider cache integration remains future work.
+
 ### Guardrails
 
 - Review-critical surfaces (unsafe blocks, ABI, effects, capsule

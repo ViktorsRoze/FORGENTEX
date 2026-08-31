@@ -10,7 +10,7 @@ as `.fgx`.
 
 ```text
 file        ::= item*
-item        ::= attribute* (struct_decl | trait_decl | trait_impl | function_decl)
+item        ::= attribute* (struct_decl | trait_decl | trait_impl | function_decl | pipeline_decl)
 ```
 
 ## Declarations
@@ -40,7 +40,15 @@ param       ::= ident type
 return_type ::= "->" type
 effects     ::= "effects" "[" effect ("," effect)* "]"
 effect      ::= ident ("." ident)*
+
+pipeline_decl ::= "PIPELINE" ident pipeline_stage+ pipeline_edge* "ENDPIPELINE"
+pipeline_stage ::= "STAGE" ident
+pipeline_edge ::= "EDGE" ident "->" ident "VIA" ident
 ```
+
+`PIPELINE` is the compact view of the same authored graph manifest as the
+human `pipeline` declaration. Stage order is canonical and significant only as
+the deterministic tie-breaker among independent ready nodes.
 
 `UF` means unsafe function.
 
@@ -128,7 +136,7 @@ expr        ::= binary_expr
 binary_expr ::= unary_expr (binary_op unary_expr)*
 unary_expr  ::= unary_op unary_expr | postfix_expr
 postfix_expr ::= primary_expr postfix*
-postfix     ::= "." ident | "[" expr "]"
+postfix     ::= "." ident | "[" expr "]" | "[" expr ".." expr "]"
 primary_expr ::= literal | ident | call_expr | trait_const_expr | cast_expr | "(" expr ")"
 call_expr   ::= ident "(" args? ")"
 trait_const_expr ::= ident "::" ident "[" type "]"
@@ -137,6 +145,9 @@ args        ::= expr ("," expr)*
 literal     ::= int_literal | float_literal | bool_literal | string_literal
 const_expr  ::= literal | unary_op const_expr | primitive_type "(" const_expr ")"
 ```
+
+Slice ranges are half-open, require both bounds in the current grammar, and
+remain expressions rather than assignment targets.
 
 ## Canonical Formatting Rules
 

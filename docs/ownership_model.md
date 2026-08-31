@@ -61,6 +61,25 @@ Slices are the v0 borrow surface:
 Mutating an indexed value requires a mutable slice or mutable raw pointer target.
 Safe code cannot mutate through `&[T]`.
 
+An owned `Vec[T]` lends a shared `&[T]` view. Where a `&[T]` is expected — a
+function parameter, a reviewed native capsule input, or a `v[start .. stop]`
+projection — an owned vector is borrowed rather than moved, so the owner keeps
+using it afterwards:
+
+```forgentex
+fn total(values: &[i32]) -> i32:
+    return values[0] + values[1]
+
+fn driver(owned: Vec[i32]) -> i32:
+    let whole: i32 = total(owned)          # borrowed, not moved
+    let window: i32 = total(owned[1 .. 3]) # bounded window of the same buffer
+    return whole + window + owned[0]       # owner still holds it
+```
+
+This is deliberately one-directional and read-only. Passing the vector to a
+`Vec[T]` parameter still moves it, and no `&mut [T]` is produced from an owned
+vector: an exclusive loan of the owner is not implied by lending a shared view.
+
 Calls are checked for obvious aliasing of mutable borrows. Passing the same root
 value to two mutable-borrow parameters, or to a mutable and shared borrow in the
 same call, is rejected.

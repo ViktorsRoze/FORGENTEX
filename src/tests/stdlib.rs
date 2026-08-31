@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::interp::run_entry_json;
+use crate::interp::{canonical_json, run_entry_json, MAX_SERIALIZED_BYTES};
 use crate::parser::parse_file;
 use crate::project::{check_project, generate_project_map};
 use crate::stdlib::{standard_library_json, standard_library_text};
@@ -46,6 +46,143 @@ fn standard_library_catalog_lists_core_modules() {
 fn standard_library_source_package_typechecks() {
     let diagnostics = check_project(&manifest_path("stdlib")).unwrap();
     assert_eq!(diagnostics, Vec::new());
+}
+
+#[test]
+fn serialization_is_canonical_bounded_and_binary_exact() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib/src/core/serialize.fgx");
+    let source = std::fs::read_to_string(&path).unwrap();
+    let program = parse_file(&path, &source).unwrap();
+    assert_eq!(check(&program), Vec::new());
+
+    let input = r#" { "b": 2.0, "a": [1e0, "\u00e9", "\ud83d\ude00"] } "#;
+    let canonical = r#"{"a":[1,"é","😀"],"b":2}"#;
+    let output = run_entry_json(
+        &program,
+        "core_serialize_json_canonical",
+        &format!(
+            r#"{{"args":{{"value":{}}},"expect":{{"return":{}}}}}"#,
+            crate::json::string(input),
+            crate::json::string(canonical)
+        ),
+    )
+    .unwrap();
+    assert!(output.contains("\"status\": \"pass\""), "{output}");
+
+    for (value, expected) in [(canonical, true), (input, false)] {
+        let output = run_entry_json(
+            &program,
+            "core_serialize_json_is_canonical",
+            &format!(
+                r#"{{"args":{{"value":{}}},"expect":{{"return":{expected}}}}}"#,
+                crate::json::string(value)
+            ),
+        )
+        .unwrap();
+        assert!(output.contains("\"status\": \"pass\""), "{output}");
+    }
+
+    for (entry, args, expected) in [
+        (
+            "core_serialize_utf8_encode",
+            r#"{"value":"A€"}"#,
+            "[65,226,130,172]",
+        ),
+        (
+            "core_serialize_utf8_decode",
+            r#"{"bytes":[65,226,130,172]}"#,
+            r#""A€""#,
+        ),
+        ("core_serialize_u16_le", r#"{"value":4660}"#, "[52,18]"),
+        (
+            "core_serialize_u32_le",
+            r#"{"value":305419896}"#,
+            "[120,86,52,18]",
+        ),
+        (
+            "core_serialize_i32_le",
+            r#"{"value":-2}"#,
+            "[254,255,255,255]",
+        ),
+        (
+            "core_serialize_read_u16_le",
+            r#"{"bytes":[0,52,18],"offset":1}"#,
+            "4660",
+        ),
+        (
+            "core_serialize_read_u32_le",
+            r#"{"bytes":[0,120,86,52,18],"offset":1}"#,
+            "305419896",
+        ),
+        (
+            "core_serialize_read_i32_le",
+            r#"{"bytes":[0,254,255,255,255],"offset":1}"#,
+            "-2",
+        ),
+        (
+            "core_serialize_concat",
+            r#"{"left":[1,2],"right":[3,4]}"#,
+            "[1,2,3,4]",
+        ),
+    ] {
+        let output = run_entry_json(
+            &program,
+            entry,
+            &format!(r#"{{"args":{args},"expect":{{"return":{expected}}}}}"#),
+        )
+        .unwrap();
+        assert!(output.contains("\"status\": \"pass\""), "{entry}: {output}");
+    }
+
+    for invalid in [
+        r#"{"a":1,"a":2}"#,
+        r#"{"a":01}"#,
+        r#"{"a":1,}"#,
+        r#""\ud800""#,
+    ] {
+        let error = run_entry_json(
+            &program,
+            "core_serialize_json_canonical",
+            &format!(r#"{{"args":{{"value":{}}}}}"#, crate::json::string(invalid)),
+        )
+        .unwrap_err();
+        assert!(error.contains("invalid_json"), "{invalid}: {error}");
+    }
+
+    let invalid_utf8 = run_entry_json(
+        &program,
+        "core_serialize_utf8_decode",
+        r#"{"args":{"bytes":[255]}}"#,
+    )
+    .unwrap_err();
+    assert!(
+        invalid_utf8.contains("serialize_invalid_utf8"),
+        "{invalid_utf8}"
+    );
+
+    let out_of_bounds = run_entry_json(
+        &program,
+        "core_serialize_read_u32_le",
+        r#"{"args":{"bytes":[1,2,3],"offset":0}}"#,
+    )
+    .unwrap_err();
+    assert!(
+        out_of_bounds.contains("serialize_bounds"),
+        "{out_of_bounds}"
+    );
+
+    let nested = format!("{}0{}", "[".repeat(129), "]".repeat(129));
+    let too_deep = run_entry_json(
+        &program,
+        "core_serialize_json_canonical",
+        &format!(r#"{{"args":{{"value":{}}}}}"#, crate::json::string(&nested)),
+    )
+    .unwrap_err();
+    assert!(too_deep.contains("JSON nesting exceeds 128"), "{too_deep}");
+
+    let oversized = " ".repeat(MAX_SERIALIZED_BYTES + 1);
+    let too_large = canonical_json(&oversized).unwrap_err();
+    assert!(too_large.contains("serialize_size_limit"), "{too_large}");
 }
 
 #[test]

@@ -283,7 +283,7 @@ Place and projection alias analysis:
 - identical field projections and parent/child places still overlap
 - constant index projections are represented as places; different constant
   indexes are considered disjoint when both indexes are known
-- unknown index expressions and slice/range reasoning remain conservative
+- unknown index expressions remain conservative
 - call argument alias checks and live-alias write checks use the same overlap
   rule
 - `fgx borrow-report` lists `place_projection_alias_analysis`
@@ -311,8 +311,70 @@ fn bad(pair: Pair) -> void:
 ```
 
 The rule is still a local proof. It accepts clear field and constant-index
-disjointness, but does not prove slice ranges, loop-derived disjoint indexes, or
-cross-function lifetime contracts.
+disjointness, but does not prove loop-derived disjoint indexes or arbitrary
+cross-function splitting.
+
+Bounded slice-range increment:
+
+- `xs[start .. end]` is a half-open borrowed-slice projection with both bounds
+  required in this initial syntax
+- the checker accepts non-overlapping constant ranges such as `0 .. 2` and
+  `2 .. 4`, and also proves a constant index disjoint from a constant range
+- overlapping constant ranges conflict under the same mutable-alias rule used
+  for fields and indexes
+- dynamic bounds remain conservatively overlapping even when two expressions
+  happen to share the same split variable
+- the interpreter traps deterministically on reversed or out-of-bounds ranges;
+  C and Zig lowering report an explicit unsupported-operation blocker until a
+  reviewed slice ABI is added
+
+The independent reference model now covers all 49 pairs from seven constant or
+dynamic range shapes, plus 28 range-versus-index liveness cases. Those 77 cases
+use a separate interval model and source renderer rather than production place
+logic, and strict release requires zero mismatches.
+
+Borrow-carrying collection and generic increment:
+
+- an indexed `Vec` or fixed array preserves parameter lifetime provenance when
+  its element type is a borrow or another borrow-carrying collection
+- provenance composes recursively through nested collection indexes and through
+  explicitly typed intermediate locals
+- generic identity-style functions whose return type is a type parameter now
+  receive return-parameter summaries, allowing those summaries to compose
+  through generic wrapper chains
+- nested constant collection indexes remain place-sensitive for mutable alias
+  checks; dynamic indexes remain conservatively overlapping
+- 24 independent Vec/array carrier cases, 16 generic wrapper cases, and 72
+  combined carrier/wrapper cases compare parameter and deliberately unproven
+  origins; the combined matrix crosses collection kind, carrier depth one to
+  three, wrapper depth one to three, and direct or aliased traversal
+- strict release requires zero lifetime mismatches across the expanded
+  292-case family
+
+Concrete generic ownership increment:
+
+- call-site ownership analysis structurally instantiates generic parameter
+  types from the concrete argument types before move and alias classification
+- a generic `T` instantiated as `&mut [U]` therefore participates in the same
+  simultaneous mutable-argument checks as an explicitly typed borrow
+- the rule composes through generic wrappers because every concrete call
+  boundary re-instantiates its own signature
+- 16 independent cases cover every pair of two mutable roots through zero to
+  three generic wrapper layers; same-root calls reject and distinct roots pass
+
+Associated-type ownership increment:
+
+- concrete associated-type projections are recursively normalized before
+  field/index typing, mutable-target checks, move/copy classification, borrow
+  alias checks, and return-lifetime checks
+- 16 move cases distinguish copyable `i32` from owned `Packet` projections
+  through one-to-four `Peel::Item[Vec[...]]` layers, with direct and aliased use
+- 16 alias cases cover every pair of two mutable roots through the same four
+  projection depths; same-root calls reject and distinct roots pass
+- 16 lifetime cases compare parameter and deliberately unproven shared-borrow
+  origins through direct and typed-alias returns at all four depths
+- strict release now requires the complete 526-move, 610-alias, and
+  292-lifetime floors
 
 ## v0.22 Rule Additions
 
@@ -476,11 +538,13 @@ borrow checker. It tracks definite availability for an owned `Pair` and its
 `left`/`right` move paths, joins branch states by intersection, and evaluates a
 known two-iteration loop twice.
 
-The model exhaustively generates 510 equivalent `.fgx` programs:
+The move family generates 526 equivalent `.fgx` programs:
 
 - 258 one-, two-, and three-action straight-line programs;
 - 216 one-action-per-arm branches followed by another action;
 - 36 one-action loop bodies followed by another action.
+- 16 recursively normalized associated-type shapes varying copy/owned leaves,
+  one-to-four projection layers, and direct/aliased traversal.
 
 Actions read or move the whole pair, its left field, or its right field. The
 model predicts whether `use_after_move` must occur; the conformance runner then
@@ -503,6 +567,9 @@ Forgentex AST or production checker. They exhaustively generate:
   expressions, where only different constants prove disjointness;
 - 16 conditional alias reassignments inside loops, with both possible targets
   carried across the back edge and checked in both statement orders.
+- 32 nested-loop programs whose outer and inner conditional reassignments form
+  a three-origin target set, checked against direct writes in both statement
+  orders across both back edges.
 
 The model accepts child-before-parent activation after the child's last use,
 uses projection-path equality for overlap, unions conditional target sets, and
@@ -510,7 +577,7 @@ unrolls bounded loop bodies twice. It predicts `mutable_borrow_alias` when an
 overlapping loan remains live.
 
 The lifetime-provenance family uses an independent two-point lattice:
-`parameter` or `unproven`. Its 132 programs cover direct returns through up to
+`parameter` or `unproven`. Its 164 programs cover direct returns through up to
 two aliases, every conditional and match-arm pair of origins, loop/while body
 and fallback returns, helper calls whose contracts select the left argument,
 right argument, or both, one-to-three-layer transitive wrappers, field/index
@@ -519,7 +586,11 @@ caller-local aliases are varied independently. A helper result is proven only
 when every argument selected by its return contract has parameter origin;
 unselected unproven field/index arguments do not taint the result. Returned
 recursive cycles remain conservatively unproven because no finite parameter
-summary can be established while the function is already being analyzed.
+summary can be established while the function is already being analyzed. The
+latest 32-case extension carries field/index projections through one-to-four
+selective wrapper layers and into self/mutual recursive cycles. An unselected
+projected argument remains accepted through every wrapper depth; a selected or
+recursively returned projection is rejected.
 
 The first soundness-directed property slice adds 256 deterministic long-form
 programs beyond the exhaustive small matrices: 64 move sequences, 64
@@ -529,34 +600,54 @@ IDs make every failure exactly replayable. The generators reuse only the
 independent abstract models and source renderers; they do not inspect production
 checker state.
 
-The runtime campaign layer adds 128 default cases (32 per family) on top of the
+The runtime campaign layer adds 192 default cases (32 per family) on top of the
 fixed matrix. `--campaign-seed <u64>` accepts decimal or hexadecimal seeds and
 `--campaign-cases <1..256>` controls the bounded number of cases per family.
 Move, descendant-loan, and projected-alias sequences span eight through 24
-operations; lifetime wrappers span depths eight through 16. Every case records
-a versioned replay command. If the reference model and production checker
+operations; nested-loop target campaigns span depths two through five; lifetime
+wrappers span depths eight through 16. Affine-closure traces span eight through
+24 call, transfer, task-spawn, and reinitialization operations, balanced between
+valid and guaranteed-invalid state transitions. Every case records a versioned
+replay command. If the reference model and production checker
 disagree, the runner tests smaller model-equivalent candidates and emits the
 smallest reproduced source, original/minimized complexity, and replay command
 in `campaign_failure_artifacts`. `--failure-dir <path>` also persists each
 minimized `.fgx` reproducer beside `forgentex.borrow_regression.v1` metadata so
 CI failures can be downloaded and promoted without copying source out of logs.
 
-Four minimal regression fixtures are checked into `tests/borrow_regressions`
-and replayed on every conformance and strict release run. The scheduled CI job
-also runs four fixed seeds at 64 cases per family (1,024 runtime-generated
-programs per weekly campaign) and retains minimized source/metadata artifacts
-when any model/checker disagreement occurs.
+Eight regression fixtures are checked into `tests/borrow_regressions` and
+replayed on every conformance and strict release run. Four pin required
+rejections; four pin accepted programs across field-sensitive moves,
+non-lexical loop loans, constant-index disjointness, and affine closure
+reinitialization so conservative false-positive regressions also fail the gate.
+The scheduled CI job also runs eight fixed seeds at 96 cases per family (4,608
+runtime-generated programs per weekly campaign) and retains minimized
+source/metadata artifacts when any model/checker disagreement occurs.
 
 The JSON report embeds `forgentex.borrow_reference.v1` with aggregate and
-per-family generated/mismatch counts: 510 move cases, 277 alias/reborrow cases,
-132 lifetime-provenance cases, 256 fixed seeded property cases, and 128 default
-runtime-seeded campaign cases, plus four persisted regression cases. The default
-report therefore cross-checks 1,307 reference/regression programs plus 30
-curated cases. Any family mismatch fails `fgx borrow-conformance` and strict
-release hardening. Remaining reference-model targets include deeper projection
-and recursion combinations, slice-range alias projections, richer nested-loop
-interactions, collections, closure captures, and generics. Larger and more
-frequent campaigns plus promotion of newly discovered minimized failures remain.
+per-family generated/mismatch counts: 526 move cases, 610 alias/reborrow cases,
+292 lifetime-provenance cases, 38 affine-closure cases, 256 fixed seeded
+property cases, and 192 default runtime-seeded campaign cases, including 32
+long affine-closure traces, plus eight persisted regression cases, four of
+which are acceptance regressions. The default report therefore cross-checks
+1,922 reference/regression programs plus 40 curated cases. Any family mismatch
+fails `fgx borrow-conformance` and strict
+release hardening. Closure creation now treats named owned free-variable roots
+as moves, rejects capture-after-move, keeps primitive captures copyable, and
+respects lambda-parameter shadowing. Immutable borrow captures remain copyable.
+An explicitly annotated `FnOnce[P..., R]` local provides the bounded affine
+alternative: creation moves captured mutable borrow bindings and their possible
+roots into the closure; calling, transferring, or spawning that callable
+consumes it; and `FnOnce` cannot flow back into copyable `Fn`. The 38-case
+independent closure model exhausts one-to-four call/transfer sequences and
+crosses mutable/shared, direct/aliased, and outer-use capture shapes. This
+interpreter-first slice does not define a native closure-environment ABI or
+general persistent mutable environment. The fixed alias matrix includes every two-,
+three-, and four-level conditional loop-target combination in both write orders;
+depths two through five also run in the seeded campaign. Associated-type move,
+alias, and lifetime ownership shapes recurse through one-to-four generic
+projection layers. Promotion of newly discovered minimized failures remains;
+the expanded eight-seed validation found no mismatches to promote in this slice.
 
 ## Stable Diagnostics
 

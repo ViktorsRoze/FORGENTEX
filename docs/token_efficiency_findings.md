@@ -103,6 +103,112 @@ here.
 
 Reproduce: `fgx edit-bench <file> [--edits <n>] [--json]`.
 
+## Budgeted focused context
+
+`fgx context` now turns the structural strategy into an enforceable content
+budget. It reports `heuristic-v1` costs for the selected symbol, map, types,
+effects, tests, mandatory floor, and admitted total. Optional dependency slices
+are atomic: the complete category fits or an exclusion explains its refusal.
+Requested effect evidence is never budget-elided.
+
+```powershell
+fgx context '@function.render_waveform' `
+  --project examples/apps/wav_waveform `
+  --deps types,effects,tests `
+  --max-tokens 883 `
+  --json
+```
+
+The fixed JSON/report envelope is intentionally outside the selected-content
+budget, so a provider integration must reserve framing tokens. Counts still use
+the heuristic tokenizer; real-tokenizer and model-task validation remain
+required before external efficiency claims.
+
+The same waveform packet now supports stateful `--since` elision. With an
+unchanged full packet as baseline, selected content drops from 883 transmitted
+tokens to 54 because the symbol source, map, types, and tests become verified
+hash references while effects remain explicit. Counting the complete JSON
+payload is less dramatic but still material: 1,896 to 1,026 heuristic tokens,
+a **45.9% reduction**. This complete-packet figure is the honest operational
+metric; the 93.9% selected-content reduction describes only the elidable
+payload.
+
+State metadata is not free. Before section hashes, the stateless waveform
+packet was 1,492 tokens. The state-capable full packet adds 404 tokens, while an
+unchanged delta saves 466 tokens relative to each old stateless resend. This
+fixture reaches break-even on interaction two and saves thereafter; one-shot
+context requests should not claim an advantage from stateful elision.
+
+## Project codebook foundation
+
+`fgx codebook build/check/measure/stats` now measures the persistent-dictionary
+idea before enabling encoded exchange. The semantic tier learns repeated
+identifiers/dotted paths, delimiter-bounded naming morphology, complete
+AST-derived type/effect shapes, exact expression/leaf-statement patterns, and
+one-/two-slot parameterized patterns over atomic leaves, then chooses entries
+under the actual serialized artifact budget. A proposed
+entry must increase actual corpus saving, so overlap cannot consume budget for
+zero incremental benefit.
+
+The waveform project demonstrates why break-even reporting matters: a
+1,024-token budget produces a codebook costing 1,024 tokens and saves 166 tokens
+per corpus exchange, so it becomes positive on interaction 7. This is a
+valid result, not a failure: persistent codebooks are intended for larger or
+long-lived projects. Codebook-aware map/context/patch output and real-tokenizer
+model-success evaluation remain required before claiming an end-to-end win.
+
+The first map/context integration confirms that warning. On the waveform
+project, the original identifier/type tier could not amortize context metadata.
+Exact and parameterized expression patterns lift selected saving to 115 tokens
+and complete context improves 2,001 → 1,932, so automatic admission applies.
+The self-describing project map remains 907 → 998 and stays plain. Both surfaces
+round-trip exactly and reject stale dictionaries; admission remains
+surface-specific rather than inferred from corpus totals.
+
+Whole-payload admission now makes that rule executable: the waveform map stays
+plain while the context is encoded, and an explicit diagnostic force flag can
+materialize the larger coded candidate for round-trip evidence. No normal
+codebook request selects a coded map or context candidate larger than its
+readable fallback.
+
+Semantic patch transport follows the same rule. A representative five-line
+waveform patch measures 58 tokens plain and 141 with its self-describing
+codebook envelope, so normal encoding skips it. Forced conformance mode proves
+decode → precondition → apply → check produces the same clean review and keeps
+transport cost distinct from the 58-token canonical patch.
+
+Stable evolution adds generation/parent/tombstone state and therefore raises
+the tiny artifact by 31 tokens. In return, unchanged builds retain exact bytes,
+surviving identifiers keep their codes, and removed codes are never recycled
+for new meanings. This protects cached agent context from semantic alias churn.
+
+On the waveform corpus, exact repeated byte-index and image-write expressions,
+parameterized patterns, and marginal-gain selection lift per-pass saving from
+62 to 166 tokens and break-even from 16 to 7 interactions. A synthetic fixture
+proves complete type/effect/statement units round-trip as codes. Exact entries
+remain formatter-derived; parameterized entries use only the explicit `$0`
+transport slot described below. Neither defines inferred macro semantics.
+
+Bounded parameterized patterns generalize one or two atomic AST leaves without
+defining macros. `push(image, u8($0))` encodes both learned and unseen literal
+arguments through a self-delimiting handle plus canonical byte length. The
+512-token waveform artifact consequently improves from 51 to 91 saved tokens
+per pass and from interaction-9 to interaction-5 break-even. UTF-8 statement
+arguments round-trip exactly, while malformed frames fail artifact-bound decode.
+
+Two-slot forms use ordered `$0`/`$1` segments and one canonical frame per
+argument. Static-segment reconstruction preserves a literal `$1` inside another
+argument. None of the checked-in demos selects a two-slot entry—the second frame
+is not profitable there—while a synthetic repeated statement family does.
+Selected-only handle reservation still improves 4,096-token saving from 254 to
+256 on waveform and from 191 to 193 on audio.
+
+Naming morphology adds reversible `_`/`.`-bounded prefix, suffix, and interior
+fragments with self-delimiting handles. A synthetic naming-family fixture proves
+that a previously unseen identifier can use the learned prefix. On
+`media_visualizer` at 4,096 tokens, three morphology entries improve corpus
+saving from 317 to 327 tokens while break-even remains interaction 9.
+
 ## Polyglot: boundary vs body (the equalizer), measured
 
 Foreign capsule code is verbatim — it must stay valid in its own language,

@@ -527,6 +527,12 @@ fn analyze_expr(expr: &Expr, counts: &mut OperationCounts) {
             analyze_expr(base, counts);
             analyze_expr(index, counts);
         }
+        Expr::SliceRange { base, start, end } => {
+            counts.index_exprs += 1;
+            analyze_expr(base, counts);
+            analyze_expr(start, counts);
+            analyze_expr(end, counts);
+        }
         Expr::Int(_)
         | Expr::Float(_)
         | Expr::Bool(_)

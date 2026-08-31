@@ -7,9 +7,12 @@ capabilities, parses resource limits, produces an enforcement plan, and
 gates mock execution on sandbox approval.
 
 Live native execution now applies process-tree containment plus wall, CPU, and
-memory limits as described below. Filesystem/network syscall isolation and
-byte accounting remain deferred. v2.3 continues to own the policy contract
-used by those runtime slices.
+memory limits as described below. A native runner without explicit resource
+limits receives mandatory 30,000 ms wall, 30,000 ms CPU, and 512 MiB memory
+ceilings, and first-time compilation is separately process-tree-contained under
+a hard 60,000 ms wall ceiling.
+Filesystem/network syscall isolation and byte accounting remain deferred.
+v2.3 continues to own the policy contract used by those runtime slices.
 
 ## Sandbox rules
 
@@ -42,15 +45,29 @@ grants nothing.
 
 ### Resource limits
 
-`limit.<key> <integer>` declares a resource limit. The live native C/C++
-bridge enforces `limit.wall_ms` for the complete native process tree. Windows
-Job Objects and Unix process groups also prevent descendants from surviving a
-normally completed native call. `limit.cpu_ms` and `limit.mem_mb` are also
+`limit.<key> <integer>` declares a resource limit. The live native C/C++/Rust/
+Zig bridge enforces resource limits for the complete native runner. Missing
+`limit.wall_ms`, `limit.cpu_ms`, and `limit.mem_mb` declarations receive
+mandatory defaults of 30,000 ms, 30,000 ms, and 512 MiB respectively. Receipts
+identify each effective limit's source as `declared` or `default`. Windows Job Objects
+and Unix process groups also prevent descendants from surviving a normally
+completed native call. First-time compiler/linker steps use the same
+process-tree containment with a separate hard 60,000 ms wall ceiling; capsule
+CPU/memory declarations and defaults apply to the foreign runner, not the
+trusted compiler. `limit.cpu_ms` and `limit.mem_mb` are
 installed before native execution: Windows applies aggregate Job Object
 budgets, while Unix processes inherit whole-second `RLIMIT_CPU` and per-process
-`RLIMIT_AS`. Filesystem/network byte limits remain executor-plan data for
-future enforcement.
-Valid keys: `cpu_ms`, `mem_mb`, `wall_ms`, `fs_bytes`, `net_bytes`. An
+`RLIMIT_AS`. For live native Windows runners, declared `limit.fs_bytes` is a
+conservative aggregate Job I/O ceiling over read/write/other transfer bytes,
+including runner protocol overhead. Ubuntu/macOS `limit.fs_bytes` and every
+live-native `limit.net_bytes` declaration fail preflight until equivalent
+enforcement exists; non-native executors still retain these as executor-plan
+data. `limit.output_bytes` bounds combined native-child stdout and stderr
+capture; it must be 1..=402,653,184. When absent, the 402,653,184-byte maximum
+is the mandatory default. Crossing it terminates the process tree before any
+partial response is accepted.
+Valid keys: `cpu_ms`, `mem_mb`, `wall_ms`, `fs_bytes`, `net_bytes`,
+`output_bytes`. An
 unknown key or non-integer value is `sandbox_invalid_limit`.
 
 ### Audit redaction

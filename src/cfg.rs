@@ -416,6 +416,11 @@ pub fn collect_uses(expr: &Expr, uses: &mut BTreeSet<String>) {
             collect_uses(base, uses);
             collect_uses(index, uses);
         }
+        Expr::SliceRange { base, start, end } => {
+            collect_uses(base, uses);
+            collect_uses(start, uses);
+            collect_uses(end, uses);
+        }
         Expr::Int(_)
         | Expr::Float(_)
         | Expr::Bool(_)
@@ -428,7 +433,9 @@ pub fn collect_uses(expr: &Expr, uses: &mut BTreeSet<String>) {
 pub fn place_root(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Var(name) => Some(name.clone()),
-        Expr::Field { base, .. } | Expr::Index { base, .. } => place_root(base),
+        Expr::Field { base, .. } | Expr::Index { base, .. } | Expr::SliceRange { base, .. } => {
+            place_root(base)
+        }
         _ => None,
     }
 }

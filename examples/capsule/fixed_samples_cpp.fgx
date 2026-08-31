@@ -1,0 +1,24 @@
+# Native data boundaries: a fixed-size scalar array field crosses C++17 by value.
+
+@repr(C)
+struct SampleWindow:
+    id: i32
+    samples: [i16; 4]
+
+foreign fixed_samples_cpp cpp version "c++17":
+    input window: SampleWindow
+    output adjusted: SampleWindow
+    sandbox "fs.none"
+    code:
+        #include "types.h"
+
+        extern "C" SampleWindow fixed_samples_cpp(SampleWindow window) {
+            window.samples[0] += 1;
+            window.samples[1] += 2;
+            window.samples[2] += 3;
+            window.samples[3] += 4;
+            return window;
+        }
+
+fn adjust_samples(window: SampleWindow) -> SampleWindow:
+    return fixed_samples_cpp(window)

@@ -1,7 +1,8 @@
 //! Independent generated reference model for a deliberately small ownership
 //! subset. It does not inspect the Forgentex AST or call the production borrow
-//! checker. Instead it evaluates availability of an owned pair and its two
-//! move paths, then renders equivalent source programs for differential checks.
+//! checker. Instead it evaluates owned-pair availability, alias-place overlap
+//! (including half-open ranges), and lifetime provenance, then renders
+//! equivalent source programs for differential checks.
 
 use std::collections::BTreeSet;
 
@@ -27,6 +28,14 @@ pub struct ReferenceLifetimeCase {
     pub description: String,
     pub source: String,
     pub expects_escaping_reference: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReferenceClosureCase {
+    pub id: String,
+    pub description: String,
+    pub source: String,
+    pub expects_use_after_move: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -175,10 +184,10 @@ const ACTIONS: [Action; 6] = [
 /// - every one-action-per-arm branch followed by one action (216);
 /// - every one-action two-iteration loop followed by one action (36).
 ///
-/// The resulting 510 programs cover whole-value and partial-field moves,
+/// The resulting 526 programs cover whole-value and partial-field moves,
 /// definite-availability joins, and loop-carried move state.
 pub fn generated_move_cases() -> Vec<ReferenceMoveCase> {
-    let mut cases = Vec::with_capacity(510);
+    let mut cases = Vec::with_capacity(526);
     for len in 1..=3 {
         let combinations = ACTIONS.len().pow(len);
         for encoded in 0..combinations {
@@ -202,8 +211,29 @@ pub fn generated_move_cases() -> Vec<ReferenceMoveCase> {
             cases.push(build_case(Scenario::Loop { body, suffix }));
         }
     }
-    debug_assert_eq!(cases.len(), 510);
+    generate_associated_move_cases(&mut cases);
+    debug_assert_eq!(cases.len(), 526);
     cases
+}
+
+fn generate_associated_move_cases(cases: &mut Vec<ReferenceMoveCase>) {
+    for owned in [false, true] {
+        for depth in 1..=4 {
+            for alias in [false, true] {
+                let leaf = if owned { "owned" } else { "copy" };
+                let scenario = format!("{leaf}_depth_{depth}_alias_{alias}");
+                cases.push(ReferenceMoveCase {
+                    id: format!("reference.moves.associated.{scenario}"),
+                    description: format!(
+                        "independent associated-type ownership model expects {} for {scenario}",
+                        expected_word(owned)
+                    ),
+                    source: render_associated_move_source(owned, depth, alias),
+                    expects_use_after_move: owned,
+                });
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -253,6 +283,17 @@ enum IndexProjection {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RangeProjection {
+    ConstantZeroToTwo,
+    ConstantTwoToFour,
+    ConstantOneToThree,
+    ConstantFourToSix,
+    DynamicZeroToI,
+    DynamicIToFour,
+    DynamicIToJ,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReferenceOrigin {
     Parameter,
     Unproven,
@@ -269,6 +310,32 @@ enum ReturnedArguments {
 enum LifetimeProjection {
     Field,
     Index,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecursiveProjectionShape {
+    SelfCycle,
+    MutualCycle,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BorrowCollectionKind {
+    Vec,
+    Array,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AffineClosureAction {
+    Call,
+    Move,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CampaignClosureAction {
+    Call,
+    Move,
+    Spawn,
+    Reinitialize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -304,7 +371,7 @@ impl DeterministicRng {
 const ALIAS_HANDLES: [AliasHandle; 3] =
     [AliasHandle::Root, AliasHandle::Parent, AliasHandle::Child];
 
-/// Generate seven exhaustive bounded alias matrices:
+/// Generate twelve exhaustive bounded alias matrices:
 ///
 /// - 39 one-, two-, and three-write programs over a mutable root, its local
 ///   alias, and a child reborrow;
@@ -319,12 +386,24 @@ const ALIAS_HANDLES: [AliasHandle; 3] =
 ///   constants prove disjointness;
 /// - 16 conditional alias-target joins inside loops, checked in both statement
 ///   orders against the loop-carried target set.
+/// - 32 two-level, 64 three-level, and 128 four-level nested-loop programs
+///   with independent conditional target joins, checked in both statement
+///   orders against every loop-carried root.
+/// - 49 pairs of constant and dynamic half-open ranges, where only concrete
+///   non-overlap proves disjointness;
+/// - 28 range-versus-index cases, where a concrete index outside a concrete
+///   range is disjoint and every dynamic combination remains conservative.
+/// - 16 generic-call cases covering all two-root argument pairs through zero
+///   to three wrapper layers; concrete mutable-borrow instantiations must still
+///   reject same-root arguments.
+/// - 16 associated-type cases covering all two-root argument pairs through one
+///   to four recursively normalized generic projection layers.
 ///
 /// The independent model uses descendant order, projection equality, future
 /// use, and set union. It does not inspect the Forgentex AST or reuse production
 /// place/liveness code.
 pub fn generated_alias_cases() -> Vec<ReferenceAliasCase> {
-    let mut cases = Vec::with_capacity(277);
+    let mut cases = Vec::with_capacity(610);
     generate_linear_reborrow_cases(&mut cases);
     generate_projection_cases(&mut cases);
     generate_branch_join_cases(&mut cases);
@@ -332,11 +411,18 @@ pub fn generated_alias_cases() -> Vec<ReferenceAliasCase> {
     generate_loop_cases(&mut cases);
     generate_index_projection_cases(&mut cases);
     generate_branch_in_loop_cases(&mut cases);
-    debug_assert_eq!(cases.len(), 277);
+    generate_nested_loop_join_cases(&mut cases);
+    generate_triple_nested_loop_join_cases(&mut cases);
+    generate_quadruple_nested_loop_join_cases(&mut cases);
+    generate_range_projection_cases(&mut cases);
+    generate_range_index_projection_cases(&mut cases);
+    generate_generic_alias_cases(&mut cases);
+    generate_associated_alias_cases(&mut cases);
+    debug_assert_eq!(cases.len(), 610);
     cases
 }
 
-/// Generate 132 bounded lifetime-provenance programs:
+/// Generate 292 bounded lifetime-provenance programs:
 ///
 /// - 6 direct parameter/unproven returns through zero-to-two local aliases;
 /// - 4 conditional returns joining every pair of parameter/unproven origins;
@@ -347,13 +433,25 @@ pub fn generated_alias_cases() -> Vec<ReferenceAliasCase> {
 /// - 36 one-to-three-layer wrapper chains over selective helper contracts.
 /// - 14 field/index projection returns covering local aliases, conditional
 ///   joins, and selected-versus-unselected helper arguments;
+/// - 32 deeper projection cases covering one-to-four selective wrapper layers
+///   and projected inputs to self/mutual recursive return cycles;
 /// - 12 self-recursive and mutually recursive return cycles.
+/// - 24 one-to-three-level Vec/array borrow-carrier projections, with direct
+///   and locally aliased traversal under parameter or unproven final origin;
+/// - 16 one-to-four-level generic identity/wrapper chains, with direct and
+///   locally aliased results under parameter or unproven caller origin.
+/// - 72 combinations of one-to-three-level Vec/array carriers and
+///   one-to-three-level generic wrapper chains, with direct/aliased traversal
+///   under parameter or unproven caller origin.
+/// - 16 associated-type return shapes resolving through one-to-four generic
+///   projection layers, with direct/aliased traversal under parameter or
+///   unproven caller origin.
 ///
 /// The model is a two-point origin lattice. Local aliases preserve origin;
 /// conditional returns union origins; and a helper result is proven only when
 /// every argument position in its return contract receives a parameter origin.
 pub fn generated_lifetime_cases() -> Vec<ReferenceLifetimeCase> {
-    let mut cases = Vec::with_capacity(132);
+    let mut cases = Vec::with_capacity(292);
     generate_direct_lifetime_cases(&mut cases);
     generate_conditional_lifetime_cases(&mut cases);
     generate_call_lifetime_cases(&mut cases);
@@ -361,8 +459,75 @@ pub fn generated_lifetime_cases() -> Vec<ReferenceLifetimeCase> {
     generate_loop_lifetime_cases(&mut cases);
     generate_wrapper_lifetime_cases(&mut cases);
     generate_projection_lifetime_cases(&mut cases);
+    generate_deep_projection_lifetime_cases(&mut cases);
     generate_recursive_lifetime_cases(&mut cases);
-    debug_assert_eq!(cases.len(), 132);
+    generate_collection_lifetime_cases(&mut cases);
+    generate_generic_lifetime_cases(&mut cases);
+    generate_generic_collection_lifetime_cases(&mut cases);
+    generate_associated_lifetime_cases(&mut cases);
+    debug_assert_eq!(cases.len(), 292);
+    cases
+}
+
+/// Generate 38 affine-closure ownership programs:
+///
+/// - 30 one-to-four-action sequences over call and transfer operations. The
+///   first operation consumes a `FnOnce`; every later use must be rejected.
+/// - 8 capture cases varying mutable/shared borrow, direct/aliased capture, and
+///   whether the captured root is used outside the closure. Mutable roots move
+///   into the affine environment; shared roots remain copyable.
+pub fn generated_affine_closure_cases() -> Vec<ReferenceClosureCase> {
+    let mut cases = Vec::with_capacity(38);
+    for len in 1..=4 {
+        for encoded in 0..2usize.pow(len) {
+            let actions = (0..len)
+                .map(|offset| {
+                    if (encoded >> offset) & 1 == 0 {
+                        AffineClosureAction::Call
+                    } else {
+                        AffineClosureAction::Move
+                    }
+                })
+                .collect::<Vec<_>>();
+            let scenario = actions
+                .iter()
+                .map(|action| match action {
+                    AffineClosureAction::Call => "call",
+                    AffineClosureAction::Move => "move",
+                })
+                .collect::<Vec<_>>()
+                .join("_");
+            let expects_use_after_move = actions.len() > 1;
+            cases.push(ReferenceClosureCase {
+                id: format!("reference.closures.affine.{scenario}"),
+                description: format!(
+                    "independent one-shot closure model expects {} for {scenario}",
+                    expected_word(expects_use_after_move)
+                ),
+                source: render_affine_closure_actions(&actions),
+                expects_use_after_move,
+            });
+        }
+    }
+    for mutable in [false, true] {
+        for alias in [false, true] {
+            for outer_use in [false, true] {
+                let borrow = if mutable { "mutable" } else { "shared" };
+                let scenario = format!("{borrow}_alias_{alias}_outer_use_{outer_use}");
+                let expects_use_after_move = mutable && outer_use;
+                cases.push(ReferenceClosureCase {
+                    id: format!("reference.closures.capture.{scenario}"),
+                    description: format!(
+                        "independent affine-capture model expects {} for {scenario}",
+                        expected_word(expects_use_after_move)
+                    ),
+                    source: render_affine_capture_source(mutable, alias, outer_use),
+                    expects_use_after_move,
+                });
+            }
+        }
+    }
+    debug_assert_eq!(cases.len(), 38);
     cases
 }
 
@@ -386,11 +551,13 @@ pub fn generated_safety_property_cases() -> Vec<ReferencePropertyCase> {
 /// smaller, model-equivalent candidates that the conformance runner can use to
 /// minimize a production-checker mismatch.
 pub fn generated_safety_campaign(seed: u64, cases_per_family: usize) -> Vec<ReferenceCampaignCase> {
-    let mut cases = Vec::with_capacity(cases_per_family.saturating_mul(4));
+    let mut cases = Vec::with_capacity(cases_per_family.saturating_mul(6));
     generate_campaign_move_cases(&mut cases, seed, cases_per_family);
     generate_campaign_alias_cases(&mut cases, seed, cases_per_family);
     generate_campaign_projection_cases(&mut cases, seed, cases_per_family);
+    generate_campaign_nested_loop_cases(&mut cases, seed, cases_per_family);
     generate_campaign_lifetime_cases(&mut cases, seed, cases_per_family);
+    generate_campaign_closure_cases(&mut cases, seed, cases_per_family);
     cases
 }
 
@@ -572,6 +739,44 @@ fn generate_campaign_projection_cases(
     }
 }
 
+fn generate_campaign_nested_loop_cases(
+    cases: &mut Vec<ReferenceCampaignCase>,
+    seed: u64,
+    count: usize,
+) {
+    let mut rng = DeterministicRng::new(mixed_campaign_seed(seed, 0x6e65_7374));
+    for iteration in 0..count {
+        let initial = [AliasProjection::Left, AliasProjection::Right][rng.index(2)];
+        let direct = [AliasProjection::Left, AliasProjection::Right][rng.index(2)];
+        let order = [LoopOrder::AliasThenDirect, LoopOrder::DirectThenAlias][rng.index(2)];
+        let depth = 2 + rng.index(4);
+        let reassigned = (0..depth)
+            .map(|_| [AliasProjection::Left, AliasProjection::Right][rng.index(2)])
+            .collect::<Vec<_>>();
+        let rejected = nested_loop_targets_overlap(initial, &reassigned, direct);
+        let expected_diagnostic = rejected.then_some("mutable_borrow_alias");
+        let id = campaign_case_id(seed, "nested_loops", iteration);
+        cases.push(ReferenceCampaignCase {
+            description: format!(
+                "runtime-seeded nested-loop target campaign depth={depth} expects {}",
+                expected_word(rejected)
+            ),
+            source: render_nested_loop_campaign_source(initial, &reassigned, direct, order),
+            replay: campaign_replay(seed, count, &id),
+            complexity: depth + 2,
+            shrink_candidates: nested_loop_shrink_candidates(
+                initial,
+                &reassigned,
+                direct,
+                order,
+                expected_diagnostic,
+            ),
+            id,
+            expected_diagnostic,
+        });
+    }
+}
+
 fn generate_campaign_lifetime_cases(
     cases: &mut Vec<ReferenceCampaignCase>,
     seed: u64,
@@ -610,6 +815,86 @@ fn generate_campaign_lifetime_cases(
             expected_diagnostic,
         });
     }
+}
+
+fn generate_campaign_closure_cases(
+    cases: &mut Vec<ReferenceCampaignCase>,
+    seed: u64,
+    count: usize,
+) {
+    const ACTIONS: [CampaignClosureAction; 4] = [
+        CampaignClosureAction::Call,
+        CampaignClosureAction::Move,
+        CampaignClosureAction::Spawn,
+        CampaignClosureAction::Reinitialize,
+    ];
+    let mut rng = DeterministicRng::new(mixed_campaign_seed(seed, 0x636c_6f73));
+    for iteration in 0..count {
+        let len = 8 + rng.index(17);
+        let mut actions = (0..len)
+            .map(|_| ACTIONS[rng.index(ACTIONS.len())])
+            .collect::<Vec<_>>();
+        if iteration % 2 == 0 {
+            make_affine_closure_sequence_valid(&mut actions);
+        } else if !affine_closure_sequence_rejected(&actions) {
+            actions[len - 2] = CampaignClosureAction::Call;
+            actions[len - 1] = CampaignClosureAction::Spawn;
+        }
+        let rejected = affine_closure_sequence_rejected(&actions);
+        let expected_diagnostic = rejected.then_some("use_after_move");
+        let id = campaign_case_id(seed, "closures", iteration);
+        cases.push(ReferenceCampaignCase {
+            description: format!(
+                "runtime-seeded affine-closure campaign len={len} expects {}",
+                expected_word(rejected)
+            ),
+            source: render_campaign_closure_source(&actions),
+            replay: campaign_replay(seed, count, &id),
+            complexity: len,
+            shrink_candidates: closure_shrink_candidates(&actions, expected_diagnostic),
+            id,
+            expected_diagnostic,
+        });
+    }
+}
+
+fn make_affine_closure_sequence_valid(actions: &mut [CampaignClosureAction]) {
+    let mut available = true;
+    for action in actions {
+        match action {
+            CampaignClosureAction::Reinitialize => available = true,
+            CampaignClosureAction::Call
+            | CampaignClosureAction::Move
+            | CampaignClosureAction::Spawn
+                if available =>
+            {
+                available = false
+            }
+            CampaignClosureAction::Call
+            | CampaignClosureAction::Move
+            | CampaignClosureAction::Spawn => {
+                *action = CampaignClosureAction::Reinitialize;
+                available = true;
+            }
+        }
+    }
+}
+
+fn affine_closure_sequence_rejected(actions: &[CampaignClosureAction]) -> bool {
+    let mut available = true;
+    let mut rejected = false;
+    for action in actions {
+        match action {
+            CampaignClosureAction::Reinitialize => available = true,
+            CampaignClosureAction::Call
+            | CampaignClosureAction::Move
+            | CampaignClosureAction::Spawn => {
+                rejected |= !available;
+                available = false;
+            }
+        }
+    }
+    rejected
 }
 
 fn lifetime_wrapper_rejected(
@@ -659,6 +944,56 @@ fn projection_shrink_candidates(
             == expected_diagnostic)
             .then(|| render_projection_source(first, second, candidate))
     })
+}
+
+fn closure_shrink_candidates(
+    actions: &[CampaignClosureAction],
+    expected_diagnostic: Option<&'static str>,
+) -> Vec<ReferenceShrinkCandidate> {
+    contiguous_shrinks(actions, expected_diagnostic, |candidate| {
+        (affine_closure_sequence_rejected(candidate).then_some("use_after_move")
+            == expected_diagnostic)
+            .then(|| render_campaign_closure_source(candidate))
+    })
+}
+
+fn nested_loop_shrink_candidates(
+    initial: AliasProjection,
+    reassigned: &[AliasProjection],
+    direct: AliasProjection,
+    order: LoopOrder,
+    expected_diagnostic: Option<&'static str>,
+) -> Vec<ReferenceShrinkCandidate> {
+    let mut candidates = Vec::new();
+    let mut seen = BTreeSet::new();
+    for target_len in 1..reassigned.len() {
+        for start in 0..=reassigned.len() - target_len {
+            let candidate = &reassigned[start..start + target_len];
+            let candidate_diagnostic = nested_loop_targets_overlap(initial, candidate, direct)
+                .then_some("mutable_borrow_alias");
+            if candidate_diagnostic != expected_diagnostic {
+                continue;
+            }
+            let source = render_nested_loop_campaign_source(initial, candidate, direct, order);
+            if seen.insert(source.clone()) {
+                candidates.push(ReferenceShrinkCandidate {
+                    description: format!("model-equivalent nested-loop depth={target_len}"),
+                    source,
+                    expected_diagnostic,
+                    complexity: target_len + 2,
+                });
+            }
+        }
+    }
+    candidates
+}
+
+fn nested_loop_targets_overlap(
+    initial: AliasProjection,
+    reassigned: &[AliasProjection],
+    direct: AliasProjection,
+) -> bool {
+    initial == direct || reassigned.contains(&direct)
 }
 
 fn contiguous_shrinks<T>(
@@ -927,6 +1262,74 @@ fn generate_projection_lifetime_cases(cases: &mut Vec<ReferenceLifetimeCase>) {
     }
 }
 
+fn generate_deep_projection_lifetime_cases(cases: &mut Vec<ReferenceLifetimeCase>) {
+    for projection in [LifetimeProjection::Field, LifetimeProjection::Index] {
+        for projection_selected in [false, true] {
+            for depth in 1..=4 {
+                let selection = if projection_selected {
+                    "selected"
+                } else {
+                    "unselected"
+                };
+                let scenario = format!(
+                    "{}_{}_depth_{depth}",
+                    lifetime_projection_id(projection),
+                    selection
+                );
+                cases.push(ReferenceLifetimeCase {
+                    id: format!("reference.lifetimes.deep_projection.wrapper.{scenario}"),
+                    description: format!(
+                        "independent deep selective-wrapper model expects {} for {scenario}",
+                        expected_word(projection_selected)
+                    ),
+                    source: render_deep_projection_wrapper_lifetime_source(
+                        projection,
+                        projection_selected,
+                        depth,
+                    ),
+                    expects_escaping_reference: projection_selected,
+                });
+            }
+        }
+        for shape in [
+            RecursiveProjectionShape::SelfCycle,
+            RecursiveProjectionShape::MutualCycle,
+        ] {
+            for projection_first in [false, true] {
+                for alias in [false, true] {
+                    let position = if projection_first {
+                        "projection_first"
+                    } else {
+                        "projection_second"
+                    };
+                    let scenario = format!(
+                        "{}_{}_{}_alias_{}",
+                        lifetime_projection_id(projection),
+                        recursive_projection_shape_id(shape),
+                        position,
+                        alias
+                    );
+                    cases.push(ReferenceLifetimeCase {
+                        id: format!(
+                            "reference.lifetimes.deep_projection.recursive.{scenario}"
+                        ),
+                        description: format!(
+                            "independent projected recursive-cycle model expects rejection for {scenario}"
+                        ),
+                        source: render_recursive_projection_lifetime_source(
+                            projection,
+                            shape,
+                            projection_first,
+                            alias,
+                        ),
+                        expects_escaping_reference: true,
+                    });
+                }
+            }
+        }
+    }
+}
+
 fn generate_recursive_lifetime_cases(cases: &mut Vec<ReferenceLifetimeCase>) {
     for base in [ReferenceOrigin::Parameter, ReferenceOrigin::Unproven] {
         for recursive_arg in [ReferenceOrigin::Parameter, ReferenceOrigin::Unproven] {
@@ -959,6 +1362,113 @@ fn generate_recursive_lifetime_cases(cases: &mut Vec<ReferenceLifetimeCase>) {
                 source: render_mutual_recursive_lifetime_source(origin, alias),
                 expects_escaping_reference: true,
             });
+        }
+    }
+}
+
+fn generate_collection_lifetime_cases(cases: &mut Vec<ReferenceLifetimeCase>) {
+    for kind in [BorrowCollectionKind::Vec, BorrowCollectionKind::Array] {
+        for depth in 1..=3 {
+            for alias in [false, true] {
+                for origin in [ReferenceOrigin::Parameter, ReferenceOrigin::Unproven] {
+                    let scenario = format!(
+                        "{}_depth_{}_alias_{}_{}",
+                        borrow_collection_kind_id(kind),
+                        depth,
+                        alias,
+                        origin_id(origin)
+                    );
+                    let expects_escaping_reference = origin == ReferenceOrigin::Unproven;
+                    cases.push(ReferenceLifetimeCase {
+                        id: format!("reference.lifetimes.collection.{scenario}"),
+                        description: format!(
+                            "independent recursive borrow-carrier projection model expects {} for {scenario}",
+                            expected_word(expects_escaping_reference)
+                        ),
+                        source: render_collection_lifetime_source(kind, depth, alias, origin),
+                        expects_escaping_reference,
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn generate_generic_lifetime_cases(cases: &mut Vec<ReferenceLifetimeCase>) {
+    for depth in 1..=4 {
+        for alias in [false, true] {
+            for origin in [ReferenceOrigin::Parameter, ReferenceOrigin::Unproven] {
+                let scenario = format!("depth_{}_alias_{}_{}", depth, alias, origin_id(origin));
+                let expects_escaping_reference = origin == ReferenceOrigin::Unproven;
+                cases.push(ReferenceLifetimeCase {
+                    id: format!("reference.lifetimes.generic.{scenario}"),
+                    description: format!(
+                        "independent generic return-contract composition model expects {} for {scenario}",
+                        expected_word(expects_escaping_reference)
+                    ),
+                    source: render_generic_lifetime_source(depth, alias, origin),
+                    expects_escaping_reference,
+                });
+            }
+        }
+    }
+}
+
+fn generate_associated_lifetime_cases(cases: &mut Vec<ReferenceLifetimeCase>) {
+    for depth in 1..=4 {
+        for alias in [false, true] {
+            for origin in [ReferenceOrigin::Parameter, ReferenceOrigin::Unproven] {
+                let scenario = format!("depth_{depth}_alias_{alias}_{}", origin_id(origin));
+                let expects_escaping_reference = origin == ReferenceOrigin::Unproven;
+                cases.push(ReferenceLifetimeCase {
+                    id: format!("reference.lifetimes.associated.{scenario}"),
+                    description: format!(
+                        "independent associated-type lifetime model expects {} for {scenario}",
+                        expected_word(expects_escaping_reference)
+                    ),
+                    source: render_associated_lifetime_source(depth, alias, origin),
+                    expects_escaping_reference,
+                });
+            }
+        }
+    }
+}
+
+fn generate_generic_collection_lifetime_cases(cases: &mut Vec<ReferenceLifetimeCase>) {
+    for kind in [BorrowCollectionKind::Vec, BorrowCollectionKind::Array] {
+        for carrier_depth in 1..=3 {
+            for wrapper_depth in 1..=3 {
+                for alias in [false, true] {
+                    for origin in [ReferenceOrigin::Parameter, ReferenceOrigin::Unproven] {
+                        let scenario = format!(
+                            "{}_carrier_{}_wrapper_{}_alias_{}_{}",
+                            borrow_collection_kind_id(kind),
+                            carrier_depth,
+                            wrapper_depth,
+                            alias,
+                            origin_id(origin)
+                        );
+                        let expects_escaping_reference = origin == ReferenceOrigin::Unproven;
+                        cases.push(ReferenceLifetimeCase {
+                            id: format!(
+                                "reference.lifetimes.generic_collection.{scenario}"
+                            ),
+                            description: format!(
+                                "independent generic borrow-carrier composition model expects {} for {scenario}",
+                                expected_word(expects_escaping_reference)
+                            ),
+                            source: render_generic_collection_lifetime_source(
+                                kind,
+                                carrier_depth,
+                                wrapper_depth,
+                                alias,
+                                origin,
+                            ),
+                            expects_escaping_reference,
+                        });
+                    }
+                }
+            }
         }
     }
 }
@@ -1151,6 +1661,100 @@ fn generate_index_projection_cases(cases: &mut Vec<ReferenceAliasCase>) {
     }
 }
 
+fn generate_range_projection_cases(cases: &mut Vec<ReferenceAliasCase>) {
+    for first in RANGE_PROJECTIONS {
+        for second in RANGE_PROJECTIONS {
+            let expects_mutable_borrow_alias = range_projections_overlap(first, second);
+            let scenario = format!(
+                "{}_{}",
+                range_projection_id(first),
+                range_projection_id(second)
+            );
+            cases.push(ReferenceAliasCase {
+                id: format!("reference.aliases.range.{scenario}"),
+                description: format!(
+                    "independent half-open range model expects {} for {scenario}",
+                    expected_word(expects_mutable_borrow_alias)
+                ),
+                source: render_range_projection_source(first, second),
+                expects_mutable_borrow_alias,
+            });
+        }
+    }
+}
+
+fn generate_range_index_projection_cases(cases: &mut Vec<ReferenceAliasCase>) {
+    for range in RANGE_PROJECTIONS {
+        for index in INDEX_PROJECTIONS {
+            let expects_mutable_borrow_alias = range_index_projections_overlap(range, index);
+            let scenario = format!(
+                "{}_{}",
+                range_projection_id(range),
+                index_projection_id(index)
+            );
+            cases.push(ReferenceAliasCase {
+                id: format!("reference.aliases.range_index.{scenario}"),
+                description: format!(
+                    "independent range-versus-index model expects {} for {scenario}",
+                    expected_word(expects_mutable_borrow_alias)
+                ),
+                source: render_range_index_projection_source(range, index),
+                expects_mutable_borrow_alias,
+            });
+        }
+    }
+}
+
+fn generate_generic_alias_cases(cases: &mut Vec<ReferenceAliasCase>) {
+    for first in [AliasProjection::Left, AliasProjection::Right] {
+        for second in [AliasProjection::Left, AliasProjection::Right] {
+            for depth in 0..=3 {
+                let expects_mutable_borrow_alias = first == second;
+                let scenario = format!(
+                    "{}_{}_depth_{}",
+                    projection_id(first),
+                    projection_id(second),
+                    depth
+                );
+                cases.push(ReferenceAliasCase {
+                    id: format!("reference.aliases.generic.{scenario}"),
+                    description: format!(
+                        "independent generic-instantiation alias model expects {} for {scenario}",
+                        expected_word(expects_mutable_borrow_alias)
+                    ),
+                    source: render_generic_alias_source(first, second, depth),
+                    expects_mutable_borrow_alias,
+                });
+            }
+        }
+    }
+}
+
+fn generate_associated_alias_cases(cases: &mut Vec<ReferenceAliasCase>) {
+    for first in [AliasProjection::Left, AliasProjection::Right] {
+        for second in [AliasProjection::Left, AliasProjection::Right] {
+            for depth in 1..=4 {
+                let expects_mutable_borrow_alias = first == second;
+                let scenario = format!(
+                    "{}_{}_depth_{}",
+                    projection_id(first),
+                    projection_id(second),
+                    depth
+                );
+                cases.push(ReferenceAliasCase {
+                    id: format!("reference.aliases.associated.{scenario}"),
+                    description: format!(
+                        "independent associated-type alias model expects {} for {scenario}",
+                        expected_word(expects_mutable_borrow_alias)
+                    ),
+                    source: render_associated_alias_source(first, second, depth),
+                    expects_mutable_borrow_alias,
+                });
+            }
+        }
+    }
+}
+
 fn generate_branch_in_loop_cases(cases: &mut Vec<ReferenceAliasCase>) {
     for initial in [AliasProjection::Left, AliasProjection::Right] {
         for reassigned in [AliasProjection::Left, AliasProjection::Right] {
@@ -1179,12 +1783,212 @@ fn generate_branch_in_loop_cases(cases: &mut Vec<ReferenceAliasCase>) {
     }
 }
 
+fn generate_nested_loop_join_cases(cases: &mut Vec<ReferenceAliasCase>) {
+    for initial in [AliasProjection::Left, AliasProjection::Right] {
+        for outer_reassigned in [AliasProjection::Left, AliasProjection::Right] {
+            for inner_reassigned in [AliasProjection::Left, AliasProjection::Right] {
+                for direct in [AliasProjection::Left, AliasProjection::Right] {
+                    for order in [LoopOrder::AliasThenDirect, LoopOrder::DirectThenAlias] {
+                        // Independently unroll both loops twice. At the inner
+                        // write, `alias` may still name its initial root or
+                        // either conditionally assigned root. A loop back-edge
+                        // keeps the alias write live across a following or
+                        // preceding direct write in the next iteration.
+                        let expects_mutable_borrow_alias =
+                            [initial, outer_reassigned, inner_reassigned].contains(&direct);
+                        let scenario = format!(
+                            "{}_to_{}_to_{}.{}_{}",
+                            projection_id(initial),
+                            projection_id(outer_reassigned),
+                            projection_id(inner_reassigned),
+                            projection_id(direct),
+                            loop_order_id(order)
+                        );
+                        cases.push(ReferenceAliasCase {
+                            id: format!("reference.aliases.nested_loop.{scenario}"),
+                            description: format!(
+                                "independent nested-loop target-set model expects {} for {scenario}",
+                                expected_word(expects_mutable_borrow_alias)
+                            ),
+                            source: render_nested_loop_join_source(
+                                initial,
+                                outer_reassigned,
+                                inner_reassigned,
+                                direct,
+                                order,
+                            ),
+                            expects_mutable_borrow_alias,
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn generate_triple_nested_loop_join_cases(cases: &mut Vec<ReferenceAliasCase>) {
+    for initial in [AliasProjection::Left, AliasProjection::Right] {
+        for outer_reassigned in [AliasProjection::Left, AliasProjection::Right] {
+            for middle_reassigned in [AliasProjection::Left, AliasProjection::Right] {
+                for inner_reassigned in [AliasProjection::Left, AliasProjection::Right] {
+                    let reassigned = [outer_reassigned, middle_reassigned, inner_reassigned];
+                    for direct in [AliasProjection::Left, AliasProjection::Right] {
+                        for order in [LoopOrder::AliasThenDirect, LoopOrder::DirectThenAlias] {
+                            // Independently unroll all three loops twice. The
+                            // target set at the innermost write is the union of
+                            // the initial root and every conditional assignment
+                            // observed across all loop back-edges.
+                            let expects_mutable_borrow_alias = std::iter::once(initial)
+                                .chain(reassigned)
+                                .any(|target| target == direct);
+                            let scenario = format!(
+                                "{}_to_{}_to_{}_to_{}.{}_{}",
+                                projection_id(initial),
+                                projection_id(outer_reassigned),
+                                projection_id(middle_reassigned),
+                                projection_id(inner_reassigned),
+                                projection_id(direct),
+                                loop_order_id(order)
+                            );
+                            cases.push(ReferenceAliasCase {
+                                id: format!(
+                                    "reference.aliases.triple_nested_loop.{scenario}"
+                                ),
+                                description: format!(
+                                    "independent three-level loop target-set model expects {} for {scenario}",
+                                    expected_word(expects_mutable_borrow_alias)
+                                ),
+                                source: render_nested_loop_campaign_source(
+                                    initial,
+                                    &reassigned,
+                                    direct,
+                                    order,
+                                ),
+                                expects_mutable_borrow_alias,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn generate_quadruple_nested_loop_join_cases(cases: &mut Vec<ReferenceAliasCase>) {
+    for initial in [AliasProjection::Left, AliasProjection::Right] {
+        for outer_reassigned in [AliasProjection::Left, AliasProjection::Right] {
+            for second_reassigned in [AliasProjection::Left, AliasProjection::Right] {
+                for third_reassigned in [AliasProjection::Left, AliasProjection::Right] {
+                    for inner_reassigned in [AliasProjection::Left, AliasProjection::Right] {
+                        let reassigned = [
+                            outer_reassigned,
+                            second_reassigned,
+                            third_reassigned,
+                            inner_reassigned,
+                        ];
+                        for direct in [AliasProjection::Left, AliasProjection::Right] {
+                            for order in [LoopOrder::AliasThenDirect, LoopOrder::DirectThenAlias] {
+                                // Independently unroll all four loops twice. The
+                                // innermost target set is the union of the initial
+                                // root and all conditional assignments observed
+                                // across the four loop back-edges.
+                                let expects_mutable_borrow_alias = std::iter::once(initial)
+                                    .chain(reassigned)
+                                    .any(|target| target == direct);
+                                let scenario = format!(
+                                    "{}_to_{}_to_{}_to_{}_to_{}.{}_{}",
+                                    projection_id(initial),
+                                    projection_id(outer_reassigned),
+                                    projection_id(second_reassigned),
+                                    projection_id(third_reassigned),
+                                    projection_id(inner_reassigned),
+                                    projection_id(direct),
+                                    loop_order_id(order)
+                                );
+                                cases.push(ReferenceAliasCase {
+                                    id: format!(
+                                        "reference.aliases.quadruple_nested_loop.{scenario}"
+                                    ),
+                                    description: format!(
+                                        "independent four-level loop target-set model expects {} for {scenario}",
+                                        expected_word(expects_mutable_borrow_alias)
+                                    ),
+                                    source: render_nested_loop_campaign_source(
+                                        initial,
+                                        &reassigned,
+                                        direct,
+                                        order,
+                                    ),
+                                    expects_mutable_borrow_alias,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn index_projections_overlap(first: IndexProjection, second: IndexProjection) -> bool {
     !matches!(
         (first, second),
         (IndexProjection::ConstantZero, IndexProjection::ConstantOne)
             | (IndexProjection::ConstantOne, IndexProjection::ConstantZero)
     )
+}
+
+const RANGE_PROJECTIONS: [RangeProjection; 7] = [
+    RangeProjection::ConstantZeroToTwo,
+    RangeProjection::ConstantTwoToFour,
+    RangeProjection::ConstantOneToThree,
+    RangeProjection::ConstantFourToSix,
+    RangeProjection::DynamicZeroToI,
+    RangeProjection::DynamicIToFour,
+    RangeProjection::DynamicIToJ,
+];
+
+const INDEX_PROJECTIONS: [IndexProjection; 4] = [
+    IndexProjection::ConstantZero,
+    IndexProjection::ConstantOne,
+    IndexProjection::DynamicI,
+    IndexProjection::DynamicJ,
+];
+
+fn constant_range(projection: RangeProjection) -> Option<(i64, i64)> {
+    match projection {
+        RangeProjection::ConstantZeroToTwo => Some((0, 2)),
+        RangeProjection::ConstantTwoToFour => Some((2, 4)),
+        RangeProjection::ConstantOneToThree => Some((1, 3)),
+        RangeProjection::ConstantFourToSix => Some((4, 6)),
+        RangeProjection::DynamicZeroToI
+        | RangeProjection::DynamicIToFour
+        | RangeProjection::DynamicIToJ => None,
+    }
+}
+
+fn constant_index(projection: IndexProjection) -> Option<i64> {
+    match projection {
+        IndexProjection::ConstantZero => Some(0),
+        IndexProjection::ConstantOne => Some(1),
+        IndexProjection::DynamicI | IndexProjection::DynamicJ => None,
+    }
+}
+
+fn range_projections_overlap(first: RangeProjection, second: RangeProjection) -> bool {
+    match (constant_range(first), constant_range(second)) {
+        (Some((first_start, first_end)), Some((second_start, second_end))) => {
+            !(first_end <= second_start || second_end <= first_start)
+        }
+        _ => true,
+    }
+}
+
+fn range_index_projections_overlap(range: RangeProjection, index: IndexProjection) -> bool {
+    match (constant_range(range), constant_index(index)) {
+        (Some((start, end)), Some(index)) => index >= start && index < end,
+        _ => true,
+    }
 }
 
 fn decode_alias_handles(mut encoded: usize, len: u32) -> Vec<AliasHandle> {
@@ -1309,6 +2113,30 @@ fn index_projection_source(projection: IndexProjection) -> &'static str {
     }
 }
 
+fn range_projection_id(projection: RangeProjection) -> &'static str {
+    match projection {
+        RangeProjection::ConstantZeroToTwo => "constant_0_2",
+        RangeProjection::ConstantTwoToFour => "constant_2_4",
+        RangeProjection::ConstantOneToThree => "constant_1_3",
+        RangeProjection::ConstantFourToSix => "constant_4_6",
+        RangeProjection::DynamicZeroToI => "dynamic_0_i",
+        RangeProjection::DynamicIToFour => "dynamic_i_4",
+        RangeProjection::DynamicIToJ => "dynamic_i_j",
+    }
+}
+
+fn range_projection_source(projection: RangeProjection) -> &'static str {
+    match projection {
+        RangeProjection::ConstantZeroToTwo => "0 .. 2",
+        RangeProjection::ConstantTwoToFour => "2 .. 4",
+        RangeProjection::ConstantOneToThree => "1 .. 3",
+        RangeProjection::ConstantFourToSix => "4 .. 6",
+        RangeProjection::DynamicZeroToI => "0 .. i",
+        RangeProjection::DynamicIToFour => "i .. 4",
+        RangeProjection::DynamicIToJ => "i .. j",
+    }
+}
+
 fn expected_word(rejected: bool) -> &'static str {
     if rejected {
         "rejection"
@@ -1339,6 +2167,20 @@ fn lifetime_projection_id(projection: LifetimeProjection) -> &'static str {
     }
 }
 
+fn recursive_projection_shape_id(shape: RecursiveProjectionShape) -> &'static str {
+    match shape {
+        RecursiveProjectionShape::SelfCycle => "self",
+        RecursiveProjectionShape::MutualCycle => "mutual",
+    }
+}
+
+fn borrow_collection_kind_id(kind: BorrowCollectionKind) -> &'static str {
+    match kind {
+        BorrowCollectionKind::Vec => "vec",
+        BorrowCollectionKind::Array => "array",
+    }
+}
+
 fn lifetime_projection_declarations(projection: LifetimeProjection) -> &'static str {
     match projection {
         LifetimeProjection::Field => "struct Holder:\n    view: &[u8]\n",
@@ -1365,6 +2207,123 @@ fn origin_expr(origin: ReferenceOrigin, parameter: &str, unproven: &str) -> Stri
         ReferenceOrigin::Parameter => parameter.to_string(),
         ReferenceOrigin::Unproven => format!("unknown_borrow({unproven})"),
     }
+}
+
+fn associated_projection_type(leaf: &str, depth: usize) -> String {
+    let mut ty = leaf.to_string();
+    for _ in 0..depth {
+        ty = format!("Peel::Item[Vec[{ty}]]");
+    }
+    ty
+}
+
+fn associated_projection_prelude() -> &'static str {
+    "trait Peel:\n    requires type Item\n\nimpl[T] Peel for Vec[T]:\n    type Item = T\n\n"
+}
+
+fn render_associated_move_source(owned: bool, depth: usize, alias: bool) -> String {
+    let leaf = if owned { "Packet" } else { "i32" };
+    let projected = associated_projection_type(leaf, depth);
+    let packet = if owned {
+        "struct Packet:\n    value: u8\n\n"
+    } else {
+        ""
+    };
+    let body = if alias {
+        format!(
+            "    let first: {projected} = value\n    let moved: {projected} = first\n    return value\n"
+        )
+    } else {
+        format!("    let moved: {projected} = value\n    return value\n")
+    };
+    format!(
+        "{}{packet}fn check(value: {projected}) -> {projected}:\n{body}",
+        associated_projection_prelude()
+    )
+}
+
+fn render_associated_alias_source(
+    first: AliasProjection,
+    second: AliasProjection,
+    depth: usize,
+) -> String {
+    let argument = |projection| match projection {
+        AliasProjection::Left => "xs",
+        AliasProjection::Right => "ys",
+    };
+    let projected = associated_projection_type("&mut [u8]", depth);
+    format!(
+        "{}fn fill(left: {projected}, right: {projected}) -> void:\n    return\n\nfn check(xs: &mut [u8], ys: &mut [u8]) -> void:\n    fill({}, {})\n",
+        associated_projection_prelude(),
+        argument(first),
+        argument(second)
+    )
+}
+
+fn render_associated_lifetime_source(depth: usize, alias: bool, origin: ReferenceOrigin) -> String {
+    let projected = associated_projection_type("&[u8]", depth);
+    let candidate = origin_expr(origin, "xs", "xs");
+    let body = if alias {
+        format!("    let candidate: {projected} = {candidate}\n    return candidate\n")
+    } else {
+        format!("    return {candidate}\n")
+    };
+    format!(
+        "{}fn check(xs: &[u8]) -> {projected}:\n{body}",
+        associated_projection_prelude()
+    )
+}
+
+fn render_affine_closure_actions(actions: &[AffineClosureAction]) -> String {
+    let mut body = String::from("    let closure: FnOnce[i32, i32] = |input: i32| input + 1\n");
+    for (index, action) in actions.iter().enumerate() {
+        match action {
+            AffineClosureAction::Call => {
+                body.push_str(&format!("    let called_{index}: i32 = closure(value)\n"))
+            }
+            AffineClosureAction::Move => body.push_str(&format!(
+                "    let moved_{index}: FnOnce[i32, i32] = closure\n"
+            )),
+        }
+    }
+    body.push_str("    return value\n");
+    format!("fn check(value: i32) -> i32:\n{body}")
+}
+
+fn render_campaign_closure_source(actions: &[CampaignClosureAction]) -> String {
+    let mut body = String::from("    let closure: FnOnce[i32, i32] = |input: i32| input + 1\n");
+    for (index, action) in actions.iter().enumerate() {
+        match action {
+            CampaignClosureAction::Call => {
+                body.push_str(&format!("    let called_{index}: i32 = closure(value)\n"));
+            }
+            CampaignClosureAction::Move => body.push_str(&format!(
+                "    let moved_{index}: FnOnce[i32, i32] = closure\n"
+            )),
+            CampaignClosureAction::Spawn => body.push_str(&format!(
+                "    let task_{index}: Task[i32] = task_spawn(closure, value)\n"
+            )),
+            CampaignClosureAction::Reinitialize => {
+                body.push_str("    closure = |input: i32| input + 1\n");
+            }
+        }
+    }
+    body.push_str("    return value\n");
+    format!("fn check(value: i32) -> i32 effects [concurrency.task]:\n{body}")
+}
+
+fn render_affine_capture_source(mutable: bool, alias: bool, outer_use: bool) -> String {
+    let borrow = if mutable { "&mut [u8]" } else { "&[u8]" };
+    let setup = if alias {
+        format!("    let alias: {borrow} = xs\n")
+    } else {
+        String::new()
+    };
+    let captured = if alias { "alias" } else { "xs" };
+    let result = if outer_use { "xs[0]" } else { "closure(0)" };
+    format!(
+        "fn check(xs: {borrow}) -> u8:\n{setup}    let closure: FnOnce[usize, u8] = |index: usize| {captured}[index]\n    return {result}\n"
+    )
 }
 
 fn render_alias_source(actions: &[AliasHandle]) -> String {
@@ -1470,6 +2429,48 @@ fn render_index_projection_source(first: IndexProjection, second: IndexProjectio
     )
 }
 
+fn render_range_projection_source(first: RangeProjection, second: RangeProjection) -> String {
+    format!(
+        "fn fill(left: &mut [u8], right: &mut [u8]) -> void:\n    return\n\nfn check(xs: &mut [u8], i: usize, j: usize) -> void:\n    fill(xs[{}], xs[{}])\n",
+        range_projection_source(first),
+        range_projection_source(second)
+    )
+}
+
+fn render_range_index_projection_source(range: RangeProjection, index: IndexProjection) -> String {
+    format!(
+        "fn check(xs: &mut [u8], i: usize, j: usize) -> void:\n    let alias: &mut [u8] = xs[{}]\n    xs[{}] = 1\n    alias[0] = 2\n",
+        range_projection_source(range),
+        index_projection_source(index)
+    )
+}
+
+fn render_generic_alias_source(
+    first: AliasProjection,
+    second: AliasProjection,
+    depth: usize,
+) -> String {
+    let argument = |projection| match projection {
+        AliasProjection::Left => "xs",
+        AliasProjection::Right => "ys",
+    };
+    let mut source = "fn choose[T](left: T, right: T) -> T:\n    return left\n\n".to_string();
+    let mut callee = "choose".to_string();
+    for layer in 0..depth {
+        let wrapper = format!("generic_alias_wrap_{layer}");
+        source.push_str(&format!(
+            "fn {wrapper}[T](left: T, right: T) -> T:\n    return {callee}(left, right)\n\n"
+        ));
+        callee = wrapper;
+    }
+    source.push_str(&format!(
+        "fn check(xs: &mut [u8], ys: &mut [u8]) -> &mut [u8]:\n    return {callee}({}, {})\n",
+        argument(first),
+        argument(second)
+    ));
+    source
+}
+
 fn render_branch_in_loop_source(
     initial: AliasProjection,
     reassigned: AliasProjection,
@@ -1490,6 +2491,65 @@ fn render_branch_in_loop_source(
         "fn check(flag: bool, xs: &mut [u8], ys: &mut [u8]) -> void:\n    let alias: &mut [u8] = {}\n    for iteration in 0 .. 2:\n        if flag:\n            alias = {}\n{body}",
         binding(initial),
         binding(reassigned)
+    )
+}
+
+fn render_nested_loop_join_source(
+    initial: AliasProjection,
+    outer_reassigned: AliasProjection,
+    inner_reassigned: AliasProjection,
+    direct: AliasProjection,
+    order: LoopOrder,
+) -> String {
+    let binding = |projection| match projection {
+        AliasProjection::Left => "xs",
+        AliasProjection::Right => "ys",
+    };
+    let alias_write = "            alias[0] = 1\n";
+    let direct_write = format!("            {}[0] = 2\n", binding(direct));
+    let body = match order {
+        LoopOrder::AliasThenDirect => format!("{alias_write}{direct_write}"),
+        LoopOrder::DirectThenAlias => format!("{direct_write}{alias_write}"),
+    };
+    format!(
+        "fn check(outer_flag: bool, inner_flag: bool, xs: &mut [u8], ys: &mut [u8]) -> void:\n    let alias: &mut [u8] = {}\n    for outer in 0 .. 2:\n        if outer_flag:\n            alias = {}\n        for inner in 0 .. 2:\n            if inner_flag:\n                alias = {}\n{body}",
+        binding(initial),
+        binding(outer_reassigned),
+        binding(inner_reassigned)
+    )
+}
+
+fn render_nested_loop_campaign_source(
+    initial: AliasProjection,
+    reassigned: &[AliasProjection],
+    direct: AliasProjection,
+    order: LoopOrder,
+) -> String {
+    let binding = |projection| match projection {
+        AliasProjection::Left => "xs",
+        AliasProjection::Right => "ys",
+    };
+    let flags = (0..reassigned.len())
+        .map(|depth| format!("flag_{depth}: bool"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut body = String::new();
+    for (depth, target) in reassigned.iter().enumerate() {
+        let indent = "    ".repeat(depth + 1);
+        body.push_str(&format!("{indent}for loop_{depth} in 0 .. 2:\n"));
+        body.push_str(&format!("{indent}    if flag_{depth}:\n"));
+        body.push_str(&format!("{indent}        alias = {}\n", binding(*target)));
+    }
+    let indent = "    ".repeat(reassigned.len() + 1);
+    let alias_write = format!("{indent}alias[0] = 1\n");
+    let direct_write = format!("{indent}{}[0] = 2\n", binding(direct));
+    match order {
+        LoopOrder::AliasThenDirect => body.push_str(&format!("{alias_write}{direct_write}")),
+        LoopOrder::DirectThenAlias => body.push_str(&format!("{direct_write}{alias_write}")),
+    }
+    format!(
+        "fn check({flags}, xs: &mut [u8], ys: &mut [u8]) -> void:\n    let alias: &mut [u8] = {}\n{body}",
+        binding(initial)
     )
 }
 
@@ -1605,6 +2665,112 @@ fn render_wrapper_lifetime_source(
     source
 }
 
+fn render_collection_lifetime_source(
+    kind: BorrowCollectionKind,
+    depth: usize,
+    alias: bool,
+    origin: ReferenceOrigin,
+) -> String {
+    let outer_ty = borrow_collection_type(kind, depth);
+    let mut body = String::new();
+    let mut current = "values".to_string();
+    if alias {
+        for level in 0..depth {
+            let name = format!("level_{level}");
+            let inner_ty = borrow_collection_type(kind, depth - level - 1);
+            body.push_str(&format!("    let {name}: {inner_ty} = {current}[0]\n"));
+            current = name;
+        }
+    } else {
+        for _ in 0..depth {
+            current.push_str("[0]");
+        }
+    }
+    let returned = match origin {
+        ReferenceOrigin::Parameter => current,
+        ReferenceOrigin::Unproven => format!("unknown_borrow({current})"),
+    };
+    body.push_str(&format!("    return {returned}\n"));
+    format!("fn check(values: {outer_ty}) -> &[u8]:\n{body}")
+}
+
+fn borrow_collection_type(kind: BorrowCollectionKind, levels: usize) -> String {
+    let mut ty = "&[u8]".to_string();
+    for _ in 0..levels {
+        ty = match kind {
+            BorrowCollectionKind::Vec => format!("Vec[{ty}]"),
+            BorrowCollectionKind::Array => format!("[{ty}; 2]"),
+        };
+    }
+    ty
+}
+
+fn render_generic_lifetime_source(depth: usize, alias: bool, origin: ReferenceOrigin) -> String {
+    let mut source = "fn identity[T](value: T) -> T:\n    return value\n\n".to_string();
+    let mut callee = "identity".to_string();
+    for layer in 1..depth {
+        let wrapper = format!("wrap_{layer}");
+        source.push_str(&format!(
+            "fn {wrapper}[T](value: T) -> T:\n    return {callee}(value)\n\n"
+        ));
+        callee = wrapper;
+    }
+    let argument = origin_expr(origin, "xs", "xs");
+    if alias {
+        source.push_str(&format!(
+            "fn check(xs: &[u8]) -> &[u8]:\n    let result: &[u8] = {callee}({argument})\n    return result\n"
+        ));
+    } else {
+        source.push_str(&format!(
+            "fn check(xs: &[u8]) -> &[u8]:\n    return {callee}({argument})\n"
+        ));
+    }
+    source
+}
+
+fn render_generic_collection_lifetime_source(
+    kind: BorrowCollectionKind,
+    carrier_depth: usize,
+    wrapper_depth: usize,
+    alias: bool,
+    origin: ReferenceOrigin,
+) -> String {
+    let mut source = "fn identity[T](value: T) -> T:\n    return value\n\n".to_string();
+    let mut callee = "identity".to_string();
+    for layer in 1..wrapper_depth {
+        let wrapper = format!("carrier_wrap_{layer}");
+        source.push_str(&format!(
+            "fn {wrapper}[T](value: T) -> T:\n    return {callee}(value)\n\n"
+        ));
+        callee = wrapper;
+    }
+
+    let mut body = String::new();
+    let mut current = "values".to_string();
+    if alias {
+        for level in 0..carrier_depth {
+            let name = format!("level_{level}");
+            let inner_ty = borrow_collection_type(kind, carrier_depth - level - 1);
+            body.push_str(&format!("    let {name}: {inner_ty} = {current}[0]\n"));
+            current = name;
+        }
+    } else {
+        for _ in 0..carrier_depth {
+            current.push_str("[0]");
+        }
+    }
+    let argument = match origin {
+        ReferenceOrigin::Parameter => current,
+        ReferenceOrigin::Unproven => format!("unknown_borrow({current})"),
+    };
+    body.push_str(&format!("    return {callee}({argument})\n"));
+    source.push_str(&format!(
+        "fn check(values: {}) -> &[u8]:\n{body}",
+        borrow_collection_type(kind, carrier_depth)
+    ));
+    source
+}
+
 fn render_direct_projection_lifetime_source(
     projection: LifetimeProjection,
     alias_depth: usize,
@@ -1653,6 +2819,75 @@ fn render_call_projection_lifetime_source(
     };
     format!(
         "{}\nfn select_left(left: &[u8], right: &[u8]) -> &[u8]:\n    return left\n\nfn check(xs: &[u8], {}) -> &[u8]:\n    return select_left({left}, {right})\n",
+        lifetime_projection_declarations(projection),
+        lifetime_projection_parameter(projection)
+    )
+}
+
+fn render_deep_projection_wrapper_lifetime_source(
+    projection: LifetimeProjection,
+    projection_selected: bool,
+    depth: usize,
+) -> String {
+    let mut source = format!(
+        "{}\nfn select_left(left: &[u8], right: &[u8]) -> &[u8]:\n    return left\n\n",
+        lifetime_projection_declarations(projection)
+    );
+    let mut callee = "select_left".to_string();
+    for layer in 0..depth {
+        let wrapper = format!("projection_wrap_{layer}");
+        source.push_str(&format!(
+            "fn {wrapper}(left: &[u8], right: &[u8]) -> &[u8]:\n    return {callee}(left, right)\n\n"
+        ));
+        callee = wrapper;
+    }
+    let projected = lifetime_projection_expr(projection);
+    let (left, right) = if projection_selected {
+        (projected, "xs")
+    } else {
+        ("xs", projected)
+    };
+    source.push_str(&format!(
+        "fn check(xs: &[u8], {}) -> &[u8]:\n    return {callee}({left}, {right})\n",
+        lifetime_projection_parameter(projection)
+    ));
+    source
+}
+
+fn render_recursive_projection_lifetime_source(
+    projection: LifetimeProjection,
+    shape: RecursiveProjectionShape,
+    projection_first: bool,
+    alias: bool,
+) -> String {
+    let recursive = match shape {
+        RecursiveProjectionShape::SelfCycle => {
+            "fn recurse(flag: bool, left: &[u8], right: &[u8]) -> &[u8]:\n    if flag:\n        return left\n    return recurse(flag, right, left)\n\n"
+        }
+        RecursiveProjectionShape::MutualCycle => {
+            "fn recurse_left(flag: bool, left: &[u8], right: &[u8]) -> &[u8]:\n    if flag:\n        return left\n    return recurse_right(flag, right, left)\n\nfn recurse_right(flag: bool, left: &[u8], right: &[u8]) -> &[u8]:\n    if flag:\n        return right\n    return recurse_left(flag, right, left)\n\n"
+        }
+    };
+    let callee = match shape {
+        RecursiveProjectionShape::SelfCycle => "recurse",
+        RecursiveProjectionShape::MutualCycle => "recurse_left",
+    };
+    let projected = lifetime_projection_expr(projection);
+    let (setup, candidate) = if alias {
+        (
+            format!("    let projected: &[u8] = {projected}\n"),
+            "projected",
+        )
+    } else {
+        (String::new(), projected)
+    };
+    let (left, right) = if projection_first {
+        (candidate, "xs")
+    } else {
+        ("xs", candidate)
+    };
+    format!(
+        "{}\n{recursive}fn check(flag: bool, xs: &[u8], {}) -> &[u8]:\n{setup}    return {callee}(flag, {left}, {right})\n",
         lifetime_projection_declarations(projection),
         lifetime_projection_parameter(projection)
     )
@@ -1848,15 +3083,35 @@ fn render_action(out: &mut String, action: Action, indent: usize, binding: &mut 
 #[cfg(test)]
 mod tests {
     use super::{
-        generated_alias_cases, generated_lifetime_cases, generated_move_cases,
-        generated_safety_campaign, generated_safety_property_cases,
+        generated_affine_closure_cases, generated_alias_cases, generated_lifetime_cases,
+        generated_move_cases, generated_safety_campaign, generated_safety_property_cases,
         DEFAULT_SAFETY_CAMPAIGN_CASES_PER_FAMILY, DEFAULT_SAFETY_CAMPAIGN_SEED,
     };
 
     #[test]
+    fn independent_affine_closure_model_generates_the_stable_matrix() {
+        let cases = generated_affine_closure_cases();
+        assert_eq!(cases.len(), 38);
+        assert!(cases.iter().any(|case| {
+            case.id == "reference.closures.affine.call" && !case.expects_use_after_move
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id == "reference.closures.affine.move_call" && case.expects_use_after_move
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id == "reference.closures.capture.mutable_alias_true_outer_use_true"
+                && case.expects_use_after_move
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id == "reference.closures.capture.shared_alias_true_outer_use_true"
+                && !case.expects_use_after_move
+        }));
+    }
+
+    #[test]
     fn independent_move_model_generates_the_stable_exhaustive_matrix() {
         let cases = generated_move_cases();
-        assert_eq!(cases.len(), 510);
+        assert_eq!(cases.len(), 526);
         assert!(cases.iter().any(|case| {
             case.id == "reference.moves.linear.move_left_read_right" && !case.expects_use_after_move
         }));
@@ -1867,12 +3122,20 @@ mod tests {
         assert!(cases.iter().any(|case| {
             case.id == "reference.moves.loop.move_right_read_left" && case.expects_use_after_move
         }));
+        assert!(cases.iter().any(|case| {
+            case.id == "reference.moves.associated.copy_depth_4_alias_true"
+                && !case.expects_use_after_move
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id == "reference.moves.associated.owned_depth_3_alias_false"
+                && case.expects_use_after_move
+        }));
     }
 
     #[test]
     fn independent_alias_model_generates_the_stable_exhaustive_matrix() {
         let cases = generated_alias_cases();
-        assert_eq!(cases.len(), 277);
+        assert_eq!(cases.len(), 610);
         assert!(cases.iter().any(|case| {
             case.id == "reference.aliases.linear.write_child_write_parent"
                 && !case.expects_mutable_borrow_alias
@@ -1933,12 +3196,80 @@ mod tests {
             case.id == "reference.aliases.branch_in_loop.left_to_left.right_direct_then_alias"
                 && !case.expects_mutable_borrow_alias
         }));
+        assert!(cases.iter().any(|case| {
+            case.id == "reference.aliases.nested_loop.left_to_right_to_left.right_alias_then_direct"
+                && case.expects_mutable_borrow_alias
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id == "reference.aliases.nested_loop.left_to_left_to_left.right_direct_then_alias"
+                && !case.expects_mutable_borrow_alias
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id
+                == "reference.aliases.triple_nested_loop.left_to_right_to_left_to_right.right_alias_then_direct"
+                && case.expects_mutable_borrow_alias
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id
+                == "reference.aliases.triple_nested_loop.left_to_left_to_left_to_left.right_direct_then_alias"
+                && !case.expects_mutable_borrow_alias
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id
+                == "reference.aliases.quadruple_nested_loop.left_to_right_to_left_to_right_to_left.right_alias_then_direct"
+                && case.expects_mutable_borrow_alias
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id
+                == "reference.aliases.quadruple_nested_loop.left_to_left_to_left_to_left_to_left.right_direct_then_alias"
+                && !case.expects_mutable_borrow_alias
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id == "reference.aliases.range.constant_0_2_constant_2_4"
+                && !case.expects_mutable_borrow_alias
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id == "reference.aliases.range.constant_0_2_constant_1_3"
+                && case.expects_mutable_borrow_alias
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id == "reference.aliases.range.dynamic_0_i_dynamic_i_4"
+                && case.expects_mutable_borrow_alias
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id == "reference.aliases.range_index.constant_2_4_constant_0"
+                && !case.expects_mutable_borrow_alias
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id == "reference.aliases.range_index.constant_0_2_constant_1"
+                && case.expects_mutable_borrow_alias
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id == "reference.aliases.range_index.dynamic_i_j_dynamic_i"
+                && case.expects_mutable_borrow_alias
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id == "reference.aliases.generic.left_left_depth_3"
+                && case.expects_mutable_borrow_alias
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id == "reference.aliases.generic.left_right_depth_2"
+                && !case.expects_mutable_borrow_alias
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id == "reference.aliases.associated.left_left_depth_4"
+                && case.expects_mutable_borrow_alias
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id == "reference.aliases.associated.left_right_depth_3"
+                && !case.expects_mutable_borrow_alias
+        }));
     }
 
     #[test]
     fn independent_lifetime_model_generates_the_stable_matrix() {
         let cases = generated_lifetime_cases();
-        assert_eq!(cases.len(), 132);
+        assert_eq!(cases.len(), 292);
         assert!(cases.iter().any(|case| {
             case.id == "reference.lifetimes.direct.parameter_aliases_2"
                 && !case.expects_escaping_reference
@@ -1980,11 +3311,63 @@ mod tests {
                 && !case.expects_escaping_reference
         }));
         assert!(cases.iter().any(|case| {
+            case.id == "reference.lifetimes.deep_projection.wrapper.field_unselected_depth_4"
+                && !case.expects_escaping_reference
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id == "reference.lifetimes.deep_projection.wrapper.index_selected_depth_4"
+                && case.expects_escaping_reference
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id
+                == "reference.lifetimes.deep_projection.recursive.field_self_projection_first_alias_true"
+                && case.expects_escaping_reference
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id
+                == "reference.lifetimes.deep_projection.recursive.index_mutual_projection_second_alias_false"
+                && case.expects_escaping_reference
+        }));
+        assert!(cases.iter().any(|case| {
             case.id == "reference.lifetimes.recursive.self.base_parameter_recursive_parameter_alias_false"
                 && case.expects_escaping_reference
         }));
         assert!(cases.iter().any(|case| {
             case.id == "reference.lifetimes.recursive.mutual.unproven_alias_true"
+                && case.expects_escaping_reference
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id == "reference.lifetimes.collection.vec_depth_3_alias_true_parameter"
+                && !case.expects_escaping_reference
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id == "reference.lifetimes.collection.array_depth_2_alias_false_unproven"
+                && case.expects_escaping_reference
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id == "reference.lifetimes.generic.depth_4_alias_true_parameter"
+                && !case.expects_escaping_reference
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id == "reference.lifetimes.generic.depth_3_alias_false_unproven"
+                && case.expects_escaping_reference
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id
+                == "reference.lifetimes.generic_collection.vec_carrier_3_wrapper_3_alias_true_parameter"
+                && !case.expects_escaping_reference
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id
+                == "reference.lifetimes.generic_collection.array_carrier_2_wrapper_3_alias_false_unproven"
+                && case.expects_escaping_reference
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id == "reference.lifetimes.associated.depth_4_alias_true_parameter"
+                && !case.expects_escaping_reference
+        }));
+        assert!(cases.iter().any(|case| {
+            case.id == "reference.lifetimes.associated.depth_3_alias_false_unproven"
                 && case.expects_escaping_reference
         }));
     }
@@ -2029,9 +3412,16 @@ mod tests {
             DEFAULT_SAFETY_CAMPAIGN_CASES_PER_FAMILY,
         );
         assert_eq!(first, second);
-        assert_eq!(first.len(), 128);
+        assert_eq!(first.len(), 192);
         assert_ne!(first, generated_safety_campaign(7, 32));
-        for family in ["moves", "aliases", "projections", "lifetimes"] {
+        for family in [
+            "moves",
+            "aliases",
+            "projections",
+            "nested_loops",
+            "lifetimes",
+            "closures",
+        ] {
             let prefix =
                 format!("reference.campaign.v1.{DEFAULT_SAFETY_CAMPAIGN_SEED:016x}.{family}.");
             assert_eq!(
@@ -2052,5 +3442,20 @@ mod tests {
                     && candidate.expected_diagnostic == case.expected_diagnostic));
         }
         assert!(first.iter().all(|case| !case.shrink_candidates.is_empty()));
+        assert!(first.iter().any(|case| {
+            case.id.ends_with(".closures.0000")
+                && case.source.contains("FnOnce")
+                && case.source.contains("effects [concurrency.task]")
+        }));
+        let closure_cases = first
+            .iter()
+            .filter(|case| case.id.contains(".closures."))
+            .collect::<Vec<_>>();
+        assert!(closure_cases
+            .iter()
+            .any(|case| case.expected_diagnostic.is_none()));
+        assert!(closure_cases
+            .iter()
+            .any(|case| case.expected_diagnostic == Some("use_after_move")));
     }
 }

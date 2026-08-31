@@ -1,0 +1,21 @@
+# Native-call v1.24: Rust receives the same borrowed UTF-8 pointer-length ABI.
+
+foreign checksum_utf8_rust rust version "2021" effects [cpu.avx2]:
+    input text: str
+    output checksum: i32
+    sandbox "fs.none"
+    code:
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn checksum_utf8_rust(
+            text: *const u8,
+            text_len: usize,
+        ) -> i32 {
+            if text_len == 0 {
+                return 0;
+            }
+            let bytes = unsafe { std::slice::from_raw_parts(text, text_len) };
+            bytes.iter().map(|byte| i32::from(*byte)).sum()
+        }
+
+fn checksum_live_rust(text: str) -> i32 effects [cpu.avx2]:
+    return checksum_utf8_rust(text)

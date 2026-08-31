@@ -176,7 +176,9 @@ pub fn run(file: &str, program: &Program, out_dir: &Path) -> PolyglotReport {
         let mut binders = Vec::new();
         for capsule in program.capsules() {
             for binding in &capsule.bindings {
-                if binding.name == share.name {
+                if crate::ast::split_share_reference(&binding.name)
+                    .is_ok_and(|(name, _)| name == share.name)
+                {
                     binders.push((
                         capsule.name.clone(),
                         capsule.language.clone(),

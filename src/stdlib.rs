@@ -135,12 +135,32 @@ const MODULES: &[StdModule] = &[
         ],
     },
     StdModule {
+        name: "core.path",
+        purpose: "portable normalized path values and deterministic path operations",
+        functions: &[
+            "core_path_parse",
+            "core_path_join",
+            "core_path_parent",
+            "core_path_file_name",
+            "core_path_extension",
+            "core_path_to_str",
+            "core_path_starts_with",
+        ],
+    },
+    StdModule {
         name: "core.io",
         purpose: "real, effect-gated filesystem I/O executed and transcribed by `fgx io-run`",
         functions: &[
             "core_io_read_file",
+            "core_io_read_bytes",
             "core_io_write_file",
+            "core_io_write_file_atomic",
+            "core_io_write_bytes_atomic",
+            "core_io_publish_text_artifact",
+            "core_io_publish_bytes_artifact",
             "core_io_copy_file",
+            "core_io_copy_file_atomic",
+            "core_io_list_dir",
         ],
     },
     StdModule {
@@ -170,8 +190,21 @@ const MODULES: &[StdModule] = &[
     },
     StdModule {
         name: "core.serialize",
-        purpose: "structured serialization helpers for deterministic agent/runtime demos",
-        functions: &["core_serialize_text_len"],
+        purpose: "bounded canonical JSON, UTF-8, and little-endian binary helpers",
+        functions: &[
+            "core_serialize_text_len",
+            "core_serialize_json_canonical",
+            "core_serialize_json_is_canonical",
+            "core_serialize_utf8_encode",
+            "core_serialize_utf8_decode",
+            "core_serialize_u16_le",
+            "core_serialize_u32_le",
+            "core_serialize_i32_le",
+            "core_serialize_read_u16_le",
+            "core_serialize_read_u32_le",
+            "core_serialize_read_i32_le",
+            "core_serialize_concat",
+        ],
     },
     StdModule {
         name: "core.stream",
@@ -324,8 +357,39 @@ pub fn standard_builtin_call_type(name: &str) -> Option<Type> {
         | "core_runtime_fs_scope_read"
         | "core_fs_scope_write"
         | "core_runtime_fs_scope_write" => Some(Type::Bool),
-        "core_io_read_file" => Some(str_ty.clone()),
-        "core_io_write_file" | "core_io_copy_file" => Some(usize_ty.clone()),
+        "core_path_parse"
+        | "core_runtime_path_parse"
+        | "core_path_join"
+        | "core_runtime_path_join" => Some(named("Path")),
+        "core_path_parent" | "core_runtime_path_parent" => {
+            Some(generic("Option", vec![named("Path")]))
+        }
+        "core_path_file_name"
+        | "core_runtime_path_file_name"
+        | "core_path_extension"
+        | "core_runtime_path_extension"
+        | "core_path_to_str"
+        | "core_runtime_path_to_str" => Some(str_ty.clone()),
+        "core_path_starts_with" | "core_runtime_path_starts_with" => Some(Type::Bool),
+        "core_io_read_file" | "core_runtime_io_read_file" => Some(str_ty.clone()),
+        "core_io_read_bytes" | "core_runtime_io_read_bytes" => Some(generic("Vec", vec![u8_ty])),
+        "core_io_list_dir" | "core_runtime_io_list_dir" => {
+            Some(generic("Vec", vec![named("DirEntry")]))
+        }
+        "core_io_write_file"
+        | "core_runtime_io_write_file"
+        | "core_io_write_file_atomic"
+        | "core_runtime_io_write_file_atomic"
+        | "core_io_write_bytes_atomic"
+        | "core_runtime_io_write_bytes_atomic"
+        | "core_io_publish_text_artifact"
+        | "core_runtime_io_publish_text_artifact"
+        | "core_io_publish_bytes_artifact"
+        | "core_runtime_io_publish_bytes_artifact"
+        | "core_io_copy_file"
+        | "core_runtime_io_copy_file"
+        | "core_io_copy_file_atomic"
+        | "core_runtime_io_copy_file_atomic" => Some(usize_ty.clone()),
         "core_socket_tcp_request" => Some(str_ty.clone()),
         "core_socket_tcp_send" => Some(usize_ty.clone()),
         "core_hash_sha256" | "core_hash_hmac_sha256" => Some(str_ty.clone()),
@@ -356,6 +420,32 @@ pub fn standard_builtin_call_type(name: &str) -> Option<Type> {
         | "core_runtime_serialize_text_len"
         | "core_stream_count_bytes"
         | "core_runtime_stream_count_bytes" => Some(usize_ty),
+        "core_serialize_json_canonical"
+        | "core_runtime_serialize_json_canonical"
+        | "core_serialize_utf8_decode"
+        | "core_runtime_serialize_utf8_decode" => Some(primitive("str")),
+        "core_serialize_json_is_canonical" | "core_runtime_serialize_json_is_canonical" => {
+            Some(Type::Bool)
+        }
+        "core_serialize_utf8_encode"
+        | "core_runtime_serialize_utf8_encode"
+        | "core_serialize_u16_le"
+        | "core_runtime_serialize_u16_le"
+        | "core_serialize_u32_le"
+        | "core_runtime_serialize_u32_le"
+        | "core_serialize_i32_le"
+        | "core_runtime_serialize_i32_le"
+        | "core_serialize_concat"
+        | "core_runtime_serialize_concat" => Some(generic("Vec", vec![primitive("u8")])),
+        "core_serialize_read_u16_le" | "core_runtime_serialize_read_u16_le" => {
+            Some(primitive("u16"))
+        }
+        "core_serialize_read_u32_le" | "core_runtime_serialize_read_u32_le" => {
+            Some(primitive("u32"))
+        }
+        "core_serialize_read_i32_le" | "core_runtime_serialize_read_i32_le" => {
+            Some(primitive("i32"))
+        }
         "core_crypto_mock_secret_key" | "core_runtime_crypto_mock_secret_key" => {
             Some(secret_ed25519_ty.clone())
         }
@@ -387,6 +477,75 @@ pub fn standard_builtin_call_type(name: &str) -> Option<Type> {
         }
         _ if is_standard_target_probe(name) => Some(Type::Bool),
         _ if canonical_simd_intrinsic(name).is_some() => None,
+        _ => None,
+    }
+}
+
+pub fn standard_builtin_arg_types(name: &str) -> Option<Vec<Type>> {
+    let str_ty = primitive("str");
+    match name {
+        "core_path_parse" | "core_runtime_path_parse" => Some(vec![str_ty]),
+        "core_path_join" | "core_runtime_path_join" => Some(vec![named("Path"), str_ty]),
+        "core_path_parent"
+        | "core_runtime_path_parent"
+        | "core_path_file_name"
+        | "core_runtime_path_file_name"
+        | "core_path_extension"
+        | "core_runtime_path_extension"
+        | "core_path_to_str"
+        | "core_runtime_path_to_str" => Some(vec![named("Path")]),
+        "core_path_starts_with" | "core_runtime_path_starts_with" => {
+            Some(vec![named("Path"), named("Path")])
+        }
+        "core_io_read_file"
+        | "core_runtime_io_read_file"
+        | "core_io_read_bytes"
+        | "core_runtime_io_read_bytes" => Some(vec![str_ty]),
+        "core_io_list_dir" | "core_runtime_io_list_dir" => Some(vec![named("Path")]),
+        "core_io_write_file"
+        | "core_runtime_io_write_file"
+        | "core_io_write_file_atomic"
+        | "core_runtime_io_write_file_atomic" => Some(vec![str_ty.clone(), str_ty]),
+        "core_io_write_bytes_atomic" | "core_runtime_io_write_bytes_atomic" => {
+            Some(vec![str_ty, generic("Vec", vec![primitive("u8")])])
+        }
+        "core_io_publish_text_artifact" | "core_runtime_io_publish_text_artifact" => {
+            Some(vec![primitive("str"), named("Path"), primitive("str")])
+        }
+        "core_io_publish_bytes_artifact" | "core_runtime_io_publish_bytes_artifact" => Some(vec![
+            primitive("str"),
+            named("Path"),
+            generic("Vec", vec![primitive("u8")]),
+        ]),
+        "core_io_copy_file"
+        | "core_runtime_io_copy_file"
+        | "core_io_copy_file_atomic"
+        | "core_runtime_io_copy_file_atomic" => Some(vec![str_ty.clone(), str_ty]),
+        "core_serialize_json_canonical"
+        | "core_runtime_serialize_json_canonical"
+        | "core_serialize_json_is_canonical"
+        | "core_runtime_serialize_json_is_canonical"
+        | "core_serialize_utf8_encode"
+        | "core_runtime_serialize_utf8_encode" => Some(vec![primitive("str")]),
+        "core_serialize_utf8_decode" | "core_runtime_serialize_utf8_decode" => {
+            Some(vec![generic("Vec", vec![primitive("u8")])])
+        }
+        "core_serialize_u16_le" | "core_runtime_serialize_u16_le" => Some(vec![primitive("u16")]),
+        "core_serialize_u32_le" | "core_runtime_serialize_u32_le" => Some(vec![primitive("u32")]),
+        "core_serialize_i32_le" | "core_runtime_serialize_i32_le" => Some(vec![primitive("i32")]),
+        "core_serialize_read_u16_le"
+        | "core_runtime_serialize_read_u16_le"
+        | "core_serialize_read_u32_le"
+        | "core_runtime_serialize_read_u32_le"
+        | "core_serialize_read_i32_le"
+        | "core_runtime_serialize_read_i32_le" => Some(vec![
+            generic("Vec", vec![primitive("u8")]),
+            primitive("usize"),
+        ]),
+        "core_serialize_concat" | "core_runtime_serialize_concat" => Some(vec![
+            generic("Vec", vec![primitive("u8")]),
+            generic("Vec", vec![primitive("u8")]),
+        ]),
         _ => None,
     }
 }

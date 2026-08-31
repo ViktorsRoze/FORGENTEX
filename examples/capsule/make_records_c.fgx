@@ -1,0 +1,31 @@
+# Native data boundaries: C returns an owned buffer of reviewed records.
+
+@repr(C)
+struct NativeRecord:
+    id: u64
+    delta: i32
+    score: f64
+
+foreign make_records_c c version "c11" effects [alloc]:
+    output records: Vec[NativeRecord]
+    sandbox "fs.none"
+    code:
+        #include "types.h"
+        #include <stdint.h>
+        #include <stdlib.h>
+
+        FgxOwnedNativeRecord make_records_c(void) {
+            NativeRecord *ptr = (NativeRecord *)malloc(2 * sizeof(NativeRecord));
+            if (ptr == NULL) { FgxOwnedNativeRecord empty = { NULL, 0, 0 }; return empty; }
+            ptr[0] = (NativeRecord){ 7, -3, 1.25 };
+            ptr[1] = (NativeRecord){ UINT64_MAX, 9, -2.5 };
+            FgxOwnedNativeRecord result = { ptr, 2, 2 };
+            return result;
+        }
+
+        void make_records_c_free(NativeRecord *ptr, size_t len, size_t capacity) {
+            (void)len; (void)capacity; free(ptr);
+        }
+
+fn records_c() -> Vec[NativeRecord]:
+    return make_records_c()

@@ -131,6 +131,7 @@ fn expr_is_pure(expr: &Expr) -> bool {
         Expr::Call { .. }
         | Expr::Field { .. }
         | Expr::Index { .. }
+        | Expr::SliceRange { .. }
         | Expr::Lambda { .. }
         | Expr::TraitConst { .. } => false,
     }
@@ -143,6 +144,9 @@ fn expr_size(expr: &Expr) -> usize {
         Expr::Call { args, .. } => args.iter().map(expr_size).sum(),
         Expr::Field { base, .. } => expr_size(base),
         Expr::Index { base, index } => expr_size(base) + expr_size(index),
+        Expr::SliceRange { base, start, end } => {
+            expr_size(base) + expr_size(start) + expr_size(end)
+        }
         Expr::Lambda { body, .. } => expr_size(body),
         _ => 0,
     }
@@ -158,6 +162,9 @@ fn count_var_uses(expr: &Expr, name: &str) -> usize {
         Expr::Call { args, .. } => args.iter().map(|arg| count_var_uses(arg, name)).sum(),
         Expr::Field { base, .. } => count_var_uses(base, name),
         Expr::Index { base, index } => count_var_uses(base, name) + count_var_uses(index, name),
+        Expr::SliceRange { base, start, end } => {
+            count_var_uses(base, name) + count_var_uses(start, name) + count_var_uses(end, name)
+        }
         Expr::Lambda { params, body } => {
             if params.iter().any(|param| param.name == name) {
                 0
@@ -188,6 +195,11 @@ fn substitute_var(expr: &mut Expr, name: &str, replacement: &Expr) {
         Expr::Index { base, index } => {
             substitute_var(base, name, replacement);
             substitute_var(index, name, replacement);
+        }
+        Expr::SliceRange { base, start, end } => {
+            substitute_var(base, name, replacement);
+            substitute_var(start, name, replacement);
+            substitute_var(end, name, replacement);
         }
         // The lambda's own parameter shadows the substituted name.
         Expr::Lambda { params, body } if !params.iter().any(|param| param.name == name) => {
@@ -299,6 +311,11 @@ fn inline_expr(
             inline_expr(base, candidates, scope, report);
             inline_expr(index, candidates, scope, report);
         }
+        Expr::SliceRange { base, start, end } => {
+            inline_expr(base, candidates, scope, report);
+            inline_expr(start, candidates, scope, report);
+            inline_expr(end, candidates, scope, report);
+        }
         Expr::Lambda { body, .. } => inline_expr(body, candidates, scope, report),
         _ => {}
     }
@@ -407,6 +424,11 @@ fn fold_expr(expr: &mut Expr, report: &mut OptReport) {
         Expr::Index { base, index } => {
             fold_expr(base, report);
             fold_expr(index, report);
+        }
+        Expr::SliceRange { base, start, end } => {
+            fold_expr(base, report);
+            fold_expr(start, report);
+            fold_expr(end, report);
         }
         Expr::Lambda { body, .. } => fold_expr(body, report),
         _ => {}

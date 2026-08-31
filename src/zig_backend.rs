@@ -1,10 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::ast::{EnumDecl, Expr, FunctionDecl, Param, Pattern, Program, StructDecl, Type};
 use crate::backend::{
-    is_native_function_type, BackendIr, IrEnum, IrFunction, IrInstruction, IrStruct,
+    is_native_function_type, is_native_vec_array_element, BackendIr, IrEnum, IrFunction,
+    IrInstruction, IrStruct,
 };
 use crate::diag::diagnostics_to_json;
 use crate::parser::parse_expr;
@@ -131,48 +132,68 @@ fn generate_source(project: &Project, ir: &BackendIr) -> Result<String, String> 
     out.push_str("    _ = fgx_str_len(needle);\n");
     out.push_str("    return std.mem.indexOf(u8, text, needle) != null;\n");
     out.push_str("}\n\n");
-    out.push_str("const FGX_VEC_I32_MAX_ELEMENTS: usize = 1024 * 1024;\n");
-    out.push_str("const FgxVecI32 = struct { data: ?[]i32 = null, len: usize = 0 };\n\n");
-    out.push_str("fn fgx_vec_i32_new() FgxVecI32 {\n");
-    out.push_str("    return .{};\n");
-    out.push_str("}\n\n");
-    out.push_str("fn fgx_vec_i32_free(vec: *FgxVecI32) void {\n");
-    out.push_str("    if (vec.data) |buffer| std.heap.page_allocator.free(buffer);\n");
-    out.push_str("    vec.* = .{};\n");
-    out.push_str("}\n\n");
-    out.push_str("fn fgx_vec_i32_reserve_for_push(vec: *FgxVecI32) void {\n");
-    out.push_str(
-        "    if (vec.len >= FGX_VEC_I32_MAX_ELEMENTS) fgx_trap(\"vec_capacity_exceeded\");\n",
-    );
-    out.push_str("    if (vec.data) |buffer| {\n");
-    out.push_str("        if (vec.len < buffer.len) return;\n");
-    out.push_str("    }\n");
-    out.push_str("    const current: usize = if (vec.data) |buffer| buffer.len else 0;\n");
-    out.push_str("    const next: usize = @min(if (current == 0) 4 else current * 2, FGX_VEC_I32_MAX_ELEMENTS);\n");
-    out.push_str("    const fresh = std.heap.page_allocator.alloc(i32, next) catch fgx_trap(\"allocation_failed\");\n");
-    out.push_str("    if (vec.data) |old| {\n");
-    out.push_str("        @memcpy(fresh[0..vec.len], old[0..vec.len]);\n");
-    out.push_str("        std.heap.page_allocator.free(old);\n");
-    out.push_str("    }\n");
-    out.push_str("    vec.data = fresh;\n");
-    out.push_str("}\n\n");
-    out.push_str("fn fgx_vec_i32_push(vec: *FgxVecI32, value: i32) void {\n");
-    out.push_str("    fgx_vec_i32_reserve_for_push(vec);\n");
-    out.push_str("    vec.data.?[vec.len] = value;\n");
-    out.push_str("    vec.len += 1;\n");
-    out.push_str("}\n\n");
-    out.push_str("fn fgx_vec_i32_pop(vec: *FgxVecI32) void {\n");
-    out.push_str("    if (vec.len != 0) vec.len -= 1;\n");
-    out.push_str("}\n\n");
+    for (suffix, title, element) in [
+        ("bool", "Bool", "bool"),
+        ("i8", "I8", "i8"),
+        ("i16", "I16", "i16"),
+        ("i32", "I32", "i32"),
+        ("i64", "I64", "i64"),
+        ("isize", "Isize", "isize"),
+        ("u8", "U8", "u8"),
+        ("u16", "U16", "u16"),
+        ("u32", "U32", "u32"),
+        ("u64", "U64", "u64"),
+        ("usize", "Usize", "usize"),
+        ("f32", "F32", "f32"),
+        ("f64", "F64", "f64"),
+        ("str", "Str", "[]const u8"),
+        ("slice_bool", "SliceBool", "[]const bool"),
+        ("slice_i8", "SliceI8", "[]const i8"),
+        ("slice_i16", "SliceI16", "[]const i16"),
+        ("slice_i32", "SliceI32", "[]const i32"),
+        ("slice_i64", "SliceI64", "[]const i64"),
+        ("slice_isize", "SliceIsize", "[]const isize"),
+        ("slice_u8", "SliceU8", "[]const u8"),
+        ("slice_u16", "SliceU16", "[]const u16"),
+        ("slice_u32", "SliceU32", "[]const u32"),
+        ("slice_u64", "SliceU64", "[]const u64"),
+        ("slice_usize", "SliceUsize", "[]const usize"),
+        ("slice_f32", "SliceF32", "[]const f32"),
+        ("slice_f64", "SliceF64", "[]const f64"),
+    ] {
+        out.push_str(&emit_named_native_vec_decl(suffix, title, element));
+    }
+
+    for (suffix, element) in native_vec_array_layouts(&program) {
+        let title = native_vec_array_title(&element)
+            .ok_or_else(|| "Zig backend received an unsupported native Vec array".to_string())?;
+        out.push_str(&emit_named_native_vec_decl(
+            &suffix,
+            &title,
+            &zig_type(&element)?,
+        ));
+    }
 
     for decl in program.enums() {
         out.push_str(&emit_enum_decl_from_ir(ir_enum_for_ast(ir, decl)?)?);
         out.push('\n');
     }
 
+    for decl in program.enums() {
+        let suffix = ident(&decl.name);
+        let title = ident(&decl.name);
+        let element = ident(&decl.name);
+        out.push_str(&emit_named_native_vec_decl(&suffix, &title, &element));
+    }
+
     for decl in program.structs() {
         out.push_str(&emit_struct_decl_from_ir(ir_struct_for_ast(ir, decl)?)?);
         out.push('\n');
+    }
+
+    for decl in program.structs() {
+        let suffix = ident(&decl.name);
+        out.push_str(&emit_named_native_vec_decl(&suffix, &suffix, &suffix));
     }
 
     for function in program.functions() {
@@ -186,6 +207,48 @@ fn generate_source(project: &Project, ir: &BackendIr) -> Result<String, String> 
         out.push('\n');
     }
     Ok(out)
+}
+
+fn emit_named_native_vec_decl(suffix: &str, title: &str, element: &str) -> String {
+    let upper = suffix.to_ascii_uppercase();
+    format!(
+        "const FGX_VEC_{upper}_MAX_ELEMENTS: usize = 1024 * 1024;\n\
+const FgxVec{title} = struct {{ data: ?[]{element} = null, len: usize = 0 }};\n\n\
+fn fgx_vec_{suffix}_new() FgxVec{title} {{\n\
+    return .{{}};\n\
+}}\n\n\
+fn fgx_vec_{suffix}_free(vec: *FgxVec{title}) void {{\n\
+    if (vec.data) |buffer| std.heap.page_allocator.free(buffer);\n\
+    vec.* = .{{}};\n\
+}}\n\n\
+fn fgx_vec_{suffix}_reserve_for_push(vec: *FgxVec{title}) void {{\n\
+    if (vec.len >= FGX_VEC_{upper}_MAX_ELEMENTS) fgx_trap(\"vec_capacity_exceeded\");\n\
+    if (vec.data) |buffer| {{\n\
+        if (vec.len < buffer.len) return;\n\
+    }}\n\
+    const current: usize = if (vec.data) |buffer| buffer.len else 0;\n\
+    const next: usize = @min(if (current == 0) 4 else current * 2, FGX_VEC_{upper}_MAX_ELEMENTS);\n\
+    const fresh = std.heap.page_allocator.alloc({element}, next) catch fgx_trap(\"allocation_failed\");\n\
+    if (vec.data) |old| {{\n\
+        @memcpy(fresh[0..vec.len], old[0..vec.len]);\n\
+        std.heap.page_allocator.free(old);\n\
+    }}\n\
+    vec.data = fresh;\n\
+}}\n\n\
+fn fgx_vec_{suffix}_push(vec: *FgxVec{title}, value: {element}) void {{\n\
+    fgx_vec_{suffix}_reserve_for_push(vec);\n\
+    vec.data.?[vec.len] = value;\n\
+    vec.len += 1;\n\
+}}\n\n\
+fn fgx_vec_{suffix}_pop(vec: *FgxVec{title}) void {{\n\
+    if (vec.len != 0) vec.len -= 1;\n\
+}}\n\n\
+fn fgx_vec_{suffix}_pop_value(vec: *FgxVec{title}) ?{element} {{\n\
+    if (vec.len == 0) return null;\n\
+    vec.len -= 1;\n\
+    return vec.data.?[vec.len];\n\
+}}\n\n"
+    )
 }
 
 fn emit_enum_decl_from_ir(decl: &IrEnum) -> Result<String, String> {
@@ -247,7 +310,7 @@ fn emit_function(
     ir: &BackendIr,
 ) -> Result<String, String> {
     ensure_zig_lowerable(function)?;
-    let mut env = Env::from_params(&function.params, enums, function_returns);
+    let mut env = Env::from_params(&function.params, &function.ret, enums, function_returns);
     let ir_function = ir_function_for_ast(ir, function)?;
     let mut out = String::new();
     out.push_str(&function_signature_from_ir(ir_function)?);
@@ -624,14 +687,35 @@ fn emit_fir_instruction(
                 .as_deref()
                 .map(Type::parse)
                 .unwrap_or_else(|| inferred_zig_type(&expr, env, structs));
-            let value = emit_expr(&expr, env, structs)?;
+            let value = match (&expr, native_vec_suffix(&ty), native_option_suffix(&ty)) {
+                (Expr::Call { .. }, _, Some(_)) if is_native_option_constructor(&expr) => {
+                    emit_native_option_constructor(&expr, env, structs)?
+                }
+                (Expr::Call { name, args }, _, Some(suffix))
+                    if name == "pop" && args.len() == 1 =>
+                {
+                    format!(
+                        "fgx_vec_{suffix}_pop_value(&{})",
+                        emit_expr(&args[0], env, structs)?
+                    )
+                }
+                (Expr::Call { name, args }, Some(suffix), _)
+                    if name == "vec_new" && args.is_empty() =>
+                {
+                    format!("fgx_vec_{suffix}_new()")
+                }
+                _ => emit_expr(&expr, env, structs)?,
+            };
             out.push_str(&format!(
                 "{pad}var {}: {} = {value};\n",
                 ident(name),
                 zig_type(&ty)?
             ));
-            if is_native_vec_i32(&ty) {
-                out.push_str(&format!("{pad}defer fgx_vec_i32_free(&{});\n", ident(name)));
+            if let Some(suffix) = native_vec_suffix(&ty) {
+                out.push_str(&format!(
+                    "{pad}defer fgx_vec_{suffix}_free(&{});\n",
+                    ident(name)
+                ));
             }
             env.insert(name, ty);
         }
@@ -642,10 +726,21 @@ fn emit_fir_instruction(
                     Ok(expr) => expr,
                     Err(_) => return Ok(false),
                 };
-                out.push_str(&format!(
-                    "{pad}return {};\n",
-                    emit_expr(&expr, env, structs)?
-                ));
+                let value = match (&expr, native_option_suffix(&env.return_type)) {
+                    (Expr::Call { .. }, Some(_)) if is_native_option_constructor(&expr) => {
+                        emit_native_option_constructor(&expr, env, structs)?
+                    }
+                    (Expr::Call { name, args }, Some(suffix))
+                        if name == "pop" && args.len() == 1 =>
+                    {
+                        format!(
+                            "fgx_vec_{suffix}_pop_value(&{})",
+                            emit_expr(&args[0], env, structs)?
+                        )
+                    }
+                    _ => emit_expr(&expr, env, structs)?,
+                };
+                out.push_str(&format!("{pad}return {value};\n"));
             }
             _ => return Ok(false),
         },
@@ -707,7 +802,7 @@ fn emit_assignment(
         Expr::Index { base, index } => {
             let base_text = emit_expr(base, env, structs)?;
             let index_text = emit_expr(index, env, structs)?;
-            if is_native_vec_i32(&inferred_zig_type(base, env, structs)) {
+            if is_native_vec(&inferred_zig_type(base, env, structs)) {
                 out.push_str(&format!(
                     "{pad}{base_text}.data.?[fgx_bounds_index({index_text}, {base_text}.len)] = {value};\n"
                 ));
@@ -732,6 +827,9 @@ fn emit_expr(
 ) -> Result<String, String> {
     match expr {
         Expr::Lambda { .. } => Err("Zig backend cannot lower closures yet".to_string()),
+        Expr::SliceRange { .. } => {
+            Err("Zig backend cannot lower slice-range expressions yet".to_string())
+        }
         Expr::Int(value) => Ok(value.to_string()),
         Expr::Float(value) => Ok(zig_float(*value)),
         Expr::Bool(value) => Ok(value.to_string()),
@@ -782,6 +880,54 @@ fn emit_expr(
             if is_cpu_feature_probe(name) || name == "aligned" {
                 return Ok("false".to_string());
             }
+            if matches!(name.as_str(), "is_some" | "is_none" | "unwrap_or") {
+                if let Some(Expr::Call {
+                    name: pop_name,
+                    args: pop_args,
+                }) = args.first()
+                {
+                    if pop_name == "pop" && pop_args.len() == 1 {
+                        let vec = &pop_args[0];
+                        let suffix = native_vec_suffix(&inferred_zig_type(vec, env, structs))
+                            .ok_or_else(|| {
+                                "Zig backend value pop requires a supported local native Vec"
+                                    .to_string()
+                            })?;
+                        let vec = emit_expr(vec, env, structs)?;
+                        match (name.as_str(), args.as_slice()) {
+                            ("is_some", [_]) => {
+                                return Ok(format!("(fgx_vec_{suffix}_pop_value(&{vec}) != null)"));
+                            }
+                            ("is_none", [_]) => {
+                                return Ok(format!("(fgx_vec_{suffix}_pop_value(&{vec}) == null)"));
+                            }
+                            ("unwrap_or", [_, fallback]) => {
+                                return Ok(format!(
+                                    "(fgx_vec_{suffix}_pop_value(&{vec}) orelse {})",
+                                    emit_expr(fallback, env, structs)?
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if let Some(option) = args.first() {
+                    if native_option_suffix(&inferred_zig_type(option, env, structs)).is_some() {
+                        let option = emit_expr(option, env, structs)?;
+                        match (name.as_str(), args.as_slice()) {
+                            ("is_some", [_]) => return Ok(format!("({option} != null)")),
+                            ("is_none", [_]) => return Ok(format!("({option} == null)")),
+                            ("unwrap_or", [_, fallback]) => {
+                                return Ok(format!(
+                                    "({option} orelse {})",
+                                    emit_expr(fallback, env, structs)?
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
             if matches!(
                 name.as_str(),
                 "Some"
@@ -798,16 +944,31 @@ fn emit_expr(
                     "Zig backend does not lower interpreter-only intrinsic '{name}' yet"
                 ));
             }
+            let vec_suffix = args
+                .first()
+                .and_then(|arg| native_vec_suffix(&inferred_zig_type(arg, env, structs)));
             let values = args
                 .iter()
                 .map(|arg| emit_expr(arg, env, structs))
                 .collect::<Result<Vec<_>, _>>()?;
             match (name.as_str(), values.as_slice()) {
-                ("vec_new", []) => return Ok("fgx_vec_i32_new()".to_string()),
-                ("push", [vec, value]) => {
-                    return Ok(format!("fgx_vec_i32_push(&{vec}, {value})"));
+                ("vec_new", []) => {
+                    return Err(
+                        "Zig backend vec_new requires an annotated supported local Vec".to_string(),
+                    );
                 }
-                ("pop", [vec]) => return Ok(format!("fgx_vec_i32_pop(&{vec})")),
+                ("push", [vec, value]) => {
+                    let suffix = vec_suffix.ok_or_else(|| {
+                        "Zig backend push requires a supported local native Vec".to_string()
+                    })?;
+                    return Ok(format!("fgx_vec_{suffix}_push(&{vec}, {value})"));
+                }
+                ("pop", [vec]) => {
+                    let suffix = vec_suffix.ok_or_else(|| {
+                        "Zig backend pop requires a supported local native Vec".to_string()
+                    })?;
+                    return Ok(format!("fgx_vec_{suffix}_pop(&{vec})"));
+                }
                 ("str_len", [value]) => return Ok(format!("fgx_str_len({value})")),
                 ("str_contains", [text, needle]) => {
                     return Ok(format!("fgx_str_contains({text}, {needle})"));
@@ -855,7 +1016,7 @@ fn emit_expr(
         Expr::Index { base, index } => {
             let base_text = emit_expr(base, env, structs)?;
             let index_text = emit_expr(index, env, structs)?;
-            if is_native_vec_i32(&inferred_zig_type(base, env, structs)) {
+            if is_native_vec(&inferred_zig_type(base, env, structs)) {
                 Ok(format!(
                     "{base_text}.data.?[fgx_bounds_index({index_text}, {base_text}.len)]"
                 ))
@@ -964,7 +1125,14 @@ fn zig_type(ty: &Type) -> Result<String, String> {
             )),
         },
         Type::Named(name) => Ok(ident(name)),
-        ty @ Type::Generic { name, .. } if is_native_vec_i32(ty) => Ok("FgxVecI32".to_string()),
+        ty @ Type::Generic { name, .. } if is_native_vec(ty) => {
+            Ok(format!("FgxVec{}", native_vec_title(ty).unwrap()))
+        }
+        ty @ Type::Generic { name, args }
+            if name == "Option" && native_option_suffix(ty).is_some() =>
+        {
+            Ok(format!("?{}", zig_type(&args[0])?))
+        }
         ty @ Type::Generic { name, .. } if name == "Fn" && is_native_function_type(ty) => {
             let (params, ret, _) = ty
                 .function_parts()
@@ -1015,7 +1183,7 @@ fn ensure_zig_lowerable(function: &FunctionDecl) -> Result<(), String> {
     }
     for effect in &function.effects {
         if is_runtime_only_effect(effect)
-            && !(effect == "alloc" && function_has_native_vec_i32(function))
+            && !(effect == "alloc" && function_has_native_vec(function))
         {
             return Err(format!(
                 "Zig backend cannot lower runtime effect '{}' in function '{}'",
@@ -1034,16 +1202,29 @@ fn combined_program(project: &Project) -> Program {
     Program { items }
 }
 
-fn function_has_native_vec_i32(function: &FunctionDecl) -> bool {
-    function.body.iter().any(|stmt| {
-        matches!(
-            stmt,
-            crate::ast::Stmt::Let {
-                ty: Some(ty),
-                expr: Expr::Call { name, args },
-                ..
-            } if is_native_vec_i32(ty) && name == "vec_new" && args.is_empty()
-        )
+fn function_has_native_vec(function: &FunctionDecl) -> bool {
+    stmts_have_native_vec(&function.body)
+}
+
+fn stmts_have_native_vec(body: &[crate::ast::Stmt]) -> bool {
+    body.iter().any(|stmt| match stmt {
+        crate::ast::Stmt::Let {
+            ty: Some(ty),
+            expr: Expr::Call { name, args },
+            ..
+        } => is_native_vec(ty) && name == "vec_new" && args.is_empty(),
+        crate::ast::Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => stmts_have_native_vec(then_body) || stmts_have_native_vec(else_body),
+        crate::ast::Stmt::For { body, .. } | crate::ast::Stmt::While { body, .. } => {
+            stmts_have_native_vec(body)
+        }
+        crate::ast::Stmt::Match { arms, .. } => {
+            arms.iter().any(|arm| stmts_have_native_vec(&arm.body))
+        }
+        _ => false,
     })
 }
 
@@ -1052,11 +1233,13 @@ struct Env {
     values: HashMap<String, Type>,
     enums: HashMap<String, IrEnum>,
     function_returns: HashMap<String, Type>,
+    return_type: Type,
 }
 
 impl Env {
     fn from_params(
         params: &[Param],
+        return_type: &Type,
         enums: &HashMap<String, IrEnum>,
         function_returns: &HashMap<String, Type>,
     ) -> Self {
@@ -1068,6 +1251,7 @@ impl Env {
             values,
             enums: enums.clone(),
             function_returns: function_returns.clone(),
+            return_type: return_type.clone(),
         }
     }
 
@@ -1119,7 +1303,7 @@ fn inferred_zig_type(expr: &Expr, env: &Env, structs: &HashMap<String, StructDec
         Expr::Field { base, field } if field == "len" => {
             let base_ty = inferred_zig_type(base, env, structs);
             if matches!(base_ty, Type::Slice { .. } | Type::Array { .. })
-                || is_native_vec_i32(&base_ty)
+                || is_native_vec(&base_ty)
                 || base_ty == Type::Primitive("str".to_string())
             {
                 Type::Primitive("usize".to_string())
@@ -1130,6 +1314,14 @@ fn inferred_zig_type(expr: &Expr, env: &Env, structs: &HashMap<String, StructDec
         Expr::Index { base, .. } => inferred_zig_type(base, env, structs)
             .element_type()
             .unwrap_or(Type::Unknown),
+        Expr::SliceRange { base, .. } => match inferred_zig_type(base, env, structs) {
+            Type::Slice { mutable, elem } => Type::Slice { mutable, elem },
+            Type::Array { elem, .. } => Type::Slice {
+                mutable: false,
+                elem,
+            },
+            _ => Type::Unknown,
+        },
         Expr::Unary { expr, .. } => inferred_zig_type(expr, env, structs),
         Expr::Binary { left, right, .. } => {
             let left = inferred_zig_type(left, env, structs);
@@ -1146,13 +1338,252 @@ fn inferred_zig_type(expr: &Expr, env: &Env, structs: &HashMap<String, StructDec
     }
 }
 
-fn is_native_vec_i32(ty: &Type) -> bool {
-    matches!(
-        ty,
-        Type::Generic { name, args }
-            if name == "Vec"
-                && args.as_slice() == [Type::Primitive("i32".to_string())]
-    )
+fn native_vec_suffix(ty: &Type) -> Option<String> {
+    let Type::Generic { name, args } = ty else {
+        return None;
+    };
+    let [element] = args.as_slice() else {
+        return None;
+    };
+    if name != "Vec" {
+        return None;
+    }
+    match element {
+        Type::Bool => Some("bool".to_string()),
+        Type::Primitive(element) => match element.as_str() {
+            "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize"
+            | "f32" | "f64" | "str" => Some(element.clone()),
+            _ => None,
+        },
+        Type::Named(element) => Some(ident(element)),
+        Type::Slice {
+            mutable: false,
+            elem,
+        } if native_vec_slice_element(elem) => {
+            Some(format!("slice_{}", native_vec_slice_element_suffix(elem)?))
+        }
+        element @ Type::Array { elem, len } if is_native_vec_array_element(element) => Some(
+            format!("array_{}_{}", native_vec_array_component_suffix(elem)?, len),
+        ),
+        _ => None,
+    }
+}
+
+fn native_option_suffix(ty: &Type) -> Option<String> {
+    let Type::Generic { name, args } = ty else {
+        return None;
+    };
+    if name != "Option" || args.len() != 1 {
+        return None;
+    }
+    native_vec_suffix(&Type::Generic {
+        name: "Vec".to_string(),
+        args: args.clone(),
+    })
+}
+
+fn is_native_option_constructor(expr: &Expr) -> bool {
+    matches!(expr, Expr::Call { name, args } if (name == "Some" && args.len() == 1) || (name == "None" && args.is_empty()))
+}
+
+fn emit_native_option_constructor(
+    expr: &Expr,
+    env: &Env,
+    structs: &HashMap<String, StructDecl>,
+) -> Result<String, String> {
+    match expr {
+        Expr::Call { name, args } if name == "Some" && args.len() == 1 => {
+            emit_expr(&args[0], env, structs)
+        }
+        Expr::Call { name, args } if name == "None" && args.is_empty() => Ok("null".to_string()),
+        _ => Err("Zig backend received an invalid Option constructor".to_string()),
+    }
+}
+
+fn native_vec_slice_element(ty: &Type) -> bool {
+    native_vec_slice_element_suffix(ty).is_some()
+}
+
+fn native_vec_slice_element_suffix(ty: &Type) -> Option<&'static str> {
+    match ty {
+        Type::Bool => Some("bool"),
+        Type::Primitive(element) => match element.as_str() {
+            "i8" => Some("i8"),
+            "i16" => Some("i16"),
+            "i32" => Some("i32"),
+            "i64" => Some("i64"),
+            "isize" => Some("isize"),
+            "u8" => Some("u8"),
+            "u16" => Some("u16"),
+            "u32" => Some("u32"),
+            "u64" => Some("u64"),
+            "usize" => Some("usize"),
+            "f32" => Some("f32"),
+            "f64" => Some("f64"),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn native_vec_array_component_suffix(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Array { elem, len } => Some(format!(
+            "array_{}_{}",
+            native_vec_array_component_suffix(elem)?,
+            len
+        )),
+        Type::Primitive(name) if name == "str" => Some("str".to_string()),
+        Type::Named(name) => Some(ident(name)),
+        Type::Slice {
+            mutable: false,
+            elem,
+        } if native_vec_slice_element(elem) => {
+            Some(format!("slice_{}", native_vec_slice_element_suffix(elem)?))
+        }
+        _ => native_vec_slice_element_suffix(ty).map(str::to_string),
+    }
+}
+
+fn native_vec_title(ty: &Type) -> Option<String> {
+    if let Type::Generic { name, args } = ty {
+        if name == "Vec" {
+            if let [element @ Type::Array { .. }] = args.as_slice() {
+                return native_vec_array_title(element);
+            }
+        }
+    }
+    let suffix = native_vec_suffix(ty)?;
+    Some(match suffix.as_str() {
+        "bool" => "Bool".to_string(),
+        "i8" => "I8".to_string(),
+        "u8" => "U8".to_string(),
+        "i16" => "I16".to_string(),
+        "i32" => "I32".to_string(),
+        "i64" => "I64".to_string(),
+        "isize" => "Isize".to_string(),
+        "u16" => "U16".to_string(),
+        "u32" => "U32".to_string(),
+        "u64" => "U64".to_string(),
+        "usize" => "Usize".to_string(),
+        "f32" => "F32".to_string(),
+        "f64" => "F64".to_string(),
+        "str" => "Str".to_string(),
+        "slice_bool" => "SliceBool".to_string(),
+        "slice_i8" => "SliceI8".to_string(),
+        "slice_i16" => "SliceI16".to_string(),
+        "slice_i32" => "SliceI32".to_string(),
+        "slice_i64" => "SliceI64".to_string(),
+        "slice_isize" => "SliceIsize".to_string(),
+        "slice_u8" => "SliceU8".to_string(),
+        "slice_u16" => "SliceU16".to_string(),
+        "slice_u32" => "SliceU32".to_string(),
+        "slice_u64" => "SliceU64".to_string(),
+        "slice_usize" => "SliceUsize".to_string(),
+        "slice_f32" => "SliceF32".to_string(),
+        "slice_f64" => "SliceF64".to_string(),
+        _ => suffix,
+    })
+}
+
+fn native_vec_array_title(ty: &Type) -> Option<String> {
+    if !is_native_vec_array_element(ty) {
+        return None;
+    }
+    native_vec_array_component_title(ty)
+}
+
+fn native_vec_array_component_title(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Array { elem, len } => Some(format!(
+            "Array{}_{}",
+            native_vec_array_component_title(elem)?,
+            len
+        )),
+        Type::Primitive(name) if name == "str" => Some("Str".to_string()),
+        Type::Named(name) => Some(ident(name)),
+        Type::Slice {
+            mutable: false,
+            elem,
+        } if native_vec_slice_element(elem) => {
+            Some(format!("Slice{}", native_vec_array_component_title(elem)?))
+        }
+        _ => Some(
+            match native_vec_slice_element_suffix(ty)? {
+                "bool" => "Bool",
+                "i8" => "I8",
+                "i16" => "I16",
+                "i32" => "I32",
+                "i64" => "I64",
+                "isize" => "Isize",
+                "u8" => "U8",
+                "u16" => "U16",
+                "u32" => "U32",
+                "u64" => "U64",
+                "usize" => "Usize",
+                "f32" => "F32",
+                "f64" => "F64",
+                _ => return None,
+            }
+            .to_string(),
+        ),
+    }
+}
+
+fn native_vec_array_layouts(program: &Program) -> BTreeMap<String, Type> {
+    let mut layouts = BTreeMap::new();
+    for function in program.functions() {
+        collect_native_vec_array_layouts(&function.body, &mut layouts);
+    }
+    layouts
+}
+
+fn collect_native_vec_array_layouts(
+    body: &[crate::ast::Stmt],
+    layouts: &mut BTreeMap<String, Type>,
+) {
+    for stmt in body {
+        match stmt {
+            crate::ast::Stmt::Let {
+                ty: Some(ty @ Type::Generic { name, args }),
+                ..
+            } if name == "Vec" => {
+                if let [element @ Type::Array { .. }] = args.as_slice() {
+                    if let Some(suffix) = native_vec_suffix(ty) {
+                        layouts.insert(suffix, element.clone());
+                    }
+                }
+            }
+            crate::ast::Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_native_vec_array_layouts(then_body, layouts);
+                collect_native_vec_array_layouts(else_body, layouts);
+            }
+            crate::ast::Stmt::For { body, .. } | crate::ast::Stmt::While { body, .. } => {
+                collect_native_vec_array_layouts(body, layouts);
+            }
+            crate::ast::Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    collect_native_vec_array_layouts(&arm.body, layouts);
+                }
+            }
+            crate::ast::Stmt::Let { .. }
+            | crate::ast::Stmt::Return(_)
+            | crate::ast::Stmt::Break
+            | crate::ast::Stmt::Continue
+            | crate::ast::Stmt::Require(_)
+            | crate::ast::Stmt::Assign { .. }
+            | crate::ast::Stmt::Expr(_)
+            | crate::ast::Stmt::Asm(_) => {}
+        }
+    }
+}
+
+fn is_native_vec(ty: &Type) -> bool {
+    native_vec_suffix(ty).is_some()
 }
 
 fn is_runtime_only_effect(effect: &str) -> bool {
@@ -1164,6 +1595,7 @@ fn is_runtime_only_effect(effect: &str) -> bool {
         || effect.starts_with("crypto.")
         || effect.starts_with("ledger.")
         || effect.starts_with("agent.")
+        || effect.starts_with("concurrency.")
         || effect == "serialize"
         || effect == "stream"
 }

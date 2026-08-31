@@ -1482,6 +1482,47 @@ fn closure_program_type_checks_clean() {
 }
 
 #[test]
+fn affine_closure_captures_a_mutable_borrow_and_runs_once() {
+    let source = "fn read_once(xs: &mut [u8]) -> u8:\n    let read: FnOnce[usize, u8] = |index: usize| xs[index]\n    return read(0)\n";
+    let program = parse_human(source).unwrap();
+    let diagnostics = crate::typecheck::check(&program);
+    assert!(diagnostics.is_empty(), "got: {diagnostics:?}");
+    let human = format_human(&program);
+    let agent = format_agent(&program);
+    assert!(human.contains("FnOnce[usize, u8]"), "{human}");
+    assert!(agent.contains("FnOnce[usize,u8]"), "{agent}");
+    assert!(program.canonical_eq(&parse_human(&human).unwrap()));
+    assert!(program.canonical_eq(&parse_agent(&agent).unwrap()));
+    let output = run_entry_json(
+        &program,
+        "read_once",
+        r#"{"args":{"xs":[7]},"expect":{"return":7}}"#,
+    )
+    .unwrap();
+    assert!(output.contains("\"status\": \"pass\""), "{output}");
+}
+
+#[test]
+fn affine_closure_is_consumed_and_owns_mutable_capture_roots() {
+    let source = "fn double_call(xs: &mut [u8]) -> u8:\n    let read: FnOnce[usize, u8] = |index: usize| xs[index]\n    let first: u8 = read(0)\n    return read(1)\n\nfn root_after_capture(xs: &mut [u8]) -> u8:\n    let read: FnOnce[usize, u8] = |index: usize| xs[index]\n    return xs[0]\n\nfn copyable_capture(xs: &mut [u8]) -> u8:\n    let read: Fn[usize, u8] = |index: usize| xs[index]\n    return read(0)\n\nfn cannot_upgrade(xs: &mut [u8]) -> u8:\n    let once: FnOnce[usize, u8] = |index: usize| xs[index]\n    let reusable: Fn[usize, u8] = once\n    return reusable(0)\n\nfn spawn_consumes() -> i32 effects [concurrency.task]:\n    let once: FnOnce[i32, i32] = |value: i32| value + 1\n    let task: Task[i32] = task_spawn(once, 1)\n    return once(2)\n";
+    let diagnostics = crate::typecheck::check(&parse_human(source).unwrap());
+    for (function, code) in [
+        ("double_call", "use_after_move"),
+        ("root_after_capture", "use_after_move"),
+        ("copyable_capture", "mutable_borrow_alias"),
+        ("cannot_upgrade", "type_mismatch"),
+        ("spawn_consumes", "use_after_move"),
+    ] {
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.node.contains(function) && diagnostic.code == code
+            }),
+            "missing {code} for {function}: {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
 fn closures_roundtrip_both_syntaxes() {
     let program = parse_human(CLOSURE_PROG).unwrap();
     let agent = format_agent(&program);
@@ -1576,7 +1617,7 @@ fn native_backends_lift_contextually_typed_non_capturing_scalar_closures() {
 }
 
 #[test]
-fn source_backend_contracts_block_capturing_closures() {
+fn source_backend_contracts_block_capturing_and_affine_closures() {
     // An environment layout and ownership policy do not exist yet, so FIR
     // preflight must keep capturing closures behind the explicit blocker.
     let dir = std::env::temp_dir().join(format!("forgentex_{}_closure_c", std::process::id()));
@@ -1598,6 +1639,20 @@ fn source_backend_contracts_block_capturing_closures() {
         assert!(
             err.contains("lambda"),
             "expected a lambda contract blocker, got: {err}"
+        );
+    }
+    std::fs::write(
+        dir.join("src/m.fgx"),
+        "export fn affine(x: i32) -> i32:\n    let once: FnOnce[i32, i32] = |value: i32| value + 1\n    return once(x)\n",
+    )
+    .unwrap();
+    let c_err = crate::c_backend::build_c_project(&dir, &dir.join("out-affine-c")).unwrap_err();
+    let zig_err =
+        crate::zig_backend::build_zig_project(&dir, &dir.join("out-affine-zig")).unwrap_err();
+    for err in [&c_err, &zig_err] {
+        assert!(
+            err.contains("generic_type:FnOnce") && err.contains("lambda"),
+            "expected explicit affine-closure blockers, got: {err}"
         );
     }
     let _ = std::fs::remove_dir_all(&dir);

@@ -1,0 +1,140 @@
+import core.io
+
+# Read a 16-bit PCM RIFF/WAVE file and render its amplitude envelope as a PPM.
+#
+# The payload is lent to each helper as an immutable `&[u8]` view of the owned
+# `Vec[u8]`, so nothing is copied or moved and the buffer stays usable
+# afterwards. `bytes[start .. stop]` takes a bounded window of that same
+# buffer.
+#
+# The RIFF chunk walk is required, not decorative: real encoders emit padding
+# chunks before `fmt `, and the bundled loop carries a JUNK chunk.
+
+fn read_u32_le(bytes: &[u8], at: usize) -> i32:
+    let b0: i32 = i32(bytes[at])
+    let b1: i32 = i32(bytes[at + 1])
+    let b2: i32 = i32(bytes[at + 2])
+    let b3: i32 = i32(bytes[at + 3])
+    return b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+
+fn is_data_chunk(bytes: &[u8], at: usize) -> bool:
+    if i32(bytes[at]) != 100:
+        return false
+    if i32(bytes[at + 1]) != 97:
+        return false
+    if i32(bytes[at + 2]) != 116:
+        return false
+    if i32(bytes[at + 3]) != 97:
+        return false
+    return true
+
+# Byte offset of the `data` payload, or 0 when the chunk is absent.
+fn find_data_chunk(bytes: &[u8], total: usize) -> usize:
+    let pos: usize = 12
+    let found: usize = 0
+    while pos + 8 <= total:
+        let size: i32 = read_u32_le(bytes, pos + 4)
+        if is_data_chunk(bytes, pos):
+            found = pos + 8
+            pos = total
+        else:
+            if size <= 0:
+                pos = total
+            else:
+                pos = pos + 8 + usize(size) + usize(size % 2)
+    return found
+
+# Declared byte length of the `data` payload, clamped to what is present so a
+# truncated or mislabelled file cannot read past the end of the buffer.
+fn data_chunk_len(bytes: &[u8], data_at: usize, total: usize) -> usize:
+    let declared: i32 = read_u32_le(bytes, data_at - 4)
+    let available: usize = total - data_at
+    if declared <= 0:
+        return 0
+    let length: usize = usize(declared)
+    if length > available:
+        return available
+    return length
+
+# Peak absolute amplitude of the little-endian 16-bit samples in one window.
+fn window_peak(window: &[u8], stride: usize) -> i32:
+    let peak: i32 = 0
+    let at: usize = 0
+    let stop: usize = window.len
+    while at + 1 < stop:
+        let raw: i32 = i32(window[at]) + i32(window[at + 1]) * 256
+        let sample: i32 = raw
+        if raw >= 32768:
+            sample = raw - 65536
+        let magnitude: i32 = sample
+        if sample < 0:
+            magnitude = 0 - sample
+        if magnitude > peak:
+            peak = magnitude
+        at = at + stride
+    return peak
+
+fn render_waveform(source: str) -> usize effects [fs.read, alloc, fs.write]:
+    let bytes: Vec[u8] = core_io_read_bytes(source)
+    let total: usize = bytes.len
+    let data_at: usize = find_data_chunk(bytes, total)
+    if data_at == 0:
+        return 0
+
+    let width: usize = 64
+    let height: i32 = 36
+    let half: i32 = 18
+
+    # Decimate the payload into one peak amplitude per output column.
+    let payload: usize = data_chunk_len(bytes, data_at, total)
+    if payload < width:
+        return 0
+    let span: usize = payload / width
+    let peaks: Vec[i32] = vec_new()
+    let column: usize = 0
+    while column < width:
+        let start: usize = data_at + column * span
+        let peak: i32 = window_peak(bytes[start .. start + span], 64)
+        push(peaks, peak)
+        column = column + 1
+
+    # PPM header: "P6\n64 36\n255\n"
+    let image: Vec[u8] = vec_new()
+    push(image, u8(80))
+    push(image, u8(54))
+    push(image, u8(10))
+    push(image, u8(54))
+    push(image, u8(52))
+    push(image, u8(32))
+    push(image, u8(51))
+    push(image, u8(54))
+    push(image, u8(10))
+    push(image, u8(50))
+    push(image, u8(53))
+    push(image, u8(53))
+    push(image, u8(10))
+
+    let y: i32 = 0
+    while y < height:
+        let x: usize = 0
+        while x < width:
+            let bar: i32 = peaks[x] * half / 32768
+            let offset: i32 = y - half
+            let distance: i32 = offset
+            if offset < 0:
+                distance = 0 - offset
+            # Written inline because a helper cannot take `Vec[u8]` by mutable
+            # reference: passing the buffer by value would move it.
+            if distance <= bar:
+                push(image, u8(64))
+                push(image, u8(220))
+                push(image, u8(140))
+            else:
+                push(image, u8(16))
+                push(image, u8(18))
+                push(image, u8(28))
+            x = x + 1
+        y = y + 1
+
+    let destination: Path = core_path_parse("output/waveform.ppm")
+    return core_io_publish_bytes_artifact("waveform", destination, image)

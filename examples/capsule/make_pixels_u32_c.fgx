@@ -1,0 +1,32 @@
+# Native data boundaries: C returns an owned Vec[u32] with values above i32 range.
+
+foreign make_pixels_u32_c c version "c11" effects [alloc]:
+    input count: i32
+    output pixels: Vec[u32]
+    sandbox "fs.none"
+    code:
+        #include "types.h"
+        #include <stdint.h>
+        #include <stdlib.h>
+
+        FgxOwnedU32 make_pixels_u32_c(int32_t count) {
+            FgxOwnedU32 result = { NULL, 0, 0 };
+            if (count <= 0) return result;
+            result.ptr = (uint32_t *)malloc((size_t)count * sizeof(uint32_t));
+            if (result.ptr == NULL) return result;
+            result.len = (size_t)count;
+            result.capacity = (size_t)count;
+            for (size_t i = 0; i < result.len; ++i) {
+                result.ptr[i] = 3000000000u + (uint32_t)i;
+            }
+            return result;
+        }
+
+        void make_pixels_u32_c_free(uint32_t *ptr, size_t len, size_t capacity) {
+            (void)len;
+            (void)capacity;
+            free(ptr);
+        }
+
+fn pixels_from_c(count: i32) -> Vec[u32] effects [alloc]:
+    return make_pixels_u32_c(count)

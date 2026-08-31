@@ -1,0 +1,32 @@
+# Native data boundaries: C accepts and returns nested @repr(C) structs.
+
+@repr(C)
+struct Bounds:
+    min_x: i16
+    max_x: i16
+    min_y: i16
+    max_y: i16
+
+@repr(C)
+struct Region:
+    id: i32
+    bounds: Bounds
+
+foreign nested_bounds_c c version "c11":
+    input region: Region
+    output adjusted: Region
+    sandbox "fs.none"
+    code:
+        #include "types.h"
+        #include <stdint.h>
+
+        Region nested_bounds_c(Region region) {
+            region.bounds.min_x += 10;
+            region.bounds.max_x += 10;
+            region.bounds.min_y += 20;
+            region.bounds.max_y += 20;
+            return region;
+        }
+
+fn adjust_region(region: Region) -> Region:
+    return nested_bounds_c(region)

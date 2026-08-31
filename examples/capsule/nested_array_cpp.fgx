@@ -1,0 +1,32 @@
+# Native data boundaries: a nested fixed array of reviewed structs crosses C++ by value.
+
+@repr(C)
+struct GridPoint:
+    x: i16
+    y: i16
+
+@repr(C)
+struct PointGrid:
+    id: i32
+    points: [[GridPoint; 2]; 2]
+
+foreign shift_grid_cpp cpp version "c++17":
+    input grid: PointGrid
+    output shifted: PointGrid
+    sandbox "fs.none"
+    code:
+        #include "types.h"
+
+        extern "C" PointGrid shift_grid_cpp(PointGrid grid) {
+            for (size_t row = 0; row < 2; ++row) {
+                for (size_t column = 0; column < 2; ++column) {
+                    int16_t delta = static_cast<int16_t>(row * 2 + column + 1);
+                    grid.points[row][column].x += delta;
+                    grid.points[row][column].y -= delta;
+                }
+            }
+            return grid;
+        }
+
+fn shift_grid(grid: PointGrid) -> PointGrid:
+    return shift_grid_cpp(grid)

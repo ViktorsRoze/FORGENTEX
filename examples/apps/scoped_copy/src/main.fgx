@@ -1,0 +1,4 @@
+fn copy_binary(source: str, destination: str) -> usize effects [fs.read, fs.write]:
+    let bytes: Vec[u8] = core_io_read_bytes(source)
+    let output: Path = core_path_parse(destination)
+    return core_io_publish_bytes_artifact("copy", output, bytes)

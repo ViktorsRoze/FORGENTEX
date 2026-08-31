@@ -1,0 +1,33 @@
+module core.io
+
+import core.path
+
+export fn core_io_read_file(path: str) -> str effects [fs.read]:
+    return core_runtime_io_read_file(path)
+
+export fn core_io_read_bytes(path: str) -> Vec[u8] effects [fs.read]:
+    return core_runtime_io_read_bytes(path)
+
+export fn core_io_write_file(path: str, contents: str) -> usize effects [fs.write]:
+    return core_runtime_io_write_file(path, contents)
+
+export fn core_io_write_file_atomic(path: str, contents: str) -> usize effects [fs.write]:
+    return core_runtime_io_write_file_atomic(path, contents)
+
+export fn core_io_write_bytes_atomic(path: str, bytes: Vec[u8]) -> usize effects [fs.write]:
+    return core_runtime_io_write_bytes_atomic(path, bytes)
+
+export fn core_io_publish_text_artifact(name: str, path: Path, contents: str) -> usize effects [fs.write]:
+    return core_runtime_io_publish_text_artifact(name, path, contents)
+
+export fn core_io_publish_bytes_artifact(name: str, path: Path, bytes: Vec[u8]) -> usize effects [fs.write]:
+    return core_runtime_io_publish_bytes_artifact(name, path, bytes)
+
+export fn core_io_copy_file(source: str, destination: str) -> usize effects [fs.read, fs.write]:
+    return core_runtime_io_copy_file(source, destination)
+
+export fn core_io_copy_file_atomic(source: str, destination: str) -> usize effects [fs.read, fs.write]:
+    return core_runtime_io_copy_file_atomic(source, destination)
+
+export fn core_io_list_dir(path: Path) -> Vec[DirEntry] effects [fs.read]:
+    return core_runtime_io_list_dir(path)

@@ -1,0 +1,35 @@
+# Native data boundary: pinned Zig transfers a finite owned Vec[f32].
+
+foreign make_gains_f32_zig zig version "0.14" effects [alloc]:
+    output gains: Vec[f32]
+    sandbox "fs.none"
+    code:
+        const std = @import("std");
+
+        pub const FgxOwnedF32 = extern struct {
+            ptr: ?[*]f32,
+            len: usize,
+            capacity: usize,
+        };
+
+        pub export fn make_gains_f32_zig() FgxOwnedF32 {
+            const gains = std.heap.page_allocator.alloc(f32, 4) catch
+                return .{ .ptr = null, .len = 0, .capacity = 0 };
+            gains[0] = 0.1;
+            gains[1] = -1.5;
+            gains[2] = 1.25;
+            gains[3] = 3.5;
+            return .{ .ptr = gains.ptr, .len = gains.len, .capacity = gains.len };
+        }
+
+        pub export fn make_gains_f32_zig_free(
+            ptr: ?[*]f32,
+            len: usize,
+            capacity: usize,
+        ) void {
+            _ = len;
+            if (ptr) |gains| std.heap.page_allocator.free(gains[0..capacity]);
+        }
+
+fn gains_from_zig() -> Vec[f32] effects [alloc]:
+    return make_gains_f32_zig()

@@ -1,0 +1,286 @@
+# visual.3: final-profile scene -> validated RGB8 -> governed PNG encoder.
+
+share png_seed: i32 = 41
+
+@repr(C)
+struct ScenePlan:
+    width: i32
+    height: i32
+    seed: i32
+    glyph_count: i32
+    frame_index: i32
+    frame_count: i32
+    samples_per_pixel: i32
+    shutter_q16: i32
+    adaptive_min_samples: i32
+    adaptive_noise_q16: i32
+
+share scene_plan: ScenePlan
+share raw_frame: Vec[u8]
+share encoded_png: Vec[u8]
+
+foreign plan_png c version "c11" effects [cpu]:
+    input seed: i32
+    output scene: ScenePlan
+    sandbox "fs.none"
+    bind png_seed read
+    bind scene_plan rw
+    code:
+        #include "types.h"
+
+        ScenePlan plan_png(int32_t seed) {
+            ScenePlan scene;
+            scene.width = 64;
+            scene.height = 36;
+            scene.seed = seed;
+            scene.glyph_count = 32;
+            scene.frame_index = 12;
+            scene.frame_count = 240;
+            scene.samples_per_pixel = 256;
+            scene.shutter_q16 = 32768;
+            scene.adaptive_min_samples = 32;
+            scene.adaptive_noise_q16 = 655;
+            return scene;
+        }
+
+foreign render_rgb_png c version "c11" effects [alloc, cpu.render]:
+    input scene: ScenePlan
+    output frame: Vec[u8]
+    sandbox "fs.none"
+    sandbox "limit.wall_ms 5000"
+    sandbox "limit.cpu_ms 3000"
+    sandbox "limit.mem_mb 128"
+    sandbox "artifact.media_type application/x-forgentex-rgb"
+    sandbox "artifact.max_bytes 33554432"
+    sandbox "render.profile final"
+    sandbox "render.color_space srgb"
+    sandbox "render.device cpu"
+    sandbox "render.pass beauty"
+    sandbox "render.engine forgentex_software_rgb8"
+    sandbox "render.engine_version 1.0.0"
+    sandbox "render.sequence_id visualizer_final_v1"
+    sandbox "render.seed_field seed"
+    sandbox "render.frame_index_field frame_index"
+    sandbox "render.frame_count_field frame_count"
+    sandbox "render.frames_per_second 30"
+    sandbox "render.samples_field samples_per_pixel"
+    sandbox "render.shutter_q16_field shutter_q16"
+    sandbox "render.adaptive_min_samples_field adaptive_min_samples"
+    sandbox "render.adaptive_noise_q16_field adaptive_noise_q16"
+    bind scene_plan read
+    bind raw_frame rw
+    code:
+        #include "types.h"
+        #include <stdlib.h>
+
+        FgxOwnedU8 render_rgb_png(ScenePlan scene) {
+            FgxOwnedU8 result = { NULL, 0, 0 };
+            if (scene.width <= 0 || scene.height <= 0) return result;
+            size_t pixels = (size_t)scene.width * (size_t)scene.height;
+            if (pixels > (SIZE_MAX - 8) / 3) return result;
+            result.len = 8 + pixels * 3;
+            result.capacity = result.len;
+            result.ptr = (uint8_t *)malloc(result.len);
+            if (result.ptr == NULL) {
+                result.len = 0;
+                result.capacity = 0;
+                return result;
+            }
+            uint32_t width = (uint32_t)scene.width;
+            uint32_t height = (uint32_t)scene.height;
+            for (size_t i = 0; i < 4; ++i) {
+                result.ptr[i] = (uint8_t)(width >> (i * 8));
+                result.ptr[4 + i] = (uint8_t)(height >> (i * 8));
+            }
+            for (int32_t y = 0; y < scene.height; ++y) {
+                for (int32_t x = 0; x < scene.width; ++x) {
+                    size_t offset = 8 + ((size_t)y * (size_t)scene.width + (size_t)x) * 3;
+                    result.ptr[offset] = (uint8_t)(x * 3 + scene.seed * 5 + scene.frame_index + scene.samples_per_pixel / 4 + scene.adaptive_min_samples / 8);
+                    result.ptr[offset + 1] = (uint8_t)(y * 9 + scene.glyph_count * 7 + scene.frame_count + scene.shutter_q16 / 256 + scene.adaptive_noise_q16 / 256);
+                    result.ptr[offset + 2] = (uint8_t)((x + y) * 11 + scene.seed + scene.frame_index + scene.samples_per_pixel / 8 + scene.shutter_q16 / 1024 + scene.adaptive_min_samples / 16 + scene.adaptive_noise_q16 / 512);
+                }
+            }
+            return result;
+        }
+
+        void render_rgb_png_free(uint8_t *ptr, size_t len, size_t capacity) {
+            (void)len;
+            (void)capacity;
+            free(ptr);
+        }
+
+foreign encode_png_final c version "c11" effects [alloc, media.encode, fs.write]:
+    input frame: &[u8]
+    output image: Vec[u8]
+    sandbox "fs.write target/render-final"
+    sandbox "limit.wall_ms 5000"
+    sandbox "limit.cpu_ms 3000"
+    sandbox "limit.mem_mb 128"
+    sandbox "artifact.media_type image/png"
+    sandbox "artifact.max_bytes 33554432"
+    sandbox "artifact.path target/render-final/visualizer-final.png"
+    sandbox "encode.profile png"
+    sandbox "encode.color_space srgb"
+    sandbox "encode.input_pass beauty"
+    sandbox "encode.engine forgentex_png_rgb8"
+    sandbox "encode.engine_version 1.0.0"
+    sandbox "encode.compression stored_deflate"
+    sandbox "encode.compression_level 0"
+    sandbox "encode.pixel_format rgb8"
+    sandbox "encode.interlace none"
+    sandbox "encode.scanline_filter none"
+    sandbox "encode.chunk_checksum crc32"
+    sandbox "encode.stream_checksum adler32"
+    sandbox "encode.chunk_order ihdr_srgb_idat_iend"
+    bind raw_frame read
+    bind encoded_png rw
+    code:
+        #include "types.h"
+        #include <stdlib.h>
+        #include <string.h>
+
+        static void png_u32_be(uint8_t *out, uint32_t value) {
+            out[0] = (uint8_t)(value >> 24);
+            out[1] = (uint8_t)(value >> 16);
+            out[2] = (uint8_t)(value >> 8);
+            out[3] = (uint8_t)value;
+        }
+
+        static uint32_t png_crc32(const uint8_t *data, size_t len) {
+            uint32_t crc = 0xffffffffu;
+            for (size_t i = 0; i < len; ++i) {
+                crc ^= data[i];
+                for (int bit = 0; bit < 8; ++bit) {
+                    uint32_t mask = (uint32_t)-(int32_t)(crc & 1u);
+                    crc = (crc >> 1) ^ (0xedb88320u & mask);
+                }
+            }
+            return crc ^ 0xffffffffu;
+        }
+
+        static uint32_t png_adler32(const uint8_t *data, size_t len) {
+            uint32_t a = 1;
+            uint32_t b = 0;
+            for (size_t i = 0; i < len; ++i) {
+                a = (a + data[i]) % 65521u;
+                b = (b + a) % 65521u;
+            }
+            return (b << 16) | a;
+        }
+
+        static size_t png_chunk(
+            uint8_t *out,
+            size_t offset,
+            const uint8_t type[4],
+            const uint8_t *data,
+            size_t len
+        ) {
+            png_u32_be(out + offset, (uint32_t)len);
+            memcpy(out + offset + 4, type, 4);
+            if (len != 0) memcpy(out + offset + 8, data, len);
+            uint32_t crc = png_crc32(out + offset + 4, 4 + len);
+            png_u32_be(out + offset + 8 + len, crc);
+            return offset + 12 + len;
+        }
+
+        FgxOwnedU8 encode_png_final(const uint8_t *frame, size_t frame_len) {
+            FgxOwnedU8 result = { NULL, 0, 0 };
+            if (frame == NULL || frame_len < 8) return result;
+            uint32_t width = 0;
+            uint32_t height = 0;
+            for (size_t i = 0; i < 4; ++i) {
+                width |= (uint32_t)frame[i] << (i * 8);
+                height |= (uint32_t)frame[4 + i] << (i * 8);
+            }
+            if (width == 0 || height == 0) return result;
+            size_t pixels = (size_t)width * (size_t)height;
+            if (pixels > (SIZE_MAX - 8) / 3 || frame_len != 8 + pixels * 3) return result;
+            if ((size_t)width > (SIZE_MAX - 1) / 3) return result;
+            size_t row_len = 1 + (size_t)width * 3;
+            if ((size_t)height > SIZE_MAX / row_len) return result;
+            size_t raw_len = (size_t)height * row_len;
+            uint8_t *raw = (uint8_t *)malloc(raw_len);
+            if (raw == NULL) return result;
+            for (uint32_t y = 0; y < height; ++y) {
+                size_t raw_offset = (size_t)y * row_len;
+                raw[raw_offset] = 0;
+                memcpy(raw + raw_offset + 1, frame + 8 + (size_t)y * (size_t)width * 3, (size_t)width * 3);
+            }
+
+            size_t blocks = (raw_len + 65534) / 65535;
+            if (blocks > (SIZE_MAX - raw_len - 6) / 5) {
+                free(raw);
+                return result;
+            }
+            size_t zlib_len = 2 + raw_len + blocks * 5 + 4;
+            uint8_t *zlib = (uint8_t *)malloc(zlib_len);
+            if (zlib == NULL) {
+                free(raw);
+                return result;
+            }
+            size_t z = 0;
+            zlib[z++] = 0x78;
+            zlib[z++] = 0x01;
+            size_t consumed = 0;
+            while (consumed < raw_len) {
+                size_t remaining = raw_len - consumed;
+                uint16_t block_len = (uint16_t)(remaining > 65535 ? 65535 : remaining);
+                zlib[z++] = remaining <= 65535 ? 1 : 0;
+                zlib[z++] = (uint8_t)block_len;
+                zlib[z++] = (uint8_t)(block_len >> 8);
+                uint16_t inverse = (uint16_t)~block_len;
+                zlib[z++] = (uint8_t)inverse;
+                zlib[z++] = (uint8_t)(inverse >> 8);
+                memcpy(zlib + z, raw + consumed, block_len);
+                z += block_len;
+                consumed += block_len;
+            }
+            uint32_t adler = png_adler32(raw, raw_len);
+            free(raw);
+            png_u32_be(zlib + z, adler);
+            z += 4;
+            if (z != zlib_len || zlib_len > SIZE_MAX - 70) {
+                free(zlib);
+                return result;
+            }
+
+            result.len = 70 + zlib_len;
+            result.capacity = result.len;
+            result.ptr = (uint8_t *)malloc(result.len);
+            if (result.ptr == NULL) {
+                result.len = 0;
+                result.capacity = 0;
+                free(zlib);
+                return result;
+            }
+            const uint8_t signature[8] = { 137, 80, 78, 71, 13, 10, 26, 10 };
+            memcpy(result.ptr, signature, 8);
+            uint8_t ihdr[13] = { 0 };
+            png_u32_be(ihdr, width);
+            png_u32_be(ihdr + 4, height);
+            ihdr[8] = 8;
+            ihdr[9] = 2;
+            const uint8_t ihdr_type[4] = { 'I', 'H', 'D', 'R' };
+            const uint8_t srgb_type[4] = { 's', 'R', 'G', 'B' };
+            const uint8_t srgb_intent[1] = { 0 };
+            const uint8_t idat_type[4] = { 'I', 'D', 'A', 'T' };
+            const uint8_t iend_type[4] = { 'I', 'E', 'N', 'D' };
+            size_t offset = png_chunk(result.ptr, 8, ihdr_type, ihdr, sizeof(ihdr));
+            offset = png_chunk(result.ptr, offset, srgb_type, srgb_intent, sizeof(srgb_intent));
+            offset = png_chunk(result.ptr, offset, idat_type, zlib, zlib_len);
+            free(zlib);
+            offset = png_chunk(result.ptr, offset, iend_type, NULL, 0);
+            if (offset != result.len) {
+                free(result.ptr);
+                result.ptr = NULL;
+                result.len = 0;
+                result.capacity = 0;
+            }
+            return result;
+        }
+
+        void encode_png_final_free(uint8_t *ptr, size_t len, size_t capacity) {
+            (void)len;
+            (void)capacity;
+            free(ptr);
+        }

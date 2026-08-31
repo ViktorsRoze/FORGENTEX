@@ -1,0 +1,30 @@
+# Native data boundary: C transfers a finite owned Vec[f32].
+
+foreign make_gains_f32_c c version "c11" effects [alloc]:
+    output gains: Vec[f32]
+    sandbox "fs.none"
+    code:
+        #include "types.h"
+        #include <stdlib.h>
+
+        FgxOwnedF32 make_gains_f32_c(void) {
+            FgxOwnedF32 result = { NULL, 0, 0 };
+            result.ptr = (float *)malloc(4 * sizeof(float));
+            if (result.ptr == NULL) return result;
+            result.len = 4;
+            result.capacity = 4;
+            result.ptr[0] = 0.1f;
+            result.ptr[1] = -1.5f;
+            result.ptr[2] = 1.25f;
+            result.ptr[3] = 3.5f;
+            return result;
+        }
+
+        void make_gains_f32_c_free(float *ptr, size_t len, size_t capacity) {
+            (void)len;
+            (void)capacity;
+            free(ptr);
+        }
+
+fn gains_from_c() -> Vec[f32] effects [alloc]:
+    return make_gains_f32_c()

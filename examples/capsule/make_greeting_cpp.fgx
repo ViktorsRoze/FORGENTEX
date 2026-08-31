@@ -1,0 +1,37 @@
+# Native data boundaries: C++ transfers an owned UTF-8 string by descriptor.
+
+foreign make_greeting_cpp cpp version "c++17" effects [alloc]:
+    output greeting: str
+    sandbox "fs.none"
+    code:
+        #include "types.h"
+        #include <cstddef>
+        #include <cstdint>
+        #include <cstdlib>
+        #include <cstring>
+
+        extern "C" FgxOwnedStr make_greeting_cpp(void) {
+            static const std::uint8_t text[] = {
+                70, 111, 114, 103, 101, 110, 116, 101, 120, 44, 10, 226, 156, 147
+            };
+            FgxOwnedStr result = { nullptr, 0, 0 };
+            result.ptr = static_cast<std::uint8_t *>(std::malloc(sizeof(text)));
+            if (result.ptr == nullptr) return result;
+            std::memcpy(result.ptr, text, sizeof(text));
+            result.len = sizeof(text);
+            result.capacity = sizeof(text);
+            return result;
+        }
+
+        extern "C" void make_greeting_cpp_free(
+            std::uint8_t *ptr,
+            std::size_t len,
+            std::size_t capacity
+        ) {
+            (void)len;
+            (void)capacity;
+            std::free(ptr);
+        }
+
+fn greeting_from_cpp() -> str effects [alloc]:
+    return make_greeting_cpp()

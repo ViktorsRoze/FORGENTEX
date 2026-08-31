@@ -1,0 +1,6 @@
+fn ok(value: i32) -> i32:
+    let closure: FnOnce[i32, i32] = |input: i32| input + 1
+    let first: i32 = closure(value)
+    closure = |input: i32| input + 2
+    let second: i32 = closure(value)
+    return first + second

@@ -134,6 +134,35 @@ architecture-specific changes. `operation_log` records precondition successes
 and applied operations. `target_notes` records architecture-specific fast paths,
 scalar fallback status, and structured assembly review-only paths.
 
+## Optional project-codebook transport
+
+Semantic patch syntax and signatures remain canonical plain `.fgp`. Transport
+may be wrapped by a current project codebook:
+
+```powershell
+fgx codebook encode change.fgp `
+  --codebook forgentex.codebook.json `
+  --out change.fgcb
+
+fgx patch source.fgx change.fgcb `
+  --project . `
+  --codebook forgentex.codebook.json `
+  --check-only
+```
+
+Encoding is never-larger by default; `--force-codebook` exists only for
+diagnostic round trips. `fgx patch` and `fgx review` require the supplied
+codebook to match the current project corpus, validate the `#FGCB` artifact,
+corpus, and tier identities, decode, and only then parse preconditions,
+signatures, operations, and review metadata. A different artifact hash or stale
+corpus fails before semantic patch application.
+
+Review packets retain the exact codebook artifact hash and distinguish
+transport-patch tokens from decoded patch tokens. The small waveform fixture is
+correctly negative: its five-line patch costs 58 tokens plain and 141 encoded,
+so ordinary encoding leaves it plain. Forced encoding produces the identical
+checker-clean `ADD_EFFECT io.write` review after decode.
+
 ## Safety Rules
 
 - Missing targets fail before operation application reaches that operation.

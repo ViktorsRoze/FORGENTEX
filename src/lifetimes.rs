@@ -30,7 +30,8 @@ pub fn analyze_contracts(program: &Program) -> Vec<LifetimeContract> {
             | Item::TraitImpl(_)
             | Item::Test(_)
             | Item::Capsule(_)
-            | Item::Share(_) => None,
+            | Item::Share(_)
+            | Item::Pipeline(_) => None,
         })
         .collect()
 }
@@ -67,7 +68,9 @@ fn returned_borrow_param_indices_inner(
     functions: &HashMap<String, &FunctionDecl>,
     visiting: &mut Vec<String>,
 ) -> Option<BTreeSet<usize>> {
-    if !is_borrow_type(&function.ret) || visiting.iter().any(|name| name == &function.name) {
+    if !type_can_carry_borrow(&function.ret, &function.type_params)
+        || visiting.iter().any(|name| name == &function.name)
+    {
         return None;
     }
 
@@ -259,6 +262,11 @@ fn collect_mutations_from_assignment_target(
             collect_mutations_from_expr(base, aliases, functions, visiting, out);
             collect_mutations_from_expr(index, aliases, functions, visiting, out);
         }
+        Expr::SliceRange { base, start, end } => {
+            collect_mutations_from_expr(base, aliases, functions, visiting, out);
+            collect_mutations_from_expr(start, aliases, functions, visiting, out);
+            collect_mutations_from_expr(end, aliases, functions, visiting, out);
+        }
         Expr::Field { base, .. } => {
             collect_mutations_from_assignment_target(base, aliases, functions, visiting, out)
         }
@@ -311,6 +319,11 @@ fn collect_mutations_from_expr(
             collect_mutations_from_expr(base, aliases, functions, visiting, out);
             collect_mutations_from_expr(index, aliases, functions, visiting, out);
         }
+        Expr::SliceRange { base, start, end } => {
+            collect_mutations_from_expr(base, aliases, functions, visiting, out);
+            collect_mutations_from_expr(start, aliases, functions, visiting, out);
+            collect_mutations_from_expr(end, aliases, functions, visiting, out);
+        }
         Expr::Var(_)
         | Expr::Int(_)
         | Expr::Float(_)
@@ -362,14 +375,19 @@ fn borrow_param_indices_for_expr(
         Expr::Cast { expr, .. } | Expr::Unary { expr, .. } => {
             borrow_param_indices_for_expr(expr, aliases, functions, visiting)
         }
+        Expr::SliceRange { base, .. } => {
+            borrow_param_indices_for_expr(base, aliases, functions, visiting)
+        }
+        Expr::Index { base, .. } => {
+            borrow_param_indices_for_expr(base, aliases, functions, visiting)
+        }
         Expr::Int(_)
         | Expr::TraitConst { .. }
         | Expr::Float(_)
         | Expr::Bool(_)
         | Expr::String(_)
         | Expr::Binary { .. }
-        | Expr::Field { .. }
-        | Expr::Index { .. } => None,
+        | Expr::Field { .. } => None,
     }
 }
 
@@ -378,7 +396,7 @@ fn initial_borrow_aliases(function: &FunctionDecl) -> HashMap<String, BTreeSet<u
         .params
         .iter()
         .enumerate()
-        .filter(|(_, param)| is_borrow_type(&param.ty))
+        .filter(|(_, param)| type_can_carry_borrow(&param.ty, &function.type_params))
         .map(|(idx, param)| (param.name.clone(), singleton_index(idx)))
         .collect()
 }
@@ -419,7 +437,8 @@ fn function_index(program: &Program) -> HashMap<String, &FunctionDecl> {
             | Item::TraitImpl(_)
             | Item::Test(_)
             | Item::Capsule(_)
-            | Item::Share(_) => None,
+            | Item::Share(_)
+            | Item::Pipeline(_) => None,
         })
         .collect()
 }
@@ -430,8 +449,18 @@ fn singleton_index(idx: usize) -> BTreeSet<usize> {
     indices
 }
 
-fn is_borrow_type(ty: &Type) -> bool {
-    matches!(ty, Type::Slice { .. })
+fn type_can_carry_borrow(ty: &Type, type_params: &[String]) -> bool {
+    match ty {
+        Type::Slice { .. } => true,
+        Type::Array { elem, .. } => type_can_carry_borrow(elem, type_params),
+        Type::Generic { args, .. } => args
+            .iter()
+            .any(|arg| type_can_carry_borrow(arg, type_params)),
+        Type::Named(name) => type_params.contains(name),
+        Type::Bool | Type::Primitive(_) | Type::Pointer { .. } | Type::Void | Type::Unknown => {
+            false
+        }
+    }
 }
 
 fn is_mutable_borrow_type(ty: &Type) -> bool {

@@ -1,6 +1,6 @@
 use crate::ast::{
     AsmBlock, Attribute, Capsule, CapsuleBinding, CapsuleFixture, EnumDecl, Expr, FunctionDecl,
-    Item, Program, ShareDecl, Stmt, StructDecl, TestDecl, TestExpectation, TraitDecl,
+    Item, PipelineDecl, Program, ShareDecl, Stmt, StructDecl, TestDecl, TestExpectation, TraitDecl,
     TraitImplDecl,
 };
 
@@ -19,6 +19,7 @@ pub fn format_human(program: &Program) -> String {
             Item::Test(test) => format_test_human(&mut out, test),
             Item::Capsule(capsule) => format_capsule_human(&mut out, capsule),
             Item::Share(share) => format_share_human(&mut out, share),
+            Item::Pipeline(pipeline) => format_pipeline_human(&mut out, pipeline),
         }
     }
     finish_document(out)
@@ -39,6 +40,7 @@ pub fn format_agent(program: &Program) -> String {
             Item::Test(test) => format_test_agent(&mut out, test),
             Item::Capsule(capsule) => format_capsule_agent(&mut out, capsule),
             Item::Share(share) => format_share_agent(&mut out, share),
+            Item::Pipeline(pipeline) => format_pipeline_agent(&mut out, pipeline),
         }
     }
     // Render high-frequency builtins with their short two-letter aliases.
@@ -502,6 +504,35 @@ fn format_share_agent(out: &mut String, share: &ShareDecl) {
     out.push('\n');
 }
 
+fn format_pipeline_human(out: &mut String, pipeline: &PipelineDecl) {
+    format_attrs_human(out, &pipeline.attrs, 0);
+    out.push_str(&format!("pipeline {}:\n", pipeline.name));
+    for stage in &pipeline.stages {
+        out.push_str(&format!("    stage {stage}\n"));
+    }
+    for edge in &pipeline.edges {
+        out.push_str(&format!(
+            "    edge {} -> {} via {}\n",
+            edge.from, edge.to, edge.share
+        ));
+    }
+}
+
+fn format_pipeline_agent(out: &mut String, pipeline: &PipelineDecl) {
+    format_attrs_agent(out, &pipeline.attrs);
+    out.push_str(&format!("PIPELINE {}\n", pipeline.name));
+    for stage in &pipeline.stages {
+        out.push_str(&format!("STAGE {stage}\n"));
+    }
+    for edge in &pipeline.edges {
+        out.push_str(&format!(
+            "EDGE {} -> {} VIA {}\n",
+            edge.from, edge.to, edge.share
+        ));
+    }
+    out.push_str("ENDPIPELINE\n");
+}
+
 fn format_capsule_fixture(fixture: &CapsuleFixture) -> String {
     let render = |values: &[crate::ast::CapsuleValue]| {
         values
@@ -820,6 +851,12 @@ fn format_expr_prec(expr: &Expr, parent_prec: u8) -> String {
         Expr::Index { base, index } => {
             format!("{}[{}]", format_expr_prec(base, 11), format_expr(index))
         }
+        Expr::SliceRange { base, start, end } => format!(
+            "{}[{} .. {}]",
+            format_expr_prec(base, 11),
+            format_expr(start),
+            format_expr(end)
+        ),
     }
 }
 
@@ -838,7 +875,11 @@ fn expr_precedence(expr: &Expr) -> u8 {
             _ => 0,
         },
         Expr::Unary { .. } => 10,
-        Expr::Call { .. } | Expr::Cast { .. } | Expr::Field { .. } | Expr::Index { .. } => 11,
+        Expr::Call { .. }
+        | Expr::Cast { .. }
+        | Expr::Field { .. }
+        | Expr::Index { .. }
+        | Expr::SliceRange { .. } => 11,
         _ => 12,
     }
 }

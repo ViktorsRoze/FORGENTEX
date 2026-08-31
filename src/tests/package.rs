@@ -1,7 +1,8 @@
 use std::fs;
 
 use crate::package::{
-    build_package_matrix, create_package, generate_lock, publish_dry_run, run_package_tests,
+    build_package_matrix, create_package, create_package_with_template, generate_lock,
+    publish_dry_run, run_package_tests, PackageTemplate,
 };
 use crate::project::{check_project, load_project};
 
@@ -93,4 +94,69 @@ fn package_new_and_publish_dry_run_are_available() {
     assert!(publish.ready);
     assert!(publish.to_json().contains("registry_upload=deferred"));
     assert!(publish.to_json().contains("package_verify=pass"));
+}
+
+#[test]
+fn application_template_scaffolds_a_runnable_app_contract() {
+    let package_dir =
+        std::env::temp_dir().join(format!("forgentex_new_app_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&package_dir);
+    let created =
+        create_package_with_template(&package_dir, Some("greeter"), PackageTemplate::App).unwrap();
+    assert!(created.manifest.exists());
+    assert!(created.source.exists());
+    assert!(check_project(&package_dir).unwrap().is_empty());
+
+    // The artifact root must exist up front: create-new publication never
+    // creates the directory itself.
+    let output_dir = package_dir.join("output");
+    assert!(output_dir.is_dir());
+    assert!(output_dir.join(".gitkeep").exists());
+    assert_eq!(
+        created.extra,
+        vec![output_dir, package_dir.join("output").join(".gitkeep")]
+    );
+
+    let manifest = fs::read_to_string(&created.manifest).unwrap();
+    assert!(manifest.contains("[application]"));
+    assert!(manifest.contains("runtime = \"hosted_io\""));
+    assert!(manifest.contains("entry = \"greet\""));
+    assert!(manifest.contains("[application.artifact.greeting]"));
+    assert!(manifest.contains("publication = \"create_new\""));
+    // The library-only sections must not leak into the application template.
+    assert!(!manifest.contains("[targets]"));
+
+    // Entry name, artifact name, and artifact path are bound across the two files.
+    let source = fs::read_to_string(&created.source).unwrap();
+    assert!(source.contains("fn greet(message: str) -> usize effects [fs.write]"));
+    assert!(source.contains("core_io_publish_text_artifact(\"greeting\""));
+    assert!(source.contains("output/greeting.txt"));
+    let _ = fs::remove_dir_all(&package_dir);
+}
+
+#[test]
+fn library_template_remains_the_default_and_unknown_templates_are_rejected() {
+    let package_dir =
+        std::env::temp_dir().join(format!("forgentex_new_default_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&package_dir);
+    let default = create_package(&package_dir, Some("defaulted")).unwrap();
+    let default_manifest = fs::read_to_string(&default.manifest).unwrap();
+    assert!(default.extra.is_empty());
+    let _ = fs::remove_dir_all(&package_dir);
+
+    let explicit =
+        create_package_with_template(&package_dir, Some("defaulted"), PackageTemplate::Lib)
+            .unwrap();
+    assert_eq!(
+        default_manifest,
+        fs::read_to_string(&explicit.manifest).unwrap()
+    );
+    let _ = fs::remove_dir_all(&package_dir);
+
+    assert_eq!(PackageTemplate::default(), PackageTemplate::Lib);
+    assert_eq!(PackageTemplate::parse("lib"), Ok(PackageTemplate::Lib));
+    assert_eq!(PackageTemplate::parse("app"), Ok(PackageTemplate::App));
+    assert!(PackageTemplate::parse("service")
+        .unwrap_err()
+        .contains("expected 'lib' or 'app'"));
 }

@@ -11,3 +11,47 @@ fn task_and_queue() -> i32 effects [concurrency.task, concurrency.channel]:
     if !sent:
         return -1
     return unwrap_or(channel_recv(channel), 0)
+
+fn parked_then_woken() -> i32 effects [concurrency.task]:
+    let task: Task[i32] = task_spawn_parked(double, 21)
+    let woke: bool = task_wake(task)
+    if !woke:
+        return -1
+    return task_await(task)
+
+fn token_broadcast() -> i32 effects [concurrency.task]:
+    let token: WakeToken = wake_token_new()
+    let first: Task[i32] = task_spawn_on(token, double, 10)
+    let second: Task[i32] = task_spawn_on(token, double, 11)
+    let awakened: usize = wake_token_signal(token)
+    if awakened != 2:
+        return -1
+    return task_await(first) + task_await(second)
+
+fn logical_timers() -> i32 effects [concurrency.task, concurrency.timer]:
+    let clock: AsyncClock = clock_new()
+    let early_token: WakeToken = timer_after(clock, 2)
+    let late_token: WakeToken = timer_after(clock, 5)
+    let early: Task[i32] = task_spawn_on(early_token, double, 10)
+    let late: Task[i32] = task_spawn_on(late_token, double, 11)
+    let early_fired: usize = clock_advance(clock, 2)
+    let early_value: i32 = task_await(early)
+    let late_fired: usize = clock_advance(clock, 3)
+    if early_fired != 1 || late_fired != 1:
+        return -1
+    return early_value + task_await(late)
+
+fn select_fastest() -> i32 effects [alloc, concurrency.task, concurrency.timer]:
+    let clock: AsyncClock = clock_new()
+    let slow: WakeToken = timer_after(clock, 5)
+    let fast: WakeToken = timer_after(clock, 2)
+    let arms: Vec[WakeToken] = vec_new()
+    push(arms, slow)
+    push(arms, fast)
+    let fired: usize = clock_advance(clock, 2)
+    let winner: usize = unwrap_or(wake_token_select(arms), 99)
+    let task: Task[i32] = task_spawn_on(fast, double, 21)
+    let cancelled_timer_fired: usize = clock_advance(clock, 3)
+    if fired != 1 || winner != 1 || cancelled_timer_fired != 0:
+        return -1
+    return task_await(task)

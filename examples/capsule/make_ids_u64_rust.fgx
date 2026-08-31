@@ -1,0 +1,46 @@
+# Native data boundaries: Rust returns a bounded owned Vec[u64].
+
+foreign make_ids_u64_rust rust version "2021" effects [alloc]:
+    input count: i32
+    output ids: Vec[u64]
+    sandbox "fs.none"
+    code:
+        #[repr(C)]
+        pub struct FgxOwnedU64 {
+            pub ptr: *mut u64,
+            pub len: usize,
+            pub capacity: usize,
+        }
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn make_ids_u64_rust(count: i32) -> FgxOwnedU64 {
+            let len = count.max(0);
+            let mut values: Vec<u64> = (0..len)
+                .map(|index| if index + 1 == len {
+                    u64::MAX
+                } else {
+                    3_000_000_000u64 + index as u64 * 2_000_000_000u64
+                })
+                .collect();
+            let result = FgxOwnedU64 {
+                ptr: values.as_mut_ptr(),
+                len: values.len(),
+                capacity: values.capacity(),
+            };
+            std::mem::forget(values);
+            result
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn make_ids_u64_rust_free(
+            ptr: *mut u64,
+            len: usize,
+            capacity: usize,
+        ) {
+            if capacity > 0 {
+                drop(unsafe { Vec::from_raw_parts(ptr, len, capacity) });
+            }
+        }
+
+fn ids_from_rust(count: i32) -> Vec[u64] effects [alloc]:
+    return make_ids_u64_rust(count)

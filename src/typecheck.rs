@@ -9,7 +9,7 @@ use crate::effects::{
 };
 use crate::lifetimes;
 use crate::simd::{check_intrinsic_call, is_simd_intrinsic};
-use crate::stdlib::standard_builtin_call_type;
+use crate::stdlib::{standard_builtin_arg_types, standard_builtin_call_type};
 use crate::targets::is_cpu_feature_probe;
 
 /// `break`/`continue` are only valid inside a loop.
@@ -129,7 +129,8 @@ impl<'a> TypeEnvironment<'a> {
                 | Item::TraitImpl(_)
                 | Item::Test(_)
                 | Item::Capsule(_)
-                | Item::Share(_) => {}
+                | Item::Share(_)
+                | Item::Pipeline(_) => {}
             }
         }
         Self {
@@ -219,6 +220,8 @@ enum PlaceProjection {
     Field(String),
     IndexConst(i128),
     IndexUnknown,
+    RangeConst(i128, i128),
+    RangeUnknown,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -255,6 +258,10 @@ impl BorrowPlace {
                     label.push(']');
                 }
                 PlaceProjection::IndexUnknown => label.push_str("[*]"),
+                PlaceProjection::RangeConst(start, end) => {
+                    label.push_str(&format!("[{start}..{end}]"));
+                }
+                PlaceProjection::RangeUnknown => label.push_str("[*..*]"),
             }
         }
         label
@@ -289,12 +296,12 @@ impl OwnershipEnv {
                     moved: false,
                     moved_paths: BTreeSet::new(),
                     origin: ReferenceOrigin::Parameter,
-                    borrow_root: if is_borrow_type(&param.ty) {
+                    borrow_root: if type_contains_borrow(&param.ty) {
                         Some(param.name.clone())
                     } else {
                         None
                     },
-                    borrow_place: if is_borrow_type(&param.ty) {
+                    borrow_place: if type_contains_borrow(&param.ty) {
                         Some(BorrowPlace::root(param.name.clone()))
                     } else {
                         None
@@ -405,7 +412,7 @@ impl OwnershipEnv {
             let Some(binding) = self.bindings.get_mut(name) else {
                 continue;
             };
-            if !is_borrow_type(&binding.ty) && !is_borrow_type(&other_binding.ty) {
+            if !type_contains_borrow(&binding.ty) && !type_contains_borrow(&other_binding.ty) {
                 continue;
             }
 
@@ -462,6 +469,7 @@ impl<'a> Checker<'a> {
     }
 
     fn check_program(&mut self) {
+        self.validate_builtin_type_names();
         self.validate_traits();
         for function in self.program.functions() {
             self.check_function(function);
@@ -470,6 +478,29 @@ impl<'a> Checker<'a> {
             self.check_safety_function(function);
         }
         self.check_effects();
+    }
+
+    fn validate_builtin_type_names(&mut self) {
+        for item in &self.program.items {
+            let (name, node) = match item {
+                Item::Struct(decl) => (&decl.name, &decl.id),
+                Item::Enum(decl) => (&decl.name, &decl.id),
+                _ => continue,
+            };
+            if matches!(
+                name.as_str(),
+                "WakeToken" | "AsyncClock" | "IntervalTimer" | "ReadinessArm" | "Path"
+            ) {
+                self.diagnostics.push(
+                    Diagnostic::new(
+                        "reserved_type_name",
+                        node,
+                        format!("{name} is a built-in runtime type and cannot be redeclared"),
+                    )
+                    .suggest("rename_type"),
+                );
+            }
+        }
     }
 
     fn validate_traits(&mut self) {
@@ -907,6 +938,21 @@ impl<'a> Checker<'a> {
     fn validate_impl_type_params(&mut self, implementation: &crate::ast::TraitImplDecl) {
         let mut params = BTreeSet::new();
         for param in &implementation.type_params {
+            if matches!(
+                param.as_str(),
+                "WakeToken" | "AsyncClock" | "IntervalTimer" | "ReadinessArm" | "Path"
+            ) {
+                self.diagnostics.push(
+                    Diagnostic::new(
+                        "reserved_type_name",
+                        &implementation.id,
+                        format!(
+                            "{param} is a built-in runtime type and cannot be a type parameter"
+                        ),
+                    )
+                    .suggest("rename_type_parameter"),
+                );
+            }
             if !params.insert(param.clone()) {
                 self.diagnostics.push(
                     Diagnostic::new(
@@ -1058,12 +1104,31 @@ impl<'a> Checker<'a> {
         }
 
         let mut locals = LocalTypeEnv::for_function(function);
+        for param in &function.params {
+            let normalized = self.normalize_associated_type_projections(&param.ty, &locals);
+            locals.insert(param.name.clone(), normalized);
+        }
         self.check_body(&function.body, &function.ret, &mut locals, function);
     }
 
     fn validate_type_param_bounds(&mut self, function: &FunctionDecl) {
         let mut params = BTreeSet::new();
         for param in &function.type_params {
+            if matches!(
+                param.as_str(),
+                "WakeToken" | "AsyncClock" | "IntervalTimer" | "ReadinessArm" | "Path"
+            ) {
+                self.diagnostics.push(
+                    Diagnostic::new(
+                        "reserved_type_name",
+                        &function.id,
+                        format!(
+                            "{param} is a built-in runtime type and cannot be a type parameter"
+                        ),
+                    )
+                    .suggest("rename_type_parameter"),
+                );
+            }
             if !params.insert(param.clone()) {
                 self.diagnostics.push(
                     Diagnostic::new(
@@ -1151,7 +1216,8 @@ impl<'a> Checker<'a> {
                             &["insert_explicit_cast", "replace_local_type"],
                         ),
                     );
-                    locals.insert(name.clone(), expected.clone());
+                    let normalized = self.normalize_associated_type_projections(expected, locals);
+                    locals.insert(name.clone(), normalized);
                 } else {
                     self.diagnostics.push(
                         Diagnostic::new(
@@ -1433,7 +1499,7 @@ impl<'a> Checker<'a> {
 
     fn validate_fn_effect_type(&mut self, ty: &Type, node: &str) {
         match ty {
-            Type::Generic { name, args } if name == "Fn" => {
+            Type::Generic { name, args } if matches!(name.as_str(), "Fn" | "FnOnce") => {
                 let marker_positions = args
                     .iter()
                     .enumerate()
@@ -1447,7 +1513,9 @@ impl<'a> Checker<'a> {
                         Diagnostic::new(
                             "invalid_fn_type",
                             node,
-                            "Fn requires a return type before its optional effects marker",
+                            format!(
+                                "{name} requires a return type before its optional effects marker"
+                            ),
                         )
                         .suggest("add_fn_return_type"),
                     );
@@ -1877,6 +1945,107 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::Call { name, args } => {
+                if name == "pop" {
+                    if args.len() != 1 {
+                        self.diagnostics.push(
+                            Diagnostic::new("call_arity", node, "builtin 'pop' expects 1 argument")
+                                .suggest("fix_call_arguments"),
+                        );
+                    }
+                    let found = args.first().map(|arg| self.infer_expr(arg, locals, node));
+                    for arg in args.iter().skip(1) {
+                        self.infer_expr(arg, locals, node);
+                    }
+                    return Type::Generic {
+                        name: "Option".to_string(),
+                        args: vec![generic_element_type(
+                            found.as_ref(),
+                            "Vec",
+                            "pop",
+                            node,
+                            &mut self.diagnostics,
+                        )],
+                    };
+                }
+                if matches!(name.as_str(), "is_some" | "is_none") {
+                    if args.len() != 1 {
+                        self.diagnostics.push(
+                            Diagnostic::new(
+                                "call_arity",
+                                node,
+                                format!("builtin '{name}' expects 1 argument"),
+                            )
+                            .suggest("fix_call_arguments"),
+                        );
+                    }
+                    if let Some(arg) = args.first() {
+                        let found = self.infer_expr(arg, locals, node);
+                        if found != Type::Unknown {
+                            expect_generic_value(
+                                Some(&found),
+                                "Option",
+                                name,
+                                node,
+                                &mut self.diagnostics,
+                            );
+                        }
+                    }
+                    for arg in args.iter().skip(1) {
+                        self.infer_expr(arg, locals, node);
+                    }
+                    return Type::Bool;
+                }
+                if name == "unwrap_or" {
+                    if args.len() != 2 {
+                        self.diagnostics.push(
+                            Diagnostic::new(
+                                "call_arity",
+                                node,
+                                "builtin 'unwrap_or' expects 2 arguments",
+                            )
+                            .suggest("fix_call_arguments"),
+                        );
+                    }
+                    let option = args.first().map(|arg| self.infer_expr(arg, locals, node));
+                    let fallback = args
+                        .get(1)
+                        .map(|expr| (expr, self.infer_expr(expr, locals, node)));
+                    let element = match option.as_ref() {
+                        Some(Type::Generic { name, args })
+                            if matches!(name.as_str(), "Option" | "Result") =>
+                        {
+                            args.first().cloned().unwrap_or(Type::Unknown)
+                        }
+                        Some(Type::Unknown) | None => fallback
+                            .as_ref()
+                            .map(|(_, ty)| ty.clone())
+                            .unwrap_or(Type::Unknown),
+                        _ => generic_element_type(
+                            option.as_ref(),
+                            "Option",
+                            "unwrap_or",
+                            node,
+                            &mut self.diagnostics,
+                        ),
+                    };
+                    if let Some((fallback, found)) = fallback {
+                        self.check_expr_assignable(
+                            &element,
+                            fallback,
+                            &found,
+                            node,
+                            TypeDiagnostic::new(
+                                "argument_type_mismatch",
+                                "unwrap_or fallback must match the successful value type",
+                                &["replace_call_argument", "insert_explicit_cast"],
+                            ),
+                        );
+                    }
+                    for arg in args.iter().skip(2) {
+                        self.infer_expr(arg, locals, node);
+                    }
+                    return element;
+                }
                 if let Some(ty) = self.infer_concurrency_call(name, args, locals, node) {
                     return ty;
                 }
@@ -1924,6 +2093,39 @@ impl<'a> Checker<'a> {
                     } else {
                         Type::Bool
                     };
+                }
+                if let Some(expected_types) = standard_builtin_arg_types(name) {
+                    if expected_types.len() != args.len() {
+                        self.diagnostics.push(
+                            Diagnostic::new(
+                                "call_arity",
+                                node,
+                                format!(
+                                    "builtin '{name}' expects {} argument(s)",
+                                    expected_types.len()
+                                ),
+                            )
+                            .suggest("fix_call_arguments"),
+                        );
+                    }
+                    for (expected, arg) in expected_types.iter().zip(args.iter()) {
+                        let found = self.infer_expr(arg, locals, node);
+                        self.check_expr_assignable(
+                            expected,
+                            arg,
+                            &found,
+                            node,
+                            TypeDiagnostic::new(
+                                "argument_type_mismatch",
+                                format!("argument to builtin '{name}' has wrong type"),
+                                &["replace_call_argument"],
+                            ),
+                        );
+                    }
+                    for arg in args.iter().skip(expected_types.len()) {
+                        self.infer_expr(arg, locals, node);
+                    }
+                    return builtin_call_type(name).unwrap_or(Type::Unknown);
                 }
                 if let Some(ty) = builtin_call_type(name) {
                     for arg in args {
@@ -2292,6 +2494,7 @@ impl<'a> Checker<'a> {
             }
             Expr::Field { base, field } => {
                 let base_ty = self.infer_expr(base, locals, node);
+                let base_ty = self.normalize_associated_type_projections(&base_ty, locals);
                 let is_len_container = matches!(base_ty, Type::Slice { .. } | Type::Array { .. })
                     || matches!(&base_ty, Type::Generic { name, .. } if name == "Vec" || name == "Map")
                     || matches!(&base_ty, Type::Primitive(name) if name == "str");
@@ -2356,7 +2559,8 @@ impl<'a> Checker<'a> {
                         &["insert_explicit_cast", "replace_index_expression"],
                     ),
                 );
-                self.infer_expr(base, locals, node)
+                let base_ty = self.infer_expr(base, locals, node);
+                self.normalize_associated_type_projections(&base_ty, locals)
                     .element_type()
                     .unwrap_or_else(|| {
                         self.diagnostics.push(
@@ -2369,6 +2573,52 @@ impl<'a> Checker<'a> {
                         );
                         Type::Unknown
                     })
+            }
+            Expr::SliceRange { base, start, end } => {
+                let usize_ty = Type::Primitive("usize".to_string());
+                for bound in [start.as_ref(), end.as_ref()] {
+                    let bound_ty = self.infer_expr(bound, locals, node);
+                    self.check_expr_assignable(
+                        &usize_ty,
+                        bound,
+                        &bound_ty,
+                        node,
+                        TypeDiagnostic::new(
+                            "slice_range_bound_not_integer",
+                            "slice range bounds must be integers",
+                            &["insert_explicit_cast", "replace_range_bound"],
+                        ),
+                    );
+                }
+                let base_ty = self.infer_expr(base, locals, node);
+                match self.normalize_associated_type_projections(&base_ty, locals) {
+                    Type::Slice { mutable, elem } => Type::Slice { mutable, elem },
+                    Type::Array { elem, .. } => Type::Slice {
+                        mutable: false,
+                        elem,
+                    },
+                    // Projecting an owned `Vec[T]` yields the same immutable
+                    // view an owned buffer lends elsewhere, so a bounded window
+                    // of a buffer can be taken without copying or moving it.
+                    Type::Generic { ref name, ref args } if name == "Vec" && args.len() == 1 => {
+                        Type::Slice {
+                            mutable: false,
+                            elem: Box::new(args[0].clone()),
+                        }
+                    }
+                    Type::Unknown => Type::Unknown,
+                    _ => {
+                        self.diagnostics.push(
+                            Diagnostic::new(
+                                "slice_range_type",
+                                node,
+                                "slice range base must be an array or slice",
+                            )
+                            .suggest("replace_slice_range_base"),
+                        );
+                        Type::Unknown
+                    }
+                }
             }
         }
     }
@@ -2471,11 +2721,35 @@ impl<'a> Checker<'a> {
         node: &str,
     ) -> Option<Type> {
         let expected_arity = match name {
-            "task_spawn" | "channel_send" => 2,
-            "task_group_spawn" => 3,
+            "wake_token_new" | "clock_new" => 0,
+            "task_spawn" | "task_spawn_parked" | "channel_send" | "timer_after" | "task_then"
+            | "task_wait_on" | "task_wait" | "timer_interval" | "clock_advance"
+            | "readiness_wait" | "task_race" => 2,
+            "task_spawn_on"
+            | "task_group_spawn"
+            | "task_group_spawn_wait"
+            | "timer_reschedule"
+            | "task_timeout"
+            | "readiness_wait_timeout" => 3,
+            "wake_token_wait" => 2,
             "task_await"
+            | "task_poll"
             | "task_cancel"
+            | "task_wake"
+            | "wake_token_signal"
+            | "wake_token_select"
+            | "readiness_arm_token"
+            | "readiness_arm_task"
+            | "readiness_arm_channel"
+            | "readiness_arm_channel_send"
+            | "readiness_arm_file_read"
+            | "readiness_arm_file_create"
+            | "timer_cancel"
+            | "timer_interval_next"
+            | "timer_interval_cancel"
+            | "clock_now"
             | "task_group_new"
+            | "task_group_await_next"
             | "task_group_await_all"
             | "task_group_cancel"
             | "channel_new"
@@ -2498,7 +2772,271 @@ impl<'a> Checker<'a> {
             .map(|arg| self.infer_expr(arg, locals, node))
             .collect::<Vec<_>>();
         match name {
-            "task_spawn" => {
+            "clock_new" => Some(Type::Named("AsyncClock".to_string())),
+            "clock_now" => {
+                expect_named_value(
+                    found.first(),
+                    "AsyncClock",
+                    "clock_now",
+                    node,
+                    &mut self.diagnostics,
+                );
+                Some(Type::Primitive("usize".to_string()))
+            }
+            "timer_after" | "clock_advance" => {
+                expect_named_value(
+                    found.first(),
+                    "AsyncClock",
+                    name,
+                    node,
+                    &mut self.diagnostics,
+                );
+                if let Some(ticks) = found.get(1) {
+                    if !ticks.is_integer() && *ticks != Type::Unknown {
+                        self.diagnostics.push(
+                            Diagnostic::new(
+                                "clock_tick_type",
+                                node,
+                                format!("{name} requires an integer tick count"),
+                            )
+                            .suggest("replace_tick_count"),
+                        );
+                    }
+                }
+                if name == "timer_after" {
+                    Some(Type::Named("WakeToken".to_string()))
+                } else {
+                    Some(Type::Primitive("usize".to_string()))
+                }
+            }
+            "timer_cancel" => {
+                expect_named_value(
+                    found.first(),
+                    "WakeToken",
+                    "timer_cancel",
+                    node,
+                    &mut self.diagnostics,
+                );
+                Some(Type::Bool)
+            }
+            "timer_interval" => {
+                expect_named_value(
+                    found.first(),
+                    "AsyncClock",
+                    "timer_interval",
+                    node,
+                    &mut self.diagnostics,
+                );
+                if let Some(period) = found.get(1) {
+                    if !period.is_integer() && *period != Type::Unknown {
+                        self.diagnostics.push(
+                            Diagnostic::new(
+                                "timer_interval_period_type",
+                                node,
+                                "timer interval period must be an integer",
+                            )
+                            .suggest("replace_timer_interval_period"),
+                        );
+                    }
+                }
+                Some(Type::Named("IntervalTimer".to_string()))
+            }
+            "timer_interval_next" => {
+                expect_named_value(
+                    found.first(),
+                    "IntervalTimer",
+                    "timer_interval_next",
+                    node,
+                    &mut self.diagnostics,
+                );
+                Some(Type::Named("WakeToken".to_string()))
+            }
+            "timer_interval_cancel" => {
+                expect_named_value(
+                    found.first(),
+                    "IntervalTimer",
+                    "timer_interval_cancel",
+                    node,
+                    &mut self.diagnostics,
+                );
+                Some(Type::Bool)
+            }
+            "timer_reschedule" => {
+                expect_named_value(
+                    found.first(),
+                    "AsyncClock",
+                    "timer_reschedule",
+                    node,
+                    &mut self.diagnostics,
+                );
+                expect_named_value(
+                    found.get(1),
+                    "WakeToken",
+                    "timer_reschedule",
+                    node,
+                    &mut self.diagnostics,
+                );
+                if let Some(delay) = found.get(2) {
+                    if !delay.is_integer() && *delay != Type::Unknown {
+                        self.diagnostics.push(
+                            Diagnostic::new(
+                                "timer_delay_type",
+                                node,
+                                "timer reschedule delay must be an integer",
+                            )
+                            .suggest("replace_timer_delay"),
+                        );
+                    }
+                }
+                Some(Type::Bool)
+            }
+            "wake_token_new" => Some(Type::Named("WakeToken".to_string())),
+            "wake_token_signal" => {
+                expect_named_value(
+                    found.first(),
+                    "WakeToken",
+                    "wake_token_signal",
+                    node,
+                    &mut self.diagnostics,
+                );
+                Some(Type::Primitive("usize".to_string()))
+            }
+            "wake_token_select" => {
+                let element = generic_element_type(
+                    found.first(),
+                    "Vec",
+                    "wake_token_select",
+                    node,
+                    &mut self.diagnostics,
+                );
+                expect_named_value(
+                    Some(&element),
+                    "WakeToken",
+                    "wake_token_select",
+                    node,
+                    &mut self.diagnostics,
+                );
+                Some(Type::Generic {
+                    name: "Option".to_string(),
+                    args: vec![Type::Primitive("usize".to_string())],
+                })
+            }
+            "wake_token_wait" => {
+                expect_named_value(
+                    found.first(),
+                    "AsyncClock",
+                    "wake_token_wait",
+                    node,
+                    &mut self.diagnostics,
+                );
+                let element = generic_element_type(
+                    found.get(1),
+                    "Vec",
+                    "wake_token_wait",
+                    node,
+                    &mut self.diagnostics,
+                );
+                expect_named_value(
+                    Some(&element),
+                    "WakeToken",
+                    "wake_token_wait",
+                    node,
+                    &mut self.diagnostics,
+                );
+                Some(Type::Primitive("usize".to_string()))
+            }
+            "readiness_arm_token" => {
+                expect_named_value(
+                    found.first(),
+                    "WakeToken",
+                    "readiness_arm_token",
+                    node,
+                    &mut self.diagnostics,
+                );
+                Some(Type::Named("ReadinessArm".to_string()))
+            }
+            "readiness_arm_task" => {
+                expect_generic_value(
+                    found.first(),
+                    "Task",
+                    "readiness_arm_task",
+                    node,
+                    &mut self.diagnostics,
+                );
+                Some(Type::Named("ReadinessArm".to_string()))
+            }
+            "readiness_arm_channel" | "readiness_arm_channel_send" => {
+                expect_generic_value(found.first(), "Channel", name, node, &mut self.diagnostics);
+                Some(Type::Named("ReadinessArm".to_string()))
+            }
+            "readiness_arm_file_read" | "readiness_arm_file_create" => {
+                expect_named_value(found.first(), "Path", name, node, &mut self.diagnostics);
+                Some(Type::Named("ReadinessArm".to_string()))
+            }
+            "readiness_wait" => {
+                expect_named_value(
+                    found.first(),
+                    "AsyncClock",
+                    "readiness_wait",
+                    node,
+                    &mut self.diagnostics,
+                );
+                let element = generic_element_type(
+                    found.get(1),
+                    "Vec",
+                    "readiness_wait",
+                    node,
+                    &mut self.diagnostics,
+                );
+                expect_named_value(
+                    Some(&element),
+                    "ReadinessArm",
+                    "readiness_wait",
+                    node,
+                    &mut self.diagnostics,
+                );
+                Some(Type::Primitive("usize".to_string()))
+            }
+            "readiness_wait_timeout" => {
+                expect_named_value(
+                    found.first(),
+                    "AsyncClock",
+                    "readiness_wait_timeout",
+                    node,
+                    &mut self.diagnostics,
+                );
+                let element = generic_element_type(
+                    found.get(1),
+                    "Vec",
+                    "readiness_wait_timeout",
+                    node,
+                    &mut self.diagnostics,
+                );
+                expect_named_value(
+                    Some(&element),
+                    "ReadinessArm",
+                    "readiness_wait_timeout",
+                    node,
+                    &mut self.diagnostics,
+                );
+                if let Some(delay) = found.get(2) {
+                    if !delay.is_integer() && *delay != Type::Unknown {
+                        self.diagnostics.push(
+                            Diagnostic::new(
+                                "clock_tick_type",
+                                node,
+                                "readiness_wait_timeout requires an integer tick count",
+                            )
+                            .suggest("replace_tick_count"),
+                        );
+                    }
+                }
+                Some(Type::Generic {
+                    name: "Option".to_string(),
+                    args: vec![Type::Primitive("usize".to_string())],
+                })
+            }
+            "task_spawn" | "task_spawn_parked" => {
                 let Some((params, ret, _callable_effects)) =
                     found.first().and_then(Type::function_parts)
                 else {
@@ -2506,7 +3044,7 @@ impl<'a> Checker<'a> {
                         Diagnostic::new(
                             "task_not_callable",
                             node,
-                            "task_spawn requires a typed one-argument function value",
+                            format!("{name} requires a typed one-argument function value"),
                         )
                         .suggest("pass_function_or_closure"),
                     );
@@ -2520,7 +3058,7 @@ impl<'a> Checker<'a> {
                         Diagnostic::new(
                             "task_arity",
                             node,
-                            "task_spawn callable must take exactly one argument",
+                            format!("{name} callable must take exactly one argument"),
                         )
                         .suggest("wrap_callable_in_one_argument_closure"),
                     );
@@ -2547,6 +3085,62 @@ impl<'a> Checker<'a> {
                     args: vec![ret.clone()],
                 })
             }
+            "task_spawn_on" => {
+                expect_named_value(
+                    found.first(),
+                    "WakeToken",
+                    "task_spawn_on",
+                    node,
+                    &mut self.diagnostics,
+                );
+                let Some((params, ret, _callable_effects)) =
+                    found.get(1).and_then(Type::function_parts)
+                else {
+                    self.diagnostics.push(
+                        Diagnostic::new(
+                            "task_not_callable",
+                            node,
+                            "task_spawn_on requires a typed one-argument function value",
+                        )
+                        .suggest("pass_function_or_closure"),
+                    );
+                    return Some(Type::Generic {
+                        name: "Task".to_string(),
+                        args: vec![Type::Unknown],
+                    });
+                };
+                if params.len() != 1 {
+                    self.diagnostics.push(
+                        Diagnostic::new(
+                            "task_arity",
+                            node,
+                            "task_spawn_on callable must take exactly one argument",
+                        )
+                        .suggest("wrap_callable_in_one_argument_closure"),
+                    );
+                    return Some(Type::Generic {
+                        name: "Task".to_string(),
+                        args: vec![Type::Unknown],
+                    });
+                }
+                if let Some(input_ty) = found.get(2) {
+                    self.check_expr_assignable(
+                        &params[0],
+                        &args[2],
+                        input_ty,
+                        node,
+                        TypeDiagnostic::new(
+                            "task_input_type",
+                            "task input does not match the callable parameter",
+                            &["replace_task_input", "insert_explicit_cast"],
+                        ),
+                    );
+                }
+                Some(Type::Generic {
+                    name: "Task".to_string(),
+                    args: vec![ret.clone()],
+                })
+            }
             "task_await" => Some(generic_element_type(
                 found.first(),
                 "Task",
@@ -2554,11 +3148,173 @@ impl<'a> Checker<'a> {
                 node,
                 &mut self.diagnostics,
             )),
+            "task_poll" => Some(Type::Generic {
+                name: "Option".to_string(),
+                args: vec![generic_element_type(
+                    found.first(),
+                    "Task",
+                    "task_poll",
+                    node,
+                    &mut self.diagnostics,
+                )],
+            }),
+            "task_then" => {
+                let input = generic_element_type(
+                    found.first(),
+                    "Task",
+                    "task_then",
+                    node,
+                    &mut self.diagnostics,
+                );
+                let Some((params, ret, _callable_effects)) =
+                    found.get(1).and_then(Type::function_parts)
+                else {
+                    self.diagnostics.push(
+                        Diagnostic::new(
+                            "task_not_callable",
+                            node,
+                            "task_then requires a typed one-argument continuation",
+                        )
+                        .suggest("pass_function_or_closure"),
+                    );
+                    return Some(Type::Generic {
+                        name: "Task".to_string(),
+                        args: vec![Type::Unknown],
+                    });
+                };
+                if params.len() != 1 {
+                    self.diagnostics.push(
+                        Diagnostic::new(
+                            "task_arity",
+                            node,
+                            "task_then continuation must take exactly one argument",
+                        )
+                        .suggest("wrap_callable_in_one_argument_closure"),
+                    );
+                } else if input != Type::Unknown && params[0] != Type::Unknown {
+                    self.check_expr_assignable(
+                        &params[0],
+                        &args[0],
+                        &input,
+                        node,
+                        TypeDiagnostic::new(
+                            "task_continuation_input_type",
+                            "task result does not match the continuation parameter",
+                            &["replace_task_continuation", "insert_explicit_cast"],
+                        ),
+                    );
+                }
+                Some(Type::Generic {
+                    name: "Task".to_string(),
+                    args: vec![ret.clone()],
+                })
+            }
+            "task_wait_on" => {
+                let result = generic_element_type(
+                    found.first(),
+                    "Task",
+                    "task_wait_on",
+                    node,
+                    &mut self.diagnostics,
+                );
+                expect_named_value(
+                    found.get(1),
+                    "WakeToken",
+                    "task_wait_on",
+                    node,
+                    &mut self.diagnostics,
+                );
+                Some(Type::Generic {
+                    name: "Task".to_string(),
+                    args: vec![result],
+                })
+            }
+            "task_wait" => {
+                expect_named_value(
+                    found.first(),
+                    "AsyncClock",
+                    "task_wait",
+                    node,
+                    &mut self.diagnostics,
+                );
+                Some(generic_element_type(
+                    found.get(1),
+                    "Task",
+                    "task_wait",
+                    node,
+                    &mut self.diagnostics,
+                ))
+            }
+            "task_race" => {
+                expect_named_value(
+                    found.first(),
+                    "AsyncClock",
+                    "task_race",
+                    node,
+                    &mut self.diagnostics,
+                );
+                let task = generic_element_type(
+                    found.get(1),
+                    "Vec",
+                    "task_race",
+                    node,
+                    &mut self.diagnostics,
+                );
+                Some(generic_element_type(
+                    Some(&task),
+                    "Task",
+                    "task_race",
+                    node,
+                    &mut self.diagnostics,
+                ))
+            }
+            "task_timeout" => {
+                expect_named_value(
+                    found.first(),
+                    "AsyncClock",
+                    "task_timeout",
+                    node,
+                    &mut self.diagnostics,
+                );
+                let result = generic_element_type(
+                    found.get(1),
+                    "Task",
+                    "task_timeout",
+                    node,
+                    &mut self.diagnostics,
+                );
+                if let Some(delay) = found.get(2) {
+                    if !delay.is_integer() && *delay != Type::Unknown {
+                        self.diagnostics.push(
+                            Diagnostic::new(
+                                "clock_tick_type",
+                                node,
+                                "task_timeout requires an integer tick count",
+                            )
+                            .suggest("replace_tick_count"),
+                        );
+                    }
+                }
+                Some(Type::Generic {
+                    name: "Option".to_string(),
+                    args: vec![result],
+                })
+            }
             "task_cancel" => {
                 expect_generic_value(
                     found.first(),
                     "Task",
                     "task_cancel",
+                    node,
+                    &mut self.diagnostics,
+                );
+                Some(Type::Bool)
+            }
+            "task_wake" => {
+                expect_generic_value(
+                    found.first(),
+                    "Task",
+                    "task_wake",
                     node,
                     &mut self.diagnostics,
                 );
@@ -2582,7 +3338,7 @@ impl<'a> Checker<'a> {
                     args: vec![Type::Unknown],
                 })
             }
-            "task_group_spawn" => {
+            "task_group_spawn" | "task_group_spawn_wait" => {
                 let group_elem = generic_element_type(
                     found.first(),
                     "TaskGroup",
@@ -2597,7 +3353,7 @@ impl<'a> Checker<'a> {
                         Diagnostic::new(
                             "task_not_callable",
                             node,
-                            "task_group_spawn requires a typed one-argument function value",
+                            format!("{name} requires a typed one-argument function value"),
                         )
                         .suggest("pass_function_or_closure"),
                     );
@@ -2637,7 +3393,14 @@ impl<'a> Checker<'a> {
                         ),
                     );
                 }
-                Some(Type::Bool)
+                if name == "task_group_spawn" {
+                    Some(Type::Bool)
+                } else {
+                    Some(Type::Generic {
+                        name: "Option".to_string(),
+                        args: vec![group_elem],
+                    })
+                }
             }
             "task_group_await_all" => Some(Type::Generic {
                 name: "Vec".to_string(),
@@ -2645,6 +3408,16 @@ impl<'a> Checker<'a> {
                     found.first(),
                     "TaskGroup",
                     "task_group_await_all",
+                    node,
+                    &mut self.diagnostics,
+                )],
+            }),
+            "task_group_await_next" => Some(Type::Generic {
+                name: "Option".to_string(),
+                args: vec![generic_element_type(
+                    found.first(),
+                    "TaskGroup",
+                    "task_group_await_next",
                     node,
                     &mut self.diagnostics,
                 )],
@@ -3125,13 +3898,13 @@ impl<'a> Checker<'a> {
 
     fn check_safety_function(&mut self, function: &FunctionDecl) {
         let mut env = OwnershipEnv::for_function(function);
-        self.check_safety_body(
-            &function.body,
-            &function.ret,
-            &mut env,
-            function,
-            &BTreeSet::new(),
-        );
+        let projection_locals = LocalTypeEnv::for_function(function);
+        for binding in env.bindings.values_mut() {
+            binding.ty =
+                self.normalize_associated_type_projections(&binding.ty, &projection_locals);
+        }
+        let ret = self.normalize_associated_type_projections(&function.ret, &projection_locals);
+        self.check_safety_body(&function.body, &ret, &mut env, function, &BTreeSet::new());
     }
 
     fn check_effects(&mut self) {
@@ -3210,7 +3983,10 @@ impl<'a> Checker<'a> {
         match stmt {
             Stmt::Let { name, ty, expr } => {
                 let expr_ty = self.safety_expr_type(expr, env);
-                let binding_ty = ty.clone().unwrap_or(expr_ty);
+                let binding_ty = ty
+                    .as_ref()
+                    .map(|ty| self.normalize_safety_type(ty))
+                    .unwrap_or(expr_ty);
                 let value_use = if moves_into_type(&binding_ty) {
                     ValueUse::Move
                 } else {
@@ -3223,17 +3999,18 @@ impl<'a> Checker<'a> {
                     future: future_uses,
                 };
                 self.check_expr_ownership(expr, env, function, &function.id, value_use, liveness);
-                let origin = if is_borrow_type(&binding_ty) {
+                let carries_borrow = type_contains_borrow(&binding_ty);
+                let origin = if carries_borrow {
                     self.reference_origin(expr, env)
                 } else {
                     ReferenceOrigin::Local
                 };
-                let borrow_root = if is_borrow_type(&binding_ty) {
+                let borrow_root = if carries_borrow {
                     self.borrow_root(expr, env)
                 } else {
                     None
                 };
-                let borrow_place = if is_borrow_type(&binding_ty) {
+                let borrow_place = if carries_borrow {
                     self.borrow_place(expr, env)
                 } else {
                     None
@@ -3461,17 +4238,18 @@ impl<'a> Checker<'a> {
                 self.check_expr_ownership(expr, env, function, &function.id, value_use, liveness);
                 self.check_lvalue_safety(target, env, function, &function.id, liveness);
                 if let Expr::Var(name) = target {
-                    let origin = if is_borrow_type(&expected) {
+                    let carries_borrow = type_contains_borrow(&expected);
+                    let origin = if carries_borrow {
                         self.reference_origin(expr, env)
                     } else {
                         ReferenceOrigin::Local
                     };
-                    let borrow_root = if is_borrow_type(&expected) {
+                    let borrow_root = if carries_borrow {
                         self.borrow_root(expr, env)
                     } else {
                         None
                     };
-                    let borrow_place = if is_borrow_type(&expected) {
+                    let borrow_place = if carries_borrow {
                         self.borrow_place(expr, env)
                     } else {
                         None
@@ -3574,6 +4352,11 @@ impl<'a> Checker<'a> {
                 self.check_expr_ownership(base, env, function, node, ValueUse::Read, liveness);
                 self.check_expr_ownership(index, env, function, node, ValueUse::Read, liveness);
             }
+            Expr::SliceRange { base, start, end } => {
+                self.check_expr_ownership(base, env, function, node, ValueUse::Read, liveness);
+                self.check_expr_ownership(start, env, function, node, ValueUse::Read, liveness);
+                self.check_expr_ownership(end, env, function, node, ValueUse::Read, liveness);
+            }
         }
     }
 
@@ -3586,6 +4369,14 @@ impl<'a> Checker<'a> {
         node: &str,
         liveness: BorrowLiveness<'_>,
     ) {
+        if env
+            .get(name)
+            .map(|binding| is_affine_function_type(&binding.ty))
+            .unwrap_or(false)
+        {
+            self.check_move_path_available(name, &[], env, node);
+            env.mark_moved(name);
+        }
         let arg_types = args
             .iter()
             .map(|arg| self.safety_expr_type(arg, env))
@@ -3621,9 +4412,15 @@ impl<'a> Checker<'a> {
             return;
         }
 
-        if name == "task_spawn" {
+        if matches!(name, "task_spawn" | "task_spawn_parked") {
             if let Some(callable) = args.first() {
-                self.check_expr_ownership(callable, env, function, node, ValueUse::Read, liveness);
+                let callable_ty = self.safety_expr_type(callable, env);
+                let value_use = if is_affine_function_type(&callable_ty) {
+                    ValueUse::Move
+                } else {
+                    ValueUse::Read
+                };
+                self.check_expr_ownership(callable, env, function, node, value_use, liveness);
             }
             if let Some(input) = args.get(1) {
                 let input_ty = self.safety_expr_type(input, env);
@@ -3637,12 +4434,102 @@ impl<'a> Checker<'a> {
             return;
         }
 
-        if name == "task_group_spawn" {
+        if name == "task_then" {
+            if let Some(task) = args.first() {
+                self.check_expr_ownership(task, env, function, node, ValueUse::Move, liveness);
+            }
+            if let Some(callable) = args.get(1) {
+                let callable_ty = self.safety_expr_type(callable, env);
+                let value_use = if is_affine_function_type(&callable_ty) {
+                    ValueUse::Move
+                } else {
+                    ValueUse::Read
+                };
+                self.check_expr_ownership(callable, env, function, node, value_use, liveness);
+            }
+            return;
+        }
+
+        if name == "task_wait_on" {
+            if let Some(task) = args.first() {
+                self.check_expr_ownership(task, env, function, node, ValueUse::Move, liveness);
+            }
+            if let Some(token) = args.get(1) {
+                self.check_expr_ownership(token, env, function, node, ValueUse::Read, liveness);
+            }
+            return;
+        }
+
+        if name == "task_wait" {
+            if let Some(clock) = args.first() {
+                self.check_expr_ownership(clock, env, function, node, ValueUse::Read, liveness);
+            }
+            if let Some(task) = args.get(1) {
+                self.check_expr_ownership(task, env, function, node, ValueUse::Move, liveness);
+            }
+            return;
+        }
+
+        if name == "task_race" {
+            if let Some(clock) = args.first() {
+                self.check_expr_ownership(clock, env, function, node, ValueUse::Read, liveness);
+            }
+            if let Some(tasks) = args.get(1) {
+                self.check_expr_ownership(tasks, env, function, node, ValueUse::Move, liveness);
+            }
+            return;
+        }
+
+        if name == "task_timeout" {
+            if let Some(clock) = args.first() {
+                self.check_expr_ownership(clock, env, function, node, ValueUse::Read, liveness);
+            }
+            if let Some(task) = args.get(1) {
+                self.check_expr_ownership(task, env, function, node, ValueUse::Move, liveness);
+            }
+            if let Some(delay) = args.get(2) {
+                self.check_expr_ownership(delay, env, function, node, ValueUse::Read, liveness);
+            }
+            return;
+        }
+
+        if name == "task_spawn_on" {
+            if let Some(token) = args.first() {
+                self.check_expr_ownership(token, env, function, node, ValueUse::Read, liveness);
+            }
+            if let Some(callable) = args.get(1) {
+                let callable_ty = self.safety_expr_type(callable, env);
+                let value_use = if is_affine_function_type(&callable_ty) {
+                    ValueUse::Move
+                } else {
+                    ValueUse::Read
+                };
+                self.check_expr_ownership(callable, env, function, node, value_use, liveness);
+            }
+            if let Some(input) = args.get(2) {
+                let input_ty = self.safety_expr_type(input, env);
+                let value_use = if moves_into_type(&input_ty) {
+                    ValueUse::Move
+                } else {
+                    ValueUse::Read
+                };
+                self.check_expr_ownership(input, env, function, node, value_use, liveness);
+            }
+            return;
+        }
+
+        if matches!(name, "task_group_spawn" | "task_group_spawn_wait") {
             if let Some(group) = args.first() {
                 self.check_expr_ownership(group, env, function, node, ValueUse::Read, liveness);
             }
             if let Some(callable) = args.get(1) {
-                self.check_expr_ownership(callable, env, function, node, ValueUse::Read, liveness);
+                let callable_ty = self.safety_expr_type(callable, env);
+                let value_use = if is_affine_function_type(&callable_ty) {
+                    ValueUse::Move
+                } else {
+                    ValueUse::Read
+                };
+                self.check_expr_ownership(callable, env, function, node, value_use, liveness);
             }
             if let Some(input) = args.get(2) {
                 let input_ty = self.safety_expr_type(input, env);
@@ -3658,7 +4545,11 @@ impl<'a> Checker<'a> {
 
         if matches!(
             name,
-            "task_await" | "task_cancel" | "task_group_await_all" | "task_group_cancel"
+            "task_await"
+                | "task_cancel"
+                | "task_group_await_all"
+                | "task_group_cancel"
+                | "wake_token_select"
         ) {
             for arg in args {
                 self.check_expr_ownership(arg, env, function, node, ValueUse::Move, liveness);
@@ -3666,10 +4557,92 @@ impl<'a> Checker<'a> {
             return;
         }
 
+        if name == "wake_token_wait" {
+            if let Some(clock) = args.first() {
+                self.check_expr_ownership(clock, env, function, node, ValueUse::Read, liveness);
+            }
+            if let Some(arms) = args.get(1) {
+                self.check_expr_ownership(arms, env, function, node, ValueUse::Move, liveness);
+            }
+            return;
+        }
+
+        if matches!(
+            name,
+            "readiness_arm_token"
+                | "readiness_arm_task"
+                | "readiness_arm_channel"
+                | "readiness_arm_channel_send"
+                | "readiness_arm_file_read"
+                | "readiness_arm_file_create"
+        ) {
+            for arg in args {
+                self.check_expr_ownership(arg, env, function, node, ValueUse::Read, liveness);
+            }
+            return;
+        }
+
+        if name == "readiness_wait" {
+            if let Some(clock) = args.first() {
+                self.check_expr_ownership(clock, env, function, node, ValueUse::Read, liveness);
+            }
+            if let Some(arms) = args.get(1) {
+                self.check_expr_ownership(arms, env, function, node, ValueUse::Move, liveness);
+            }
+            return;
+        }
+
+        if name == "readiness_wait_timeout" {
+            if let Some(clock) = args.first() {
+                self.check_expr_ownership(clock, env, function, node, ValueUse::Read, liveness);
+            }
+            if let Some(arms) = args.get(1) {
+                self.check_expr_ownership(arms, env, function, node, ValueUse::Move, liveness);
+            }
+            if let Some(delay) = args.get(2) {
+                self.check_expr_ownership(delay, env, function, node, ValueUse::Read, liveness);
+            }
+            return;
+        }
+
+        if matches!(
+            name,
+            "task_group_await_next"
+                | "task_poll"
+                | "task_wake"
+                | "wake_token_signal"
+                | "clock_now"
+                | "timer_after"
+                | "timer_cancel"
+                | "timer_interval"
+                | "timer_interval_next"
+                | "timer_interval_cancel"
+                | "clock_advance"
+        ) {
+            for arg in args {
+                self.check_expr_ownership(arg, env, function, node, ValueUse::Read, liveness);
+            }
+            return;
+        }
+
+        if name == "timer_reschedule" {
+            if let Some(clock) = args.first() {
+                self.check_expr_ownership(clock, env, function, node, ValueUse::Read, liveness);
+            }
+            if let Some(token) = args.get(1) {
+                self.check_expr_ownership(token, env, function, node, ValueUse::Read, liveness);
+            }
+            if let Some(delay) = args.get(2) {
+                self.check_expr_ownership(delay, env, function, node, ValueUse::Read, liveness);
+            }
+            return;
+        }
+
         if let Some(struct_decl) = self.type_env.structs.get(name) {
             let fields = struct_decl.fields.clone();
             for (field, arg) in fields.iter().zip(args.iter()) {
-                let value_use = if moves_into_type(&field.ty) {
+                let field_ty = self.normalize_safety_type(&field.ty);
+                let value_use = if moves_into_type(&field_ty) {
                     ValueUse::Move
                 } else {
                     ValueUse::Read
@@ -3685,7 +4658,24 @@ impl<'a> Checker<'a> {
             }
             return;
         };
-        let params = callee.params.clone();
+        let mut generic_bindings = HashMap::new();
+        if !callee.type_params.is_empty() {
+            for (param, found) in callee.params.iter().zip(arg_types.iter()) {
+                unify_type_params(&param.ty, found, &callee.type_params, &mut generic_bindings);
+            }
+        }
+        let params = callee
+            .params
+            .iter()
+            .map(|param| crate::ast::Param {
+                name: param.name.clone(),
+                ty: self.normalize_safety_type(&substitute_type_params(
+                    &param.ty,
+                    &callee.type_params,
+                    &generic_bindings,
+                )),
+            })
+            .collect::<Vec<_>>();
         self.check_call_borrow_aliases(name, &params, args, env, node);
         self.check_call_borrow_activations(name, &params, args, env, node, liveness);
         for (param, arg) in params.iter().zip(args.iter()) {
@@ -4128,6 +5118,10 @@ impl<'a> Checker<'a> {
                 })
                 .unwrap_or(ReferenceOrigin::Unknown),
             Expr::Cast { expr, .. } | Expr::Unary { expr, .. } => self.reference_origin(expr, env),
+            Expr::SliceRange { base, .. } => self.reference_origin(base, env),
+            Expr::Index { base, .. } if type_contains_borrow(&self.safety_expr_type(expr, env)) => {
+                self.reference_origin(base, env)
+            }
             Expr::Field { .. } | Expr::Index { .. } => ReferenceOrigin::Unknown,
             _ => ReferenceOrigin::Local,
         }
@@ -4155,7 +5149,9 @@ impl<'a> Checker<'a> {
                     }
                 })
                 .unwrap_or_default(),
-            Expr::Field { .. } | Expr::Index { .. } => self.places_for_expr(expr, env),
+            Expr::Field { .. } | Expr::Index { .. } | Expr::SliceRange { .. } => {
+                self.places_for_expr(expr, env)
+            }
             Expr::Call { name, args } => self
                 .returned_borrow_param_indices_by_name(name)
                 .and_then(|indices| single_borrow_param_index(&indices))
@@ -4210,6 +5206,18 @@ impl<'a> Checker<'a> {
                     place.with_projection(projection)
                 })
                 .collect(),
+            Expr::SliceRange { base, start, end } => self
+                .places_for_expr(base, env)
+                .into_iter()
+                .map(|place| {
+                    let projection =
+                        match (integer_literal_value(start), integer_literal_value(end)) {
+                            (Some(start), Some(end)) => PlaceProjection::RangeConst(start, end),
+                            _ => PlaceProjection::RangeUnknown,
+                        };
+                    place.with_projection(projection)
+                })
+                .collect(),
             Expr::Cast { expr, .. } | Expr::Unary { expr, .. } => self.places_for_expr(expr, env),
             Expr::Call { .. }
             | Expr::TraitConst { .. }
@@ -4228,7 +5236,7 @@ impl<'a> Checker<'a> {
                 .get(name)
                 .filter(|binding| is_borrow_type(&binding.ty))
                 .map(|_| name.clone()),
-            Expr::Field { base, .. } | Expr::Index { base, .. } => {
+            Expr::Field { base, .. } | Expr::Index { base, .. } | Expr::SliceRange { base, .. } => {
                 root_var(base).and_then(|name| {
                     env.get(name)
                         .filter(|binding| is_borrow_type(&binding.ty))
@@ -4266,8 +5274,12 @@ impl<'a> Checker<'a> {
         ))
     }
 
+    fn normalize_safety_type(&self, ty: &Type) -> Type {
+        self.normalize_associated_type_projections(ty, &LocalTypeEnv::default())
+    }
+
     fn safety_expr_type(&self, expr: &Expr, env: &OwnershipEnv) -> Type {
-        match expr {
+        let ty = match expr {
             Expr::Lambda { params, .. } => {
                 let mut args: Vec<Type> = params.iter().map(|param| param.ty.clone()).collect();
                 args.push(Type::Unknown);
@@ -4358,7 +5370,16 @@ impl<'a> Checker<'a> {
                 .safety_expr_type(base, env)
                 .element_type()
                 .unwrap_or(Type::Unknown),
-        }
+            Expr::SliceRange { base, .. } => match self.safety_expr_type(base, env) {
+                Type::Slice { mutable, elem } => Type::Slice { mutable, elem },
+                Type::Array { elem, .. } => Type::Slice {
+                    mutable: false,
+                    elem,
+                },
+                _ => Type::Unknown,
+            },
+        };
+        self.normalize_safety_type(&ty)
     }
 
     fn is_mutable_index_target(&mut self, expr: &Expr, locals: &LocalTypeEnv) -> bool {
@@ -4366,6 +5387,8 @@ impl<'a> Checker<'a> {
             Expr::Index { base, .. } => match base.as_ref() {
                 Expr::Var(name) => locals
                     .get(name)
+                    .map(|ty| self.normalize_associated_type_projections(ty, locals))
+                    .as_ref()
                     .map(is_mutable_index_target_type)
                     .unwrap_or(false),
                 _ => false,
@@ -4400,11 +5423,36 @@ fn is_assignable(expected: &Type, found: &Type) -> bool {
     {
         return expected_elem == found_elem;
     }
+    // An owned `Vec[T]` reads as an immutable `&[T]`. The shared borrow grants
+    // no mutation and the borrow checker keeps it from outliving its owner, so
+    // this only lets a caller lend a buffer it already owns. Mutable `&mut[T]`
+    // is deliberately excluded: that would need an exclusive loan of the owner.
+    if let (
+        Type::Slice {
+            mutable: false,
+            elem: expected_elem,
+        },
+        Type::Generic { name, args },
+    ) = (expected, found)
+    {
+        if name == "Vec" {
+            if let [found_elem] = args.as_slice() {
+                return expected_elem.as_ref() == found_elem;
+            }
+        }
+    }
     if let (
         Some((expected_params, expected_ret, expected_effects)),
         Some((found_params, found_ret, found_effects)),
     ) = (expected.function_parts(), found.function_parts())
     {
+        let expected_once = is_affine_function_type(expected);
+        let found_once = is_affine_function_type(found);
+        // A reusable callable can be safely consumed through a one-shot
+        // contract, but an affine environment cannot satisfy a copyable Fn.
+        if !expected_once && found_once {
+            return false;
+        }
         let expected_binders = expected.function_binders().unwrap_or_default();
         let found_binders = found.function_binders().unwrap_or_default();
         if expected_binders.len() != found_binders.len()
@@ -4514,6 +5562,20 @@ fn is_borrow_type(ty: &Type) -> bool {
     matches!(ty, Type::Slice { .. })
 }
 
+fn type_contains_borrow(ty: &Type) -> bool {
+    match ty {
+        Type::Slice { .. } => true,
+        Type::Array { elem, .. } => type_contains_borrow(elem),
+        Type::Generic { args, .. } => args.iter().any(type_contains_borrow),
+        Type::Bool
+        | Type::Primitive(_)
+        | Type::Named(_)
+        | Type::Pointer { .. }
+        | Type::Void
+        | Type::Unknown => false,
+    }
+}
+
 fn is_mutable_borrow_type(ty: &Type) -> bool {
     matches!(ty, Type::Slice { mutable: true, .. })
 }
@@ -4528,8 +5590,19 @@ fn is_copy_type(ty: &Type) -> bool {
         Type::Void | Type::Unknown => true,
         // A function value is a name, not owned data (lang.4).
         Type::Generic { name, .. } if name == "Fn" => true,
+        // Wake tokens are shared one-shot capabilities. Runtime clones retain
+        // the same signal/waiter state; only the tasks they release are affine.
+        Type::Named(name)
+            if matches!(name.as_str(), "WakeToken" | "AsyncClock" | "IntervalTimer") =>
+        {
+            true
+        }
         Type::Named(_) | Type::Generic { .. } | Type::Array { .. } => false,
     }
+}
+
+fn is_affine_function_type(ty: &Type) -> bool {
+    matches!(ty, Type::Generic { name, .. } if name == "FnOnce")
 }
 
 fn is_const_expr(expr: &Expr) -> bool {
@@ -4542,6 +5615,7 @@ fn is_const_expr(expr: &Expr) -> bool {
         | Expr::Binary { .. }
         | Expr::Field { .. }
         | Expr::Index { .. }
+        | Expr::SliceRange { .. }
         | Expr::Lambda { .. } => false,
     }
 }
@@ -4752,6 +5826,11 @@ fn collect_assignment_target_reads(target: &Expr, out: &mut BTreeSet<String>) {
             collect_expr_var_reads(base, out);
             collect_expr_var_reads(index, out);
         }
+        Expr::SliceRange { base, start, end } => {
+            collect_expr_var_reads(base, out);
+            collect_expr_var_reads(start, out);
+            collect_expr_var_reads(end, out);
+        }
         Expr::Field { base, .. } => collect_assignment_target_reads(base, out),
         Expr::Cast { expr, .. } | Expr::Unary { expr, .. } => {
             collect_assignment_target_reads(expr, out)
@@ -4789,6 +5868,11 @@ fn collect_expr_var_reads(expr: &Expr, out: &mut BTreeSet<String>) {
             collect_expr_var_reads(base, out);
             collect_expr_var_reads(index, out);
         }
+        Expr::SliceRange { base, start, end } => {
+            collect_expr_var_reads(base, out);
+            collect_expr_var_reads(start, out);
+            collect_expr_var_reads(end, out);
+        }
         Expr::Int(_)
         | Expr::Float(_)
         | Expr::Bool(_)
@@ -4800,7 +5884,9 @@ fn collect_expr_var_reads(expr: &Expr, out: &mut BTreeSet<String>) {
 fn root_var(expr: &Expr) -> Option<&str> {
     match expr {
         Expr::Var(name) => Some(name),
-        Expr::Field { base, .. } | Expr::Index { base, .. } => root_var(base),
+        Expr::Field { base, .. } | Expr::Index { base, .. } | Expr::SliceRange { base, .. } => {
+            root_var(base)
+        }
         _ => None,
     }
 }
@@ -4887,10 +5973,28 @@ fn places_overlap(left: &BorrowPlace, right: &BorrowPlace) -> bool {
                     return false;
                 }
             }
+            (
+                PlaceProjection::RangeConst(left_start, left_end),
+                PlaceProjection::RangeConst(right_start, right_end),
+            ) => {
+                if left_end <= right_start || right_end <= left_start {
+                    return false;
+                }
+            }
+            (PlaceProjection::IndexConst(index), PlaceProjection::RangeConst(start, end))
+            | (PlaceProjection::RangeConst(start, end), PlaceProjection::IndexConst(index)) => {
+                if index < start || index >= end {
+                    return false;
+                }
+            }
             (PlaceProjection::IndexUnknown, _)
             | (_, PlaceProjection::IndexUnknown)
+            | (PlaceProjection::RangeUnknown, _)
+            | (_, PlaceProjection::RangeUnknown)
             | (PlaceProjection::Field(_), PlaceProjection::IndexConst(_))
-            | (PlaceProjection::IndexConst(_), PlaceProjection::Field(_)) => return true,
+            | (PlaceProjection::IndexConst(_), PlaceProjection::Field(_))
+            | (PlaceProjection::Field(_), PlaceProjection::RangeConst(_, _))
+            | (PlaceProjection::RangeConst(_, _), PlaceProjection::Field(_)) => return true,
         }
     }
     true
@@ -5109,6 +6213,31 @@ fn expect_generic_value(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let _ = generic_element_type(found, constructor, operation, node, diagnostics);
+}
+
+fn expect_named_value(
+    found: Option<&Type>,
+    expected: &str,
+    operation: &str,
+    node: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if matches!(found, Some(Type::Named(name)) if name == expected)
+        || matches!(found, None | Some(Type::Unknown))
+    {
+        return;
+    }
+    if let Some(found) = found {
+        diagnostics.push(
+            Diagnostic::new(
+                "concurrency_handle_type",
+                node,
+                format!("{operation} requires a {expected} handle"),
+            )
+            .with_types(&Type::Named(expected.to_string()), found)
+            .suggest("replace_concurrency_handle"),
+        );
+    }
 }
 
 fn is_castable(found: &Type, target: &Type) -> bool {

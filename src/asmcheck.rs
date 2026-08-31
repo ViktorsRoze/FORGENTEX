@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, HashSet};
 
 use crate::ast::{AsmBlock, Expr, FunctionDecl, Program, Stmt};
-use crate::diag::{diagnostics_to_json, Diagnostic};
+use crate::diag::{diagnostics_array_to_json, Diagnostic};
 use crate::targets::{normalize_family, target_by_triple, TargetSpec};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -126,12 +126,7 @@ pub fn asm_check_json(result: &AssemblyCheckResult) -> String {
         out.push_str("  ");
     }
     out.push_str("],\n");
-    let diagnostics_json = diagnostics_to_json(&result.diagnostics);
-    let diagnostics = diagnostics_json
-        .trim()
-        .strip_prefix("{\n  \"diagnostics\": ")
-        .and_then(|value| value.strip_suffix("\n}"))
-        .unwrap_or("[]");
+    let diagnostics = diagnostics_array_to_json(&result.diagnostics);
     out.push_str(&format!("  \"diagnostics\": {diagnostics}\n"));
     out.push('}');
     out

@@ -63,3 +63,32 @@ fn common_agent_syntax_mistakes_have_clear_errors() {
         parse_agent("F bad(x i32) -> i32 {\n  IF x > 0 {\n    R x\n}\n").unwrap_err();
     assert!(missing_nested_brace.contains("missing closing '}'"));
 }
+
+#[test]
+fn enum_declarations_and_variants_carry_source_spans() {
+    // Enums were skipped by the source-map builder, so an enum had no position
+    // in either view: a diagnostic on one had nothing to anchor to.
+    let source = "enum Mode:\n    Fast\n    Careful\n\nstruct Pair:\n    left: i32\n";
+    let human =
+        crate::parser::parse_file_detailed(std::path::Path::new("modes.fgx"), source).source_map;
+    let line_of = |map: &crate::span::SourceMap, node: &str| {
+        map.nodes
+            .iter()
+            .find(|entry| entry.node == node)
+            .map(|entry| entry.span.start_line)
+    };
+    assert_eq!(line_of(&human, "@enum.Mode"), Some(1));
+    assert_eq!(line_of(&human, "@enum.Mode.variant.Fast"), Some(2));
+    assert_eq!(line_of(&human, "@enum.Mode.variant.Careful"), Some(3));
+    // The item after the enum must still resolve: the scan cursor advanced.
+    assert_eq!(line_of(&human, "@struct.Pair"), Some(5));
+
+    // The agent view writes `EN Name { A; B }`, so header and variants share
+    // one line.
+    let program = crate::parser::parse_human(source).unwrap();
+    let agent = crate::format::format_agent(&program);
+    let agent_map =
+        crate::parser::parse_file_detailed(std::path::Path::new("modes.fgai"), &agent).source_map;
+    assert!(line_of(&agent_map, "@enum.Mode").is_some());
+    assert!(line_of(&agent_map, "@enum.Mode.variant.Careful").is_some());
+}

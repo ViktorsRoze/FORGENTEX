@@ -48,6 +48,63 @@ fn shares_and_bindings_roundtrip_between_views() {
 }
 
 #[test]
+fn move_binding_roundtrips_between_views() {
+    let source = "share payload: Vec[i16]\nshare total: i32 = 0\n\nforeign consume c version \"c11\":\n    input payload: &[i16]\n    output total: i32\n    sandbox \"fs.none\"\n    bind payload move\n    bind total rw\n    code:\n        int consume(void) { return 0; }\n";
+    let human = parse_human(source).unwrap();
+    let binding = &human.capsules().next().unwrap().bindings[0];
+    assert_eq!(binding.mode, ShareMode::Move);
+    let agent = format_agent(&human);
+    assert!(agent.contains("BIND payload move"), "{agent}");
+    assert!(human.canonical_eq(&parse_agent(&agent).unwrap()));
+    assert!(format_human(&human).contains("bind payload move"));
+    let namespace = analyze("move.fgx", &human);
+    let payload = namespace
+        .shared
+        .iter()
+        .find(|entry| entry.name == "payload")
+        .unwrap();
+    assert_eq!(payload.movers, vec!["consume"]);
+    assert!(namespace.to_json().contains("\"movers\": [\"consume\"]"));
+}
+
+#[test]
+fn update_binding_roundtrips_and_is_reported() {
+    let source = "share payload: Vec[i16]\nshare total: i32 = 0\n\nforeign mutate c version \"c11\":\n    input payload: &mut[i16]\n    output total: i32\n    sandbox \"fs.none\"\n    bind payload update\n    bind total rw\n    code:\n        int mutate(void) { return 0; }\n";
+    let human = parse_human(source).unwrap();
+    assert_eq!(
+        human.capsules().next().unwrap().bindings[0].mode,
+        ShareMode::Update
+    );
+    let agent = format_agent(&human);
+    assert!(agent.contains("BIND payload update"), "{agent}");
+    assert!(human.canonical_eq(&parse_agent(&agent).unwrap()));
+    let namespace = analyze("update.fgx", &human);
+    let payload = namespace
+        .shared
+        .iter()
+        .find(|entry| entry.name == "payload")
+        .unwrap();
+    assert_eq!(payload.updaters, vec!["mutate"]);
+    assert!(namespace.to_json().contains("\"updaters\": [\"mutate\"]"));
+}
+
+#[test]
+fn explicit_share_versions_roundtrip_canonically() {
+    let source = "share payload: Vec[i16]\nshare total: i32 = 0\n\nforeign mutate c version \"c11\":\n    input payload: &mut[i16]\n    output total: i32\n    sandbox \"fs.none\"\n    bind payload@7 update\n    bind total rw\n    code:\n        int mutate(void) { return 0; }\n";
+    let human = parse_human(source).unwrap();
+    assert_eq!(
+        human.capsules().next().unwrap().bindings[0].name,
+        "payload@7"
+    );
+    let agent = format_agent(&human);
+    assert!(agent.contains("BIND payload@7 update"), "{agent}");
+    assert!(human.canonical_eq(&parse_agent(&agent).unwrap()));
+    assert!(format_human(&human).contains("bind payload@7 update"));
+    assert!(parse_human(&source.replace("payload@7", "payload@07")).is_err());
+    assert!(parse_human(&source.replace("payload@7", "payload@x")).is_err());
+}
+
+#[test]
 fn share_formatting_is_idempotent() {
     let program = parse_fixture("examples/capsule/web_counter.fgx");
     let human_once = format_human(&program);

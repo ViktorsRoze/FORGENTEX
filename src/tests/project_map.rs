@@ -21,6 +21,31 @@ fn project_map_snapshot_contains_stable_symbols() {
 }
 
 #[test]
+fn project_map_reports_per_symbol_heuristic_token_costs() {
+    let map = generate_map(&manifest_path("examples/media/audio_mix.fgx")).unwrap();
+    let clamp = map
+        .lines()
+        .find(|line| line.contains("F clamp_i16 "))
+        .expect("clamp symbol");
+    let mix = map
+        .lines()
+        .find(|line| line.contains("F mix_samples "))
+        .expect("mix symbol");
+    let clamp_tokens = suffix_usize(clamp, "tokens~");
+    let mix_tokens = suffix_usize(mix, "tokens~");
+    assert!(clamp_tokens > 0);
+    assert!(mix_tokens > clamp_tokens);
+}
+
+fn suffix_usize(line: &str, marker: &str) -> usize {
+    line.rsplit_once(marker)
+        .expect("token marker")
+        .1
+        .parse()
+        .expect("token count")
+}
+
+#[test]
 fn project_map_can_include_target_metadata() {
     let map = generate_map_with_options(
         &manifest_path("examples"),

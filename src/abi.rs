@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::ast::{Attribute, FunctionDecl, Program, StructDecl, Type};
-use crate::diag::{diagnostics_to_json, Diagnostic};
+use crate::diag::{diagnostics_array_to_json, Diagnostic};
 use crate::targets::{target_by_triple, TargetSpec};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -281,12 +281,7 @@ pub fn abi_json(report: &AbiReport) -> String {
         out.push_str("  ");
     }
     out.push_str("],\n");
-    let diagnostics_json = diagnostics_to_json(&report.diagnostics);
-    let diagnostics = diagnostics_json
-        .trim()
-        .strip_prefix("{\n  \"diagnostics\": ")
-        .and_then(|value| value.strip_suffix("\n}"))
-        .unwrap_or("[]");
+    let diagnostics = diagnostics_array_to_json(&report.diagnostics);
     out.push_str(&format!("  \"diagnostics\": {diagnostics}\n"));
     out.push('}');
     out
@@ -357,16 +352,67 @@ pub fn generate_struct_header(
     out.push_str(&format!("#ifndef {guard}\n#define {guard}\n\n"));
     out.push_str("#include <stdbool.h>\n#include <stddef.h>\n#include <stdint.h>\n\n");
     out.push_str("#if defined(_MSC_VER)\n#define FGX_ALIGNAS(n) __declspec(align(n))\n#else\n#define FGX_ALIGNAS(n) __attribute__((aligned(n)))\n#endif\n\n");
+    let mut emitted = BTreeSet::new();
+    let mut stack = Vec::new();
     for name in &selected {
-        let decl = program
-            .structs()
-            .find(|decl| decl.name == *name)
-            .ok_or_else(|| format!("native boundary refers to unknown struct '{name}'"))?;
-        out.push_str(&emit_header_struct(decl)?);
-        out.push('\n');
+        emit_selected_struct(program, name, &selected, &mut emitted, &mut stack, &mut out)?;
     }
     out.push_str(&format!("#endif /* {guard} */\n"));
     Ok(out)
+}
+
+fn emit_selected_struct(
+    program: &Program,
+    name: &str,
+    selected: &BTreeSet<String>,
+    emitted: &mut BTreeSet<String>,
+    stack: &mut Vec<String>,
+    out: &mut String,
+) -> Result<(), String> {
+    if emitted.contains(name) {
+        return Ok(());
+    }
+    if stack.iter().any(|entry| entry == name) {
+        return Err(format!(
+            "native boundary struct '{name}' is recursively embedded"
+        ));
+    }
+    let decl = program
+        .structs()
+        .find(|decl| decl.name == name)
+        .ok_or_else(|| format!("native boundary refers to unknown struct '{name}'"))?;
+    stack.push(name.to_string());
+    let mut dependencies = BTreeSet::new();
+    for field in &decl.fields {
+        collect_named_types(&field.ty, &mut dependencies);
+    }
+    for dependency in dependencies {
+        if selected.contains(&dependency) {
+            emit_selected_struct(program, &dependency, selected, emitted, stack, out)?;
+        }
+    }
+    stack.pop();
+    out.push_str(&emit_header_struct(decl)?);
+    out.push('\n');
+    emitted.insert(name.to_string());
+    Ok(())
+}
+
+fn collect_named_types(ty: &Type, names: &mut BTreeSet<String>) {
+    match ty {
+        Type::Named(name) => {
+            names.insert(name.clone());
+        }
+        Type::Pointer { elem, .. } | Type::Slice { elem, .. } | Type::Array { elem, .. } => {
+            collect_named_types(elem, names);
+        }
+        Type::Generic { args, .. } => {
+            for arg in args {
+                collect_named_types(arg, names);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn layout_struct(
@@ -739,7 +785,15 @@ fn c_field_decl(name: &str, ty: &Type) -> Result<String, String> {
         return Ok(format!("uint8_t {}[{bytes}];", ident(name)));
     }
     match ty {
-        Type::Array { elem, len } => Ok(format!("{} {}[{len}];", c_type(elem)?, ident(name))),
+        Type::Array { .. } => {
+            let mut dimensions = String::new();
+            let mut element = ty;
+            while let Type::Array { elem, len } = element {
+                dimensions.push_str(&format!("[{len}]"));
+                element = elem;
+            }
+            Ok(format!("{} {}{dimensions};", c_type(element)?, ident(name)))
+        }
         _ => Ok(format!("{} {};", c_type(ty)?, ident(name))),
     }
 }

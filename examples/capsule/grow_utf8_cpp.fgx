@@ -1,0 +1,22 @@
+foreign grow_utf8_cpp cpp version "c++17":
+    input text: &mut String
+    output length: usize
+    sandbox "fs.none"
+    code:
+        #include <cstddef>
+        #include <cstdint>
+
+        extern "C" std::size_t grow_utf8_cpp(
+            std::uint8_t *text,
+            std::size_t *text_len,
+            std::size_t text_capacity
+        ) {
+            if (*text_len >= text_capacity) return *text_len;
+            text[*text_len] = static_cast<std::uint8_t>('!');
+            *text_len += 1;
+            return *text_len;
+        }
+
+fn grow_twice_from_cpp(text: &mut String) -> usize:
+    let first_length: usize = grow_utf8_cpp(text)
+    return grow_utf8_cpp(text)

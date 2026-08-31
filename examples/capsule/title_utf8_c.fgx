@@ -1,0 +1,21 @@
+# Native data boundaries: fixed-length mutable UTF-8 copy-back through C.
+
+foreign title_utf8_c c version "c11":
+    input text: &mut str
+    output changed: i32
+    sandbox "fs.none"
+    code:
+        #include <stddef.h>
+        #include <stdint.h>
+
+        int32_t title_utf8_c(uint8_t *text, size_t text_len) {
+            if (text_len > 0 && text[0] == (uint8_t)'f') {
+                text[0] = (uint8_t)'F';
+                return 1;
+            }
+            return 0;
+        }
+
+fn title_twice_from_c(text: &mut str) -> i32:
+    let first_change: i32 = title_utf8_c(text)
+    return title_utf8_c(text)
