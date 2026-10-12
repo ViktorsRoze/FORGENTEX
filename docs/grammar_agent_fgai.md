@@ -10,7 +10,9 @@ as `.fgx`.
 
 ```text
 file        ::= item*
-item        ::= attribute* (struct_decl | trait_decl | trait_impl | function_decl | pipeline_decl)
+item        ::= attribute* (struct_decl | enum_decl | trait_decl | trait_impl
+              | function_decl | test_decl | capsule_decl | share_decl
+              | pipeline_decl | data_decl | blob_decl | note_decl)
 ```
 
 ## Declarations
@@ -44,7 +46,69 @@ effect      ::= ident ("." ident)*
 pipeline_decl ::= "PIPELINE" ident pipeline_stage+ pipeline_edge* "ENDPIPELINE"
 pipeline_stage ::= "STAGE" ident
 pipeline_edge ::= "EDGE" ident "->" ident "VIA" ident
+
+enum_decl   ::= "EN" ident "{" variant (";" variant)* "}"
+variant     ::= ident ("(" type ")")?
+
+test_decl   ::= ("TEST" | "XTEST") string_literal "{" expectation* "}"
+expectation ::= "EXPECT" expr | "EXPECT_DIAGNOSTIC" ident
+
+share_decl  ::= "SHARE" ident type ("=" literal)?
+
+capsule_decl ::= "CAP" ident ident string_literal capsule_env? effects?
+                 capsule_item* "CODE" int_literal newline_terminated_line*
+                 "ENDCAP"
+capsule_env ::= "env" string_literal
+capsule_item ::= "IN" ident type | "OUT" ident type | "DEP" string_literal
+              | "SBX" string_literal | "BIND" ident share_mode
+              | "MOCK" literal_list "->" literal_list
+share_mode  ::= "read" | "move" | "update" | "rw"
 ```
+
+`XTEST` is a test expected to fail. `CODE <n>` introduces exactly `n` following
+lines of foreign source, carried verbatim — a count rather than a terminator, so
+a body containing the terminator cannot truncate the item.
+
+## Carried sections
+
+The dense view of the same data, bytes, and remarks the human view carries. Each
+verbatim block is count-prefixed for the same reason `CODE` is.
+
+```text
+data_decl   ::= "DATA" ident shape section_meta "BODY" int_literal line* "ENDDATA"
+blob_decl   ::= "BLOB" ident string_literal section_meta "SIZE" int_literal
+                ("HASH" string_literal)? blob_payload "ENDBLOB"
+blob_payload ::= "B64" int_literal line* | "STORE" string_literal
+note_decl   ::= "NOTE" ident "ON" string_literal "BY" string_literal
+                ("CRT" string_literal)? ("RE" string_literal)?
+                "ST" string_literal "TXT" int_literal line* "ENDNOTE"
+section_meta ::= ("CRT" string_literal ("BY" string_literal)?)?
+                 ("MOD" string_literal ("BY" string_literal)?)?
+```
+
+```fgai
+DATA sales csv
+  CRT "2026-09-20T09:00:00Z" BY "human:viktor"
+  MOD "2026-09-21T08:00:00Z" BY "agent:claude-opus-5"
+  BODY 2
+region,units
+north,120
+ENDDATA
+
+NOTE n1 ON "@data.sales"
+  BY "agent:claude-opus-5"
+  CRT "2026-09-20T10:20:00Z"
+  ST "open"
+  TXT 1
+North looks doubled after the Q3 import.
+ENDNOTE
+```
+
+A payload round-trips between the two views byte for byte, which is tested as an
+equality on the payload rather than on the formatting: a CSV that gained a space
+or a base64 line that got rewrapped would be a corrupted file, not a formatting
+difference. The rules for shapes, authors, timestamps, and inline size are the
+same as in [the human grammar](grammar_human_fgx.md#carried-sections).
 
 `PIPELINE` is the compact view of the same authored graph manifest as the
 human `pipeline` declaration. Stage order is canonical and significant only as

@@ -135,6 +135,7 @@ impl Engine {
                 .collect::<BTreeSet<_>>();
             for item in &module.program.items {
                 match item {
+                    Item::Data(_) | Item::Blob(_) | Item::Note(_) => {}
                     Item::Function(function) => {
                         engine.occupied_names.insert(function.name.clone());
                         engine

@@ -478,6 +478,24 @@ pub fn generate_project_map_with_options(
         ));
         for item in &module.program.items {
             match item {
+                Item::Data(section) => out.push_str(&format!(
+                    "  DATA {} {} {} lines={}
+",
+                    section.name,
+                    section.id,
+                    section.kind,
+                    section.content.len()
+                )),
+                Item::Blob(section) => out.push_str(&format!(
+                    "  BLOB {} {} {} bytes={}
+",
+                    section.name, section.id, section.media_type, section.bytes
+                )),
+                Item::Note(note) => out.push_str(&format!(
+                    "  NOTE {} {} on {} by {} {}
+",
+                    note.name, note.id, note.target, note.author, note.status
+                )),
                 Item::Struct(decl) => {
                     let visibility = visibility_for(&module.public_symbols, "struct", &decl.name);
                     out.push_str(&format!(
@@ -1314,6 +1332,9 @@ fn duplicate_symbol_diagnostics(project: &Project) -> Vec<Diagnostic> {
     for module in &project.modules {
         for item in &module.program.items {
             let (kind, name, node) = match item {
+                Item::Data(section) => ("data", section.name.as_str(), section.id.as_str()),
+                Item::Blob(section) => ("blob", section.name.as_str(), section.id.as_str()),
+                Item::Note(note) => ("note", note.name.as_str(), note.id.as_str()),
                 Item::Struct(decl) => ("struct", decl.name.as_str(), decl.id.as_str()),
                 Item::Enum(decl) => ("enum", decl.name.as_str(), decl.id.as_str()),
                 Item::Trait(decl) => ("trait", decl.name.as_str(), decl.id.as_str()),

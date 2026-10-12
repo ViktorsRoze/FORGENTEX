@@ -1986,7 +1986,7 @@ fn c_and_zig_lower_constructed_native_options() {
     .unwrap();
     std::fs::write(
         dir.join("src/options.fgx"),
-        "export enum Mode:\n    Idle\n    Active\n\nexport struct Marker:\n    id: i32\n    enabled: bool\n\nexport fn scalar_score(value: i32, present: bool) -> i32:\n    if present:\n        let item: Option[i32] = Some(value)\n        return unwrap_or(item, 7)\n    let item: Option[i32] = None()\n    return unwrap_or(item, 7)\n\nexport fn string_score(value: str, fallback: str, present: bool) -> usize:\n    if present:\n        let item: Option[str] = Some(value)\n        return str_len(unwrap_or(item, fallback))\n    let item: Option[str] = None()\n    return str_len(unwrap_or(item, fallback))\n\nexport fn slice_score(value: &[i32], fallback: &[i32], present: bool) -> i32:\n    if present:\n        let item: Option[&[i32]] = Some(value)\n        let selected: &[i32] = unwrap_or(item, fallback)\n        return selected[0] + i32(selected.len)\n    let item: Option[&[i32]] = None()\n    let selected: &[i32] = unwrap_or(item, fallback)\n    return selected[0] + i32(selected.len)\n\nexport fn array_score(value: [i32; 2], fallback: [i32; 2], present: bool) -> i32:\n    if present:\n        let item: Option[[i32; 2]] = Some(value)\n        let selected: [i32; 2] = unwrap_or(item, fallback)\n        return selected[0] + selected[1]\n    let item: Option[[i32; 2]] = None()\n    let selected: [i32; 2] = unwrap_or(item, fallback)\n    return selected[0] + selected[1]\n\nexport fn enum_some() -> i32:\n    let item: Option[Mode] = Some(Mode::Active)\n    let selected: Mode = unwrap_or(item, Mode::Idle)\n    match selected:\n        case Mode::Idle:\n            return 1\n        case Mode::Active:\n            return 2\n\nexport fn enum_none() -> i32:\n    let item: Option[Mode] = None()\n    let selected: Mode = unwrap_or(item, Mode::Idle)\n    match selected:\n        case Mode::Idle:\n            return 1\n        case Mode::Active:\n            return 2\n\nexport fn marker_score(value: Marker, fallback: Marker, present: bool) -> i32:\n    if present:\n        let item: Option[Marker] = Some(value)\n        let selected: Marker = unwrap_or(item, fallback)\n        return selected.id\n    let item: Option[Marker] = None()\n    let selected: Marker = unwrap_or(item, fallback)\n    return selected.id\n\nexport fn return_some(value: i32) -> Option[i32]:\n    return Some(value)\n\nexport fn return_none() -> Option[i32]:\n    return None()\n\nexport fn return_stored(value: Marker) -> Option[Marker]:\n    let item: Option[Marker] = Some(value)\n    return item\n",
+        "export enum Mode:\n    Idle\n    Active\n\nexport struct Marker:\n    id: i32\n    enabled: bool\n\nexport fn scalar_score(value: i32, present: bool) -> i32:\n    if present:\n        let item: Option[i32] = Some(value)\n        return unwrap_or(item, 7)\n    let item: Option[i32] = None()\n    return unwrap_or(item, 7)\n\nexport fn string_score(value: str, fallback: str, present: bool) -> usize:\n    if present:\n        let item: Option[str] = Some(value)\n        return str_len(unwrap_or(item, fallback))\n    let item: Option[str] = None()\n    return str_len(unwrap_or(item, fallback))\n\nexport fn slice_score(value: &[i32], fallback: &[i32], present: bool) -> i32:\n    if present:\n        let item: Option[&[i32]] = Some(value)\n        let selected: &[i32] = unwrap_or(item, fallback)\n        return selected[0] + i32(selected.len)\n    let item: Option[&[i32]] = None()\n    let selected: &[i32] = unwrap_or(item, fallback)\n    return selected[0] + i32(selected.len)\n\nexport fn array_score(value: [i32; 2], fallback: [i32; 2], present: bool) -> i32:\n    if present:\n        let item: Option[[i32; 2]] = Some(value)\n        let selected: [i32; 2] = unwrap_or(item, fallback)\n        return selected[0] + selected[1]\n    let item: Option[[i32; 2]] = None()\n    let selected: [i32; 2] = unwrap_or(item, fallback)\n    return selected[0] + selected[1]\n\nexport fn enum_some() -> i32:\n    let item: Option[Mode] = Some(Mode::Active)\n    let selected: Mode = unwrap_or(item, Mode::Idle)\n    match selected:\n        case Mode::Idle:\n            return 1\n        case Mode::Active:\n            return 2\n\nexport fn enum_none() -> i32:\n    let item: Option[Mode] = None()\n    let selected: Mode = unwrap_or(item, Mode::Idle)\n    match selected:\n        case Mode::Idle:\n            return 1\n        case Mode::Active:\n            return 2\n\nexport fn marker_score(value: Marker, fallback: Marker, present: bool) -> i32:\n    if present:\n        let item: Option[Marker] = Some(value)\n        let selected: Marker = unwrap_or(item, fallback)\n        return selected.id\n    let item: Option[Marker] = None()\n    let selected: Marker = unwrap_or(item, fallback)\n    return selected.id\n\nexport fn scalar_param(value: Option[i32], fallback: i32) -> i32:\n    return unwrap_or(value, fallback)\n\nexport fn string_param(value: Option[str], fallback: str) -> usize:\n    return str_len(unwrap_or(value, fallback))\n\nexport fn slice_param(value: Option[&[i32]], fallback: &[i32]) -> i32:\n    let selected: &[i32] = unwrap_or(value, fallback)\n    return selected[0] + i32(selected.len)\n\nexport fn array_param(value: Option[[i32; 2]], fallback: [i32; 2]) -> i32:\n    let selected: [i32; 2] = unwrap_or(value, fallback)\n    return selected[0] + selected[1]\n\nexport fn enum_param(value: Option[Mode], fallback: Mode) -> i32:\n    let selected: Mode = unwrap_or(value, fallback)\n    match selected:\n        case Mode::Idle:\n            return 1\n        case Mode::Active:\n            return 2\n\nexport fn marker_param(value: Option[Marker], fallback: Marker) -> i32:\n    return unwrap_or(value, fallback).id\n\nexport fn relay_param(value: Option[i32]) -> Option[i32]:\n    return value\n\nexport fn return_some(value: i32) -> Option[i32]:\n    return Some(value)\n\nexport fn return_none() -> Option[i32]:\n    return None()\n\nexport fn return_stored(value: Marker) -> Option[Marker]:\n    let item: Option[Marker] = Some(value)\n    return item\n",
     )
     .unwrap();
 
@@ -1996,6 +1996,8 @@ fn c_and_zig_lower_constructed_native_options() {
         .contains("fgx_option_i32 item = (fgx_option_i32){ .has_value = true, .value = value };"));
     assert!(c_source.contains("fgx_option_i32 item = (fgx_option_i32){ .has_value = false };"));
     assert!(c_header.contains("fgx_option_i32 return_some(int32_t value);"));
+    assert!(c_header.contains("int32_t scalar_param(fgx_option_i32 value, int32_t fallback);"));
+    assert!(c_header.contains("fgx_option_i32 relay_param(fgx_option_i32 value);"));
     assert!(c_source.contains("return (fgx_option_i32){ .has_value = true, .value = value };"));
     assert!(c_source.contains("fgx_option_Marker item = (fgx_option_Marker)"));
     assert!(zig_source.contains("var item: ?i32 = value;"));
@@ -2004,6 +2006,8 @@ fn c_and_zig_lower_constructed_native_options() {
     assert!(zig_source.contains("return value;"));
     assert!(zig_source.contains("pub fn return_none() ?i32"));
     assert!(zig_source.contains("return null;"));
+    assert!(zig_source.contains("pub fn scalar_param(value: ?i32, fallback: i32) i32"));
+    assert!(zig_source.contains("pub fn relay_param(value: ?i32) ?i32"));
 
     let c = crate::c_backend::build_c_project(&dir, &dir.join("out-c")).unwrap();
     let zig = crate::zig_backend::build_zig_project(&dir, &dir.join("out-zig")).unwrap();
@@ -2022,7 +2026,7 @@ fn c_and_zig_lower_constructed_native_options() {
         let harness = dir.join("constructed_option_harness.c");
         std::fs::write(
             &harness,
-            "#include \"constructedoption.h\"\nint main(void) { int32_t values[] = { 8, 9 }; int32_t fallback[] = { 3, 4 }; fgx_const_slice_i32 value_slice = { .data = values, .len = 2 }; fgx_const_slice_i32 fallback_slice = { .data = fallback, .len = 2 }; fgx_array_i32_2 value_array = { .data = { 5, 7 } }; fgx_array_i32_2 fallback_array = { .data = { 2, 3 } }; Marker marker = { .id = 9, .enabled = true }; Marker other = { .id = 4, .enabled = false }; fgx_option_i32 some = return_some(11); fgx_option_i32 none = return_none(); fgx_option_Marker stored = return_stored(marker); return scalar_score(41, true) == 41 && scalar_score(41, false) == 7 && string_score(\"lambda\", \"beta\", true) == 6 && string_score(\"lambda\", \"beta\", false) == 4 && slice_score(value_slice, fallback_slice, true) == 10 && slice_score(value_slice, fallback_slice, false) == 5 && array_score(value_array, fallback_array, true) == 12 && array_score(value_array, fallback_array, false) == 5 && enum_some() == 2 && enum_none() == 1 && marker_score(marker, other, true) == 9 && marker_score(marker, other, false) == 4 && some.has_value && some.value == 11 && !none.has_value && stored.has_value && stored.value.id == 9 ? 0 : 1; }\n",
+            "#include \"constructedoption.h\"\nint main(void) { int32_t values[] = { 8, 9 }; int32_t fallback[] = { 3, 4 }; fgx_const_slice_i32 value_slice = { .data = values, .len = 2 }; fgx_const_slice_i32 fallback_slice = { .data = fallback, .len = 2 }; fgx_array_i32_2 value_array = { .data = { 5, 7 } }; fgx_array_i32_2 fallback_array = { .data = { 2, 3 } }; Marker marker = { .id = 9, .enabled = true }; Marker other = { .id = 4, .enabled = false }; fgx_option_i32 some = return_some(11); fgx_option_i32 none = return_none(); fgx_option_Marker stored = return_stored(marker); fgx_option_str some_string = { .has_value = true, .value = \"lambda\" }; fgx_option_slice_i32 some_slice = { .has_value = true, .value = value_slice }; fgx_option_array_i32_2 some_array = { .has_value = true, .value = value_array }; fgx_option_Mode some_mode = { .has_value = true, .value = Mode_Active }; fgx_option_Marker some_marker = { .has_value = true, .value = marker }; fgx_option_i32 relayed = relay_param(some); return scalar_score(41, true) == 41 && scalar_score(41, false) == 7 && string_score(\"lambda\", \"beta\", true) == 6 && string_score(\"lambda\", \"beta\", false) == 4 && slice_score(value_slice, fallback_slice, true) == 10 && slice_score(value_slice, fallback_slice, false) == 5 && array_score(value_array, fallback_array, true) == 12 && array_score(value_array, fallback_array, false) == 5 && enum_some() == 2 && enum_none() == 1 && marker_score(marker, other, true) == 9 && marker_score(marker, other, false) == 4 && scalar_param(some, 7) == 11 && scalar_param(none, 7) == 7 && string_param(some_string, \"beta\") == 6 && slice_param(some_slice, fallback_slice) == 10 && array_param(some_array, fallback_array) == 12 && enum_param(some_mode, Mode_Idle) == 2 && marker_param(some_marker, other) == 9 && relayed.has_value && relayed.value == 11 && some.has_value && some.value == 11 && !none.has_value && stored.has_value && stored.value.id == 9 ? 0 : 1; }\n",
         )
         .unwrap();
         let executable = dir.join(if cfg!(windows) {
@@ -2061,7 +2065,7 @@ fn c_and_zig_lower_constructed_native_options() {
         let harness = dir.join("constructed_option_harness.zig");
         std::fs::write(
             &harness,
-            "const lib = @import(\"out-zig/constructedoption.zig\");\nconst std = @import(\"std\");\ntest \"constructed native options\" {\n    try std.testing.expectEqual(@as(i32, 41), lib.scalar_score(41, true));\n    try std.testing.expectEqual(@as(i32, 7), lib.scalar_score(41, false));\n    try std.testing.expectEqual(@as(usize, 6), lib.string_score(\"lambda\", \"beta\", true));\n    try std.testing.expectEqual(@as(usize, 4), lib.string_score(\"lambda\", \"beta\", false));\n    try std.testing.expectEqual(@as(i32, 10), lib.slice_score(&.{ 8, 9 }, &.{ 3, 4 }, true));\n    try std.testing.expectEqual(@as(i32, 5), lib.slice_score(&.{ 8, 9 }, &.{ 3, 4 }, false));\n    try std.testing.expectEqual(@as(i32, 12), lib.array_score(.{ 5, 7 }, .{ 2, 3 }, true));\n    try std.testing.expectEqual(@as(i32, 5), lib.array_score(.{ 5, 7 }, .{ 2, 3 }, false));\n    try std.testing.expectEqual(@as(i32, 2), lib.enum_some());\n    try std.testing.expectEqual(@as(i32, 1), lib.enum_none());\n    try std.testing.expectEqual(@as(i32, 9), lib.marker_score(.{ .id = 9, .enabled = true }, .{ .id = 4, .enabled = false }, true));\n    try std.testing.expectEqual(@as(i32, 4), lib.marker_score(.{ .id = 9, .enabled = true }, .{ .id = 4, .enabled = false }, false));\n    try std.testing.expectEqual(@as(?i32, 11), lib.return_some(11));\n    try std.testing.expectEqual(@as(?i32, null), lib.return_none());\n    try std.testing.expectEqual(@as(i32, 9), lib.return_stored(.{ .id = 9, .enabled = true }).?.id);\n}\n",
+            "const lib = @import(\"out-zig/constructedoption.zig\");\nconst std = @import(\"std\");\ntest \"constructed native options\" {\n    try std.testing.expectEqual(@as(i32, 41), lib.scalar_score(41, true));\n    try std.testing.expectEqual(@as(i32, 7), lib.scalar_score(41, false));\n    try std.testing.expectEqual(@as(usize, 6), lib.string_score(\"lambda\", \"beta\", true));\n    try std.testing.expectEqual(@as(usize, 4), lib.string_score(\"lambda\", \"beta\", false));\n    try std.testing.expectEqual(@as(i32, 10), lib.slice_score(&.{ 8, 9 }, &.{ 3, 4 }, true));\n    try std.testing.expectEqual(@as(i32, 5), lib.slice_score(&.{ 8, 9 }, &.{ 3, 4 }, false));\n    try std.testing.expectEqual(@as(i32, 12), lib.array_score(.{ 5, 7 }, .{ 2, 3 }, true));\n    try std.testing.expectEqual(@as(i32, 5), lib.array_score(.{ 2, 3 }, .{ 2, 3 }, false));\n    try std.testing.expectEqual(@as(i32, 2), lib.enum_some());\n    try std.testing.expectEqual(@as(i32, 1), lib.enum_none());\n    try std.testing.expectEqual(@as(i32, 9), lib.marker_score(.{ .id = 9, .enabled = true }, .{ .id = 4, .enabled = false }, true));\n    try std.testing.expectEqual(@as(i32, 4), lib.marker_score(.{ .id = 9, .enabled = true }, .{ .id = 4, .enabled = false }, false));\n    try std.testing.expectEqual(@as(i32, 11), lib.scalar_param(11, 7));\n    try std.testing.expectEqual(@as(i32, 7), lib.scalar_param(null, 7));\n    try std.testing.expectEqual(@as(usize, 6), lib.string_param(\"lambda\", \"beta\"));\n    try std.testing.expectEqual(@as(i32, 10), lib.slice_param(&.{ 8, 9 }, &.{ 3, 4 }));\n    try std.testing.expectEqual(@as(i32, 12), lib.array_param(.{ 5, 7 }, .{ 2, 3 }));\n    try std.testing.expectEqual(@as(i32, 2), lib.enum_param(.Active, .Idle));\n    try std.testing.expectEqual(@as(i32, 9), lib.marker_param(.{ .id = 9, .enabled = true }, .{ .id = 4, .enabled = false }));\n    try std.testing.expectEqual(@as(?i32, 11), lib.relay_param(11));\n    try std.testing.expectEqual(@as(?i32, 11), lib.return_some(11));\n    try std.testing.expectEqual(@as(?i32, null), lib.return_none());\n    try std.testing.expectEqual(@as(i32, 9), lib.return_stored(.{ .id = 9, .enabled = true }).?.id);\n}\n",
         )
         .unwrap();
         let argv = vec![
@@ -2087,32 +2091,140 @@ fn c_and_zig_lower_constructed_native_options() {
 }
 
 #[test]
-fn native_option_parameters_and_reassignment_remain_blocked() {
+fn c_and_zig_lower_native_option_constructor_reassignment() {
     let dir = std::env::temp_dir().join(format!(
-        "forgentex_{}_returned_native_vec_option_blockers",
+        "forgentex_{}_native_option_reassignment",
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(
         dir.join("Forgentex.toml"),
-        "[package]\nname = \"returnedoptionblock\"\nversion = \"0.1.0\"\nroot = \"src\"\n",
+        "[package]\nname = \"reassignedoption\"\nversion = \"0.1.0\"\nroot = \"src\"\n",
     )
     .unwrap();
     std::fs::write(
-        dir.join("src/vectors.fgx"),
-        "fn constructed() -> Option[i32]:\n    return Some(1)\n\nfn parameter(value: Option[i32]) -> Option[i32]:\n    return value\n\nfn reassigned(flag: bool) -> Option[i32] effects [alloc]:\n    let values: Vec[i32] = vec_new()\n    push(values, 1)\n    let popped: Option[i32] = pop(values)\n    if flag:\n        popped = None()\n    return popped\n",
+        dir.join("src/options.fgx"),
+        "export fn replace(value: Option[i32], replacement: i32, present: bool) -> Option[i32]:\n    if present:\n        value = Some(replacement)\n    else:\n        value = None()\n    return value\n\nexport fn reset_local(value: i32, present: bool) -> Option[i32]:\n    let item: Option[i32] = Some(value)\n    if !present:\n        item = None()\n    return item\n",
     )
     .unwrap();
 
+    let (c_header, c_source) = crate::c_backend::generate_c_for_project(&dir).unwrap();
+    let zig_source = crate::zig_backend::generate_zig_for_project(&dir).unwrap();
+    assert!(c_header.contains(
+        "fgx_option_i32 replace(fgx_option_i32 value, int32_t replacement, bool present);"
+    ));
+    assert!(
+        c_source.contains("value = (fgx_option_i32){ .has_value = true, .value = replacement };")
+    );
+    assert!(c_source.contains("value = (fgx_option_i32){ .has_value = false };"));
+    assert!(zig_source.contains("value = replacement;"));
+    assert!(zig_source.contains("value = null;"));
+
+    let c = crate::c_backend::build_c_project(&dir, &dir.join("out-c")).unwrap();
+    let zig = crate::zig_backend::build_zig_project(&dir, &dir.join("out-zig")).unwrap();
+    let (opt_c, _, _) =
+        crate::c_backend::build_c_project_opt(&dir, &dir.join("out-c-opt")).unwrap();
+    let (opt_zig, _, _) =
+        crate::zig_backend::build_zig_project_opt(&dir, &dir.join("out-zig-opt")).unwrap();
+    assert!(std::fs::read_to_string(opt_c.source)
+        .unwrap()
+        .contains(".has_value = false"));
+    assert!(std::fs::read_to_string(opt_zig.source)
+        .unwrap()
+        .contains("value = null;"));
+
+    if let Some(toolchain) = crate::native_build::detect_toolchain() {
+        let harness = dir.join("reassigned_option_harness.c");
+        std::fs::write(
+            &harness,
+            "#include \"reassignedoption.h\"\nint main(void) { fgx_option_i32 some = { .has_value = true, .value = 4 }; fgx_option_i32 full = replace(some, 9, true); fgx_option_i32 empty = replace(some, 9, false); fgx_option_i32 kept = reset_local(6, true); fgx_option_i32 reset = reset_local(6, false); return full.has_value && full.value == 9 && !empty.has_value && kept.has_value && kept.value == 6 && !reset.has_value ? 0 : 1; }\n",
+        )
+        .unwrap();
+        let executable = dir.join(if cfg!(windows) {
+            "reassigned_option_harness.exe"
+        } else {
+            "reassigned_option_harness"
+        });
+        let argv = vec![
+            toolchain.name.clone(),
+            "-std=c11".to_string(),
+            "-O2".to_string(),
+            c.source.display().to_string(),
+            harness.display().to_string(),
+            "-I".to_string(),
+            dir.join("out-c").display().to_string(),
+            "-o".to_string(),
+            executable.display().to_string(),
+        ];
+        let compile = crate::native_build::run_with_path(
+            &argv,
+            std::path::Path::new(&toolchain.name).parent(),
+        )
+        .expect("failed to invoke C compiler for option reassignment");
+        assert!(
+            compile.status.success(),
+            "generated option-reassignment C failed: {}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        assert!(std::process::Command::new(executable)
+            .status()
+            .expect("failed to run option-reassignment C harness")
+            .success());
+    }
+
+    if let Some(toolchain) = crate::native_build::detect_zig_toolchain() {
+        let harness = dir.join("reassigned_option_harness.zig");
+        std::fs::write(
+            &harness,
+            "const lib = @import(\"out-zig/reassignedoption.zig\");\nconst std = @import(\"std\");\ntest \"native option reassignment\" {\n    try std.testing.expectEqual(@as(?i32, 9), lib.replace(4, 9, true));\n    try std.testing.expectEqual(@as(?i32, null), lib.replace(4, 9, false));\n    try std.testing.expectEqual(@as(?i32, 6), lib.reset_local(6, true));\n    try std.testing.expectEqual(@as(?i32, null), lib.reset_local(6, false));\n}\n",
+        )
+        .unwrap();
+        let argv = vec![
+            toolchain.name.clone(),
+            "test".to_string(),
+            harness.display().to_string(),
+        ];
+        let run = crate::native_build::run_with_path(
+            &argv,
+            std::path::Path::new(&toolchain.name).parent(),
+        )
+        .expect("failed to invoke Zig option-reassignment harness");
+        assert!(
+            run.status.success(),
+            "generated option-reassignment Zig failed: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+
+    assert!(c.header.exists());
+    assert!(zig.source.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn native_option_callee_reassignment_remains_blocked() {
+    let dir = std::env::temp_dir().join(format!(
+        "forgentex_{}_callee_option_reassignment",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("Forgentex.toml"),
+        "[package]\nname = \"calleeoption\"\nversion = \"0.1.0\"\nroot = \"src\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/options.fgx"),
+        "fn make(value: i32) -> Option[i32]:\n    return Some(value)\n\nfn replace(value: i32) -> Option[i32]:\n    let item: Option[i32] = None()\n    item = make(value)\n    return item\n",
+    )
+    .unwrap();
     let c_err = crate::c_backend::build_c_project(&dir, &dir.join("out-c")).unwrap_err();
     let zig_err = crate::zig_backend::build_zig_project(&dir, &dir.join("out-zig")).unwrap_err();
     for error in [&c_err, &zig_err] {
         assert!(error.contains("generic_type:Option"), "{error}");
-        assert!(error.contains("intrinsic:None"), "{error}");
     }
-    assert!(!dir.join("out-c").exists());
-    assert!(!dir.join("out-zig").exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -1,9 +1,58 @@
 # Token-Efficiency Findings
 
-Measured with `fgx token-report` and the heuristic tokenizer in
-`src/tokens.rs`. The tokenizer is a heuristic, not an exact GPT/BPE count,
-so treat the *ratios* as the signal. Re-run with a real tokenizer before
-publishing external claims.
+The tables on this page come from two different instruments, and they must not
+be confused:
+
+- **`heuristic-v1`** — the fast estimator in `src/tokens.rs`. It needs no
+  tokenizer and is fine for local budgets.
+- **Real byte-pair encoding** — `cl100k_base` and `o200k_base`, measured
+  independently during the 2026-09-05 external evaluation
+  (`docs/language_evaluation_2026-09-05.md`, finding F1), and reproducible here
+  with `fgx token-report --bpe-command` (see the end of this page).
+
+This page used to say "treat the *ratios* as the signal". That advice was wrong.
+The heuristic's ratios do not merely misjudge how big a difference is — on real
+BPE they sometimes point the other way. **No heuristic ratio on this page is
+evidence that one surface costs fewer tokens than another**; only the measured
+table is.
+
+## Measured with real BPE
+
+Actual encoder counts for `fgx fmt --to fgx|fgai` output, LF-normalised, with the
+trailing newline. Text only: no request framing, prompt, tool schema, or
+reasoning.
+
+| File under `examples/` | heuristic agent/human | `cl100k_base` human → agent | `o200k_base` human → agent | What actually happened |
+| --- | ---: | ---: | ---: | --- |
+| `hello.fgx` | 0.86 | 37 → 32 | 37 → 32 | 13.5% smaller |
+| `media/audio_mix.fgx` | 0.82 | 151 → 128 | 151 → 128 | 15.2% smaller |
+| `audio/src/dsp.fgx` | **0.97** | 869 → 877 | 870 → 878 | **~0.9% larger** |
+| `capsule/normalize_python.fgx` | 0.89 | 148 → 150 | 149 → 150 | ~0.7–1.4% larger |
+| `capsule/web_session.fgx` | 0.89 | 314 → 313 | 315 → 315 | unchanged |
+| `smoke/inline_tests.fgx` | **0.97** | 121 → 130 | 123 → 132 | **~7.3% larger** |
+| `apps/wav_waveform/src/main.fgx` | 0.95 | 1,093 → 1,144 | 1,102 → 1,153 | ~4.7% larger |
+| `apps/media_visualizer/src/main.fgx` | 0.89 | 1,457 → 1,459 | 1,459 → 1,471 | ~0.1–0.8% larger |
+| **Combined** | — | **4,190 → 4,233** | **4,206 → 4,259** | **~1.0–1.3% larger** |
+
+What that says, plainly:
+
+1. **The agent surface is not a token saving in general.** It is smaller on
+   small, declaration-heavy files and slightly *larger* on body-heavy ones, and
+   larger overall across this sample. The heuristic said the opposite for every
+   row.
+2. **The likely reason is structural.** BPE already encodes common English
+   keywords (`struct`, `return`, `while`) as single tokens, so shortening them
+   saves little, while the dense form's extra punctuation and unfamiliar
+   two-letter spellings can each cost a token. The heuristic charged
+   `ceil(len / 4)` per word, which systematically overvalued shortening them.
+3. **This is a small convenience sample**, not a benchmark. It is enough to
+   disprove "the compact surface always saves tokens"; it is not enough to
+   characterise real workloads.
+
+## The heuristic tables below are kept as history
+
+They record what the project believed at the time and why. Read their ratios as
+a description of the *estimator*, not of the encodings.
 
 ## A correction worth recording
 
@@ -18,7 +67,7 @@ character saving, so it can never increase tokens), the picture changed.
 This is the value of measuring: the original "it's neutral" conclusion was
 wrong because the *measurement* was wrong, not because the encoding was bad.
 
-## Measured surfaces (heuristic-v1, corrected)
+## Estimated surfaces (heuristic-v1) — superseded by the measured table above
 
 | File | human | agent | agent/human | minified | compressed | best/human |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -29,7 +78,11 @@ wrong because the *measurement* was wrong, not because the encoding was bad.
 | capsule/web_session.fgx | 435 | 387 | 0.89 | 381 | 381 | 0.88 |
 | smoke/inline_tests.fgx | 160 | 155 | 0.97 | 143 | 143 | 0.89 |
 
-## What the numbers say (honestly)
+## What the project concluded at the time (superseded)
+
+The points below were drawn from the heuristic and are **contradicted by the
+measured table above** wherever they claim a saving. They stay so the reasoning
+that led here remains visible.
 
 1. **The `.fgai` agent syntax does save tokens — modestly.** agent/human is
    0.86–0.97, roughly a 3–14% reduction, better on declaration-heavy files
@@ -60,46 +113,70 @@ statement. Squeezing those further (joining statements, dropping
 delimiters) needs a denser grammar *and parser*, for single-digit extra
 percent — diminishing returns.
 
-The order-of-magnitude win is not per-file at all; it is **not sending the
-file**: project maps (skeletons), context packets (one symbol's typed/effect
-slice), semantic patches (a few lines to change one behavior), and
-diff-only re-reads. The next measurement should compare a realistic multi-
-edit task — full-file resend vs map+context+patch — which is where a large
-difference, if any, will appear.
+The hypothesis at this point was that the order-of-magnitude win is not
+per-file at all but in **not sending the file**: project maps, context packets,
+semantic patches, and diff-only re-reads. The cost model below tested it — and,
+once compared against a competent baseline rather than whole-file resend, did
+not support it for single files. See the next section.
 
 ## Prelude aliases (dual-named builtins)
 
 Twelve high-frequency builtins now carry a two-letter agent alias
 (`core_math_clamp_i16` → `cl`), readable in `.fgx`, short in `.fgai`, AST
 identical, verified lossless (see `docs/prelude_aliases.md`). On
-builtin-calling code the effect is real: `audio_mix.fgx` improved from
-agent/human 0.93 → **0.82** and best/human 0.91 → **0.79**. Code that does
+builtin-calling code the *heuristic* improved: `audio_mix.fgx` went from
+agent/human 0.93 → 0.82 and best/human 0.91 → 0.79. Under real BPE that file's
+agent form is 15.2% smaller — the best result in the measured sample, and
+consistent with aliases replacing long multi-token names — but no measurement was
+taken before and after the change, so it does not isolate the aliases' effect. Code that does
 not call builtins is unchanged. This is the largest per-file lever found so
 far, because the canonical builtin names are long and the calls are
 frequent — but it still only applies to builtin-heavy code, and the
 order-of-magnitude win remains in not sending the file at all.
 
-## The edit-task benchmark (the real win, measured)
+## The edit-task cost model — and the baseline that was missing
 
-`fgx edit-bench` models a realistic multi-edit task and confirms the
-hypothesis. Whole-file strategy = read the file once then re-emit it on each
-edit (`file * (1+N)`); patch strategy = read the symbol map once, then per
-edit read only the target symbol and emit a small semantic patch
-(`map + N * (symbol + patch)`).
+`fgx edit-bench` is a **cost model**, not a measurement of a coding task: no
+agent performs the edits, nothing checks both strategies reach the same result,
+and every count is `heuristic-v1`. It compares three strategies for N edits:
 
-| File | functions | patch/whole @ 8 edits | break-even |
-| --- | --- | --- | --- |
-| media/audio_mix.fgx | 2 | 0.52 | 1 edit |
-| audio/src/dsp.fgx | 12 | 0.12 | 1 edit |
-| capsule/web_session.fgx | 0 | 0.06 | 1 edit |
+- **Whole-file resend** — `file * (1 + N)`. A deliberately weak baseline.
+- **Text patch** — read the file once, keep it, send a small patch per edit:
+  `file + N * patch`. What a competent conventional agent actually does.
+- **Map + symbol + semantic patch** — `map + N * (symbol + patch)`.
 
-The patch strategy is cheaper **from the very first edit**, and the
-advantage widens with file size: ~2x on a tiny 2-function file, **~8x on a
-12-function file**. This is the order-of-magnitude token win — it comes from
-*not sending the file* (read one symbol, emit a small patch), exactly as the
-per-file measurement predicted. Per-file encoding tricks (dense syntax,
-aliases, compression) are single-digit to ~20% on top; the structural win is
-here.
+Both patch strategies are charged the same patch size, so the comparison is
+about what each strategy *reads*. The representative patch is a real v1
+semantic patch against the file, with a `NODE_HASH` precondition, and the model
+refuses to run unless the patch engine accepts it.
+
+| File | functions | semantic / whole-file @ 8 edits | **semantic / text patch** @ 8 edits |
+| --- | ---: | ---: | ---: |
+| `hello.fgx` | 1 | 1.46 | **1.52** |
+| `media/audio_mix.fgx` | 2 | 0.68 | **1.83** |
+| `audio/src/dsp.fgx` | 12 | 0.15 | **0.94** |
+| `apps/wav_waveform/src/main.fgx` | 6 | 0.20 | **1.32** |
+| `capsule/web_session.fgx` | 0 | rejected — no functions to edit | rejected |
+
+**What this page used to claim, and why it was wrong.** It reported the
+semantic-patch strategy as "~2x cheaper on a 2-function file, ~8x on a
+12-function file", and called that "the order-of-magnitude token win". Every one
+of those figures compared against re-sending the whole file on every edit, a
+workflow no competent agent uses. Against the text-patch baseline the same model
+shows **no general advantage**: the semantic strategy costs more on three of four
+files and is roughly even on the largest. The row for `web_session.fgx` was worse
+than optimistic — the file has no functions, so the old model charged nothing
+for reading the edit target and still invented a function patch, reporting a
+94% saving on edits that could not happen. It is now rejected.
+
+Two further corrections: the old representative patch used a
+`REPLACE_STATEMENT` operation the patch protocol does not have, and the
+per-edit figures were heuristic counts, which can point the wrong way.
+
+What remains plausible, and unmeasured: that map + symbol retrieval wins when a
+file is too large to hold in context, when edits span many files, or when the
+conversation cannot cache what it read. Those are the cases worth measuring
+with real agents and real tokenizers before claiming anything.
 
 Reproduce: `fgx edit-bench <file> [--edits <n>] [--json]`.
 
@@ -247,3 +324,22 @@ Reproduce: `fgx capsule-tokens <file> [--json]`.
 ```text
 fgx token-report <file> [--json]
 ```
+
+## Measuring it yourself
+
+`fgx token-report` always reports the heuristic, labelled `"ratio_kind":
+"heuristic"` with a caveat attached. Add `--bpe-command` to measure every surface
+with a real tokenizer as well; the measured counts are reported beside the
+heuristic, never merged into it:
+
+```powershell
+pip install tiktoken
+fgx token-report examples/audio/src/dsp.fgx `
+  --bpe-command python --bpe-arg tools/tokenizer/tiktoken_count.py `
+  --bpe-arg o200k_base --bpe-name tiktoken:o200k_base --json
+```
+
+Any tokenizer can stand behind `--bpe-command`: it receives one surface's text on
+stdin and prints a single integer. A tokenizer that fails, or prints anything
+else, fails the whole measurement rather than leaving a table that mixes measured
+and estimated rows.

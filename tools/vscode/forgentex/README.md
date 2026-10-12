@@ -21,6 +21,33 @@ Stage 20 provides a dependency-free editor package for the first Forgentex workf
 - Patch approval preview backed by `fgx patch <source> <patch> --review`.
 - architecture filters for unsafe, assembly, ABI, x86_64, ARM/AArch64, and RISC-V slices.
 
+### The project filesystem
+
+A Forgentex file can carry its data, its bytes, and a graph of remarks beside
+its code (`docs/project_filesystem.md`). The extension shows that as what it is:
+
+- **A Project Filesystem view** in the activity bar, grouping a file's sections
+  into Data and Bytes, with every remark hanging under the thing it is about.
+  Each row carries its provenance — shape or media type, size, storage, and who
+  touched it when — and clicking one puts the cursor on its header.
+- **Payloads highlighted in their own language.** A `json`, `yaml`, `xml`,
+  `sql`, or `md` payload is syntax-highlighted as that language inside the
+  section; base64 recedes into a comment scope, because it is transport rather
+  than something to read.
+- **Remarks tell you who is talking.** An agent's note carries a different icon
+  and scope from a person's, and an open one is coloured as still needing
+  attention.
+- **Code lenses on a section header** show how many notes it has, how many are
+  open, and how many came from agents; a blob header offers a preview.
+- **Blob preview** renders a payload for what it is: an image as an image, audio
+  and video in a player, anything else as a hex dump of its first bytes.
+- **Add and extract** from the view's title bar: bring a file on disk into the
+  project, or materialise every payload back to real files.
+
+The view reads through the `fgx` CLI rather than parsing files in JavaScript. A
+second parser would be a second answer to "what is in this file", and the two
+would drift.
+
 ## Local Use
 
 1. Build or install the CLI so `fgx` is on your `PATH`, or set `forgentex.fgxPath` to the binary path.
@@ -42,6 +69,7 @@ Stage 20 provides a dependency-free editor package for the first Forgentex workf
 | `forgentex.checkOnType` | `true` | Re-check while typing. |
 | `forgentex.checkDelayMs` | `400` | Debounce before a check-on-type run, minimum `200`. |
 | `forgentex.defaultDeps` | `types,effects,tests` | Dependency slices for symbol context. |
+| `forgentex.author` | *(empty)* | Author recorded when the editor adds a section, e.g. `agent:claude-opus-5`. Empty lets the CLI record the current user. |
 
 ## Tests
 

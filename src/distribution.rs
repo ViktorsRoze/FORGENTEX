@@ -4,11 +4,20 @@
 //! which binaries ship, where they install, which host triples are supported,
 //! which backends and prerequisites each host needs, and the checksum algorithm
 //! that release artifacts are published under. `distribution_gaps()` computes
-//! the release-readiness of that contract from source-verifiable facts (the
-//! manifest itself, the release CI workflow, and the documented install path),
-//! and reports the single item that source alone cannot prove: a green release
-//! build that checksums and clean-installs the toolchain across the supported
-//! host matrix in CI.
+//! the release-readiness of that contract from source-verifiable facts: the
+//! manifest itself, the release CI workflow, the documented install path, and
+//! the recorded proof of a real release run.
+//!
+//! 0.1 verifies one host, `x86_64-pc-windows-msvc`. Linux and macOS are listed
+//! because the toolchain is dependency-free source that builds there, but they
+//! are declared unverified rather than supported: claiming a host no CI job has
+//! ever built would be the kind of promise this gate exists to prevent.
+//!
+//! The operational proof — that a release build really did checksum and
+//! clean-install — cannot be asserted by source, so it is *recorded* instead,
+//! in `docs/public_0_1_release_proof.md`. This module parses that file and
+//! reports precisely which field is still missing, so the gate closes on
+//! evidence rather than on someone editing a status.
 
 pub const DISTRIBUTION_SCHEMA: &str = "forgentex.distribution.v1";
 pub const CHECKSUM_ALGORITHM: &str = "sha256";
@@ -17,6 +26,15 @@ pub const CHECKSUM_ALGORITHM: &str = "sha256";
 /// artifacts. Embedding it ties the distribution gate to the real workflow.
 const CI_WORKFLOW: &str = include_str!("../.github/workflows/ci.yml");
 const README: &str = include_str!("../README.md");
+
+/// The recorded proof of a green release run. Committed to the repository so a
+/// checkout can tell whether 0.1's one operational claim has been met.
+pub const RELEASE_PROOF_PATH: &str = "docs/public_0_1_release_proof.md";
+const RELEASE_PROOF: &str = include_str!("../docs/public_0_1_release_proof.md");
+
+/// The one host 0.1 verifies. Everything else is a source build a user may
+/// succeed with, and the manifest says so rather than implying support.
+pub const VERIFIED_HOST: &str = "x86_64-pc-windows-msvc";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DistArtifact {
@@ -32,6 +50,10 @@ pub struct DistHost {
     pub os: &'static str,
     pub primary: bool,
     pub ci_verified: bool,
+    /// `verified` — CI builds, checksums, and clean-installs this host.
+    /// `source-build-unverified` — the source is portable and expected to build,
+    /// but no CI job has proven it, so 0.1 promises nothing about it.
+    pub support: &'static str,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,22 +86,25 @@ pub const DIST_ARTIFACTS: &[DistArtifact] = &[
 
 pub const DIST_HOSTS: &[DistHost] = &[
     DistHost {
-        triple: "x86_64-pc-windows-msvc",
+        triple: VERIFIED_HOST,
         os: "windows",
         primary: true,
         ci_verified: true,
+        support: "verified",
     },
     DistHost {
         triple: "x86_64-unknown-linux-gnu",
         os: "linux",
         primary: false,
         ci_verified: false,
+        support: "source-build-unverified",
     },
     DistHost {
         triple: "aarch64-apple-darwin",
         os: "macos",
         primary: false,
         ci_verified: false,
+        support: "source-build-unverified",
     },
 ];
 
@@ -143,10 +168,9 @@ pub fn distribution_manifest() -> DistributionManifest {
 
 /// Gaps that keep the public 0.1 distribution gate from passing.
 ///
-/// The manifest, the release CI workflow, and the documented install path are
-/// checked from source. The final residual is intentional and honest: a green
-/// release build that checksums and clean-installs across the supported host
-/// matrix is a CI-runtime fact that cannot be asserted from a source checkout.
+/// The manifest, the release CI workflow, the documented install path, and the
+/// recorded release proof are all checked from source, so this answers the same
+/// way in a checkout as it does in CI.
 pub fn distribution_gaps() -> Vec<String> {
     let mut gaps = Vec::new();
 
@@ -171,6 +195,25 @@ pub fn distribution_gaps() -> Vec<String> {
     }
     if !DIST_HOSTS.iter().any(|host| host.ci_verified) {
         gaps.push("distribution manifest declares no CI-verified host".to_string());
+    }
+    for host in DIST_HOSTS {
+        // A host may not be listed as verified without the CI that verifies it,
+        // and an unverified one may not read as a promise.
+        match host.support {
+            "verified" if !host.ci_verified => gaps.push(format!(
+                "host {} is declared verified but is not CI-verified",
+                host.triple
+            )),
+            "source-build-unverified" if host.ci_verified => gaps.push(format!(
+                "host {} is CI-verified but declared unverified",
+                host.triple
+            )),
+            "verified" | "source-build-unverified" => {}
+            other => gaps.push(format!(
+                "host {} declares unknown support level '{other}'",
+                host.triple
+            )),
+        }
     }
     if CHECKSUM_ALGORITHM.is_empty() {
         gaps.push("distribution manifest declares no checksum algorithm".to_string());
@@ -208,15 +251,72 @@ pub fn distribution_gaps() -> Vec<String> {
         }
     }
 
-    // Residual: a real green CI release run is the operational proof. Only the
-    // release CI, on the supported host matrix, can produce and publish the
-    // per-host checksummed artifacts and prove a clean install; a source
-    // checkout cannot assert that this has happened.
-    gaps.push(
-        "exercise the release-artifacts CI job on the supported host matrix and publish its checksummed clean-install proof"
-            .to_string(),
-    );
+    // 4. The one operational claim: a real release run, recorded.
+    gaps.extend(release_proof_gaps());
 
+    gaps
+}
+
+/// What the recorded release proof is still missing.
+///
+/// Each field is something a reader can check for themselves: the run to open,
+/// the commit it was built from, the host it ran on, and the checksums a user
+/// can compare against what they downloaded. A placeholder is not a proof, so
+/// `pending` reads as absent.
+pub fn release_proof_gaps() -> Vec<String> {
+    release_proof_gaps_in(RELEASE_PROOF)
+}
+
+/// The same check against supplied text, so the rules can be exercised against
+/// a filled proof without waiting for one.
+pub fn release_proof_gaps_in(proof: &str) -> Vec<String> {
+    let field = |name: &str| -> Option<String> {
+        proof.lines().find_map(|line| {
+            let rest = line.trim().strip_prefix(name)?.strip_prefix(':')?.trim();
+            (!rest.is_empty() && rest != "pending").then(|| rest.to_string())
+        })
+    };
+    let hex = |value: &str, width: usize| {
+        value.len() == width && value.chars().all(|c| c.is_ascii_hexdigit())
+    };
+    let mut gaps = Vec::new();
+    let mut require = |name: &str, valid: fn(&str) -> bool, expected: &str| match field(name) {
+        None => gaps.push(format!(
+            "{RELEASE_PROOF_PATH} does not record {name} ({expected})"
+        )),
+        Some(value) if !valid(&value) => gaps.push(format!(
+            "{RELEASE_PROOF_PATH} records {name} as '{value}', which is not {expected}"
+        )),
+        Some(_) => {}
+    };
+    require(
+        "run_url",
+        |value| value.starts_with("https://") && value.contains("/actions/runs/"),
+        "a link to the release-artifacts run",
+    );
+    require(
+        "commit",
+        |value| value.len() == 40 && value.chars().all(|c| c.is_ascii_hexdigit()),
+        "the 40-character commit the run built",
+    );
+    require(
+        "host",
+        |value| value == VERIFIED_HOST,
+        "the verified host triple",
+    );
+    for artifact in DIST_ARTIFACTS {
+        match field(artifact.name) {
+            None => gaps.push(format!(
+                "{RELEASE_PROOF_PATH} does not record the {} checksum from that run",
+                artifact.name
+            )),
+            Some(value) if !hex(&value, 64) => gaps.push(format!(
+                "{RELEASE_PROOF_PATH} records a {} checksum that is not a sha256 digest",
+                artifact.name
+            )),
+            Some(_) => {}
+        }
+    }
     gaps
 }
 
@@ -269,7 +369,8 @@ impl DistributionManifest {
             out.push_str(&format!("\"triple\": {}, ", json_string(host.triple)));
             out.push_str(&format!("\"os\": {}, ", json_string(host.os)));
             out.push_str(&format!("\"primary\": {}, ", host.primary));
-            out.push_str(&format!("\"ci_verified\": {}", host.ci_verified));
+            out.push_str(&format!("\"ci_verified\": {}, ", host.ci_verified));
+            out.push_str(&format!("\"support\": {}", json_string(host.support)));
             out.push('}');
             if idx + 1 < self.hosts.len() {
                 out.push(',');
@@ -355,8 +456,8 @@ impl DistributionManifest {
         out.push_str("hosts:\n");
         for host in &self.hosts {
             out.push_str(&format!(
-                "  - {} os={} primary={} ci_verified={}\n",
-                host.triple, host.os, host.primary, host.ci_verified
+                "  - {} os={} primary={} ci_verified={} support={}\n",
+                host.triple, host.os, host.primary, host.ci_verified, host.support
             ));
         }
         out.push_str("backends:\n");

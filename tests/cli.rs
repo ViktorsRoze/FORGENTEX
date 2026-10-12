@@ -358,7 +358,9 @@ fn targets_and_target_check_are_available() {
     )
     .unwrap();
     let source_path_text = source_path.to_string_lossy().to_string();
-    let out = assert_success(fgx(&[
+    // The program has a diagnostic, so `check` must fail — while still
+    // printing the full JSON report on stdout for a wrapper to read.
+    let out = assert_failure(fgx(&[
         "check",
         &source_path_text,
         "--target",
@@ -1374,6 +1376,13 @@ fn fuzz_and_backend_differential_commands_are_available() {
     assert!(diff.contains("\"schema\": \"forgentex.backend_differential.v1\""));
     assert!(diff.contains("\"interpreter_status\": \"pass\""));
     assert!(diff.contains("\"backend_entry_found\": true"));
+    // The command earns its name only if it executed the generated C. On a
+    // host without a compiler it must say so rather than pass silently.
+    assert!(
+        diff.contains("\"native_execution\": \"matched\"")
+            || diff.contains("\"native_execution\": \"unavailable\""),
+        "{diff}"
+    );
     assert!(diff.contains("\"result\": \"pass\""));
 
     let err = assert_failure(fgx(&["fuzz", "--iterations", "nope"]));
@@ -2024,8 +2033,12 @@ fn release_check_command_is_available() {
 #[test]
 fn help_and_unknown_command_are_covered() {
     let out = assert_success(fgx(&["help"]));
-    assert!(out.contains("Forgentex demo CLI"));
+    assert!(out.contains("Forgentex CLI"));
     assert!(out.contains("fgx --version"));
+    // The writing verbs each carry their own flags, so help is usable for the
+    // guarded edits rather than listing one merged `fs` line.
+    assert!(out.contains("fgx fs set <file> --tag <node-id> --from <path> [--expect <hash>]"));
+    assert!(out.contains("fgx fs changes <file> --rev <git-rev>|--against <file>|--since <iso>"));
     assert!(out.contains("fgx doctor [--json] [--strict]"));
     assert!(out.contains("fgx diagnose <file> --json"));
     assert!(out.contains("fgx diagnostics list"));
@@ -2476,28 +2489,23 @@ fn vscode_extension_suites_pass() {
     }
 
     let extension_dir = manifest_dir().join("tools/vscode/forgentex");
-    let release_fgx = manifest_dir()
-        .join("target/release")
-        .join(if cfg!(windows) { "fgx.exe" } else { "fgx" });
+    // The binary this test run built, not whatever is left in target/release:
+    // a stale release binary rejects syntax the language has since gained, and
+    // the suites would report that as a broken extension.
+    let fgx_binary = std::path::PathBuf::from(env!("CARGO_BIN_EXE_fgx"));
 
-    // Grammar coverage never shells out to fgx, so it always runs.
-    let mut suites = vec!["test/grammar-coverage.js"];
-    if release_fgx.exists() {
-        suites.push("test/snippet-check.js");
-        suites.push("test/extension-smoke.js");
-    } else {
-        eprintln!(
-            "skipping fgx-backed extension suites: {} not built",
-            release_fgx.display()
-        );
-    }
+    let suites = vec![
+        "test/grammar-coverage.js",
+        "test/snippet-check.js",
+        "test/extension-smoke.js",
+    ];
 
     for suite in suites {
         let mut command = std::process::Command::new(node);
-        command.arg(suite).current_dir(&extension_dir);
-        if release_fgx.exists() {
-            command.arg(&release_fgx);
-        }
+        command
+            .arg(suite)
+            .arg(&fgx_binary)
+            .current_dir(&extension_dir);
         let output = command
             .output()
             .unwrap_or_else(|err| panic!("failed to run {suite}: {err}"));
@@ -2611,4 +2619,269 @@ fn dap_adapter_serves_a_full_debug_session() {
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("DAP session OK"));
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn fs_carries_a_project_filesystem_in_one_file() {
+    // The cycle a person actually performs: start from a program, add a text
+    // payload and a binary one, look around, then materialise it all back to
+    // real files and require the bytes to be identical.
+    let root = temp_file("fs_project");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let project = root.join("proj.fgx");
+    std::fs::write(
+        &project,
+        "fn total(a: i32, b: i32) -> i32:\n    return a + b\n",
+    )
+    .unwrap();
+
+    let csv = root.join("sales.csv");
+    std::fs::write(&csv, "region,units\nnorth,120\n").unwrap();
+    // Bytes that are not text and do not survive a lossy conversion.
+    let binary: Vec<u8> = (0..=255u8).collect();
+    let wav = root.join("tone.wav");
+    std::fs::write(&wav, &binary).unwrap();
+
+    let project_arg = project.display().to_string();
+    assert_success(fgx(&[
+        "fs",
+        "add",
+        &project_arg,
+        "--from",
+        &csv.display().to_string(),
+        "--by",
+        "agent:claude-opus-5",
+        "--at",
+        "2026-09-20T12:00:00Z",
+    ]));
+    assert_success(fgx(&[
+        "fs",
+        "add",
+        &project_arg,
+        "--from",
+        &wav.display().to_string(),
+        "--by",
+        "human:viktor",
+        "--at",
+        "2026-09-20T12:01:00Z",
+    ]));
+
+    // The file still checks, and the code that was already there is untouched.
+    assert!(assert_success(fgx(&["check", &project_arg])).contains("ok"));
+    let written = std::fs::read_to_string(&project).unwrap();
+    assert!(
+        written.contains("fn total(a: i32, b: i32) -> i32:"),
+        "{written}"
+    );
+
+    let listing = assert_success(fgx(&["fs", "ls", &project_arg]));
+    assert!(listing.contains("@data.sales"), "{listing}");
+    assert!(listing.contains("@blob.tone"), "{listing}");
+
+    let stat = assert_success(fgx(&["fs", "stat", &project_arg, "--tag", "@blob.tone"]));
+    assert!(stat.contains("bytes=256"), "{stat}");
+    assert!(stat.contains("by=human:viktor"), "{stat}");
+
+    let out = root.join("out");
+    assert_success(fgx(&[
+        "fs",
+        "extract",
+        &project_arg,
+        "--out",
+        &out.display().to_string(),
+    ]));
+    assert_eq!(
+        std::fs::read(out.join("tone.wav")).unwrap(),
+        binary,
+        "a binary payload must come back byte for byte"
+    );
+    assert_eq!(
+        std::fs::read_to_string(out.join("sales.csv")).unwrap(),
+        "region,units\nnorth,120\n"
+    );
+
+    // Adding the same name twice would shadow a section rather than replace it.
+    let duplicate = assert_failure(fgx(&[
+        "fs",
+        "add",
+        &project_arg,
+        "--from",
+        &csv.display().to_string(),
+    ]));
+    assert!(duplicate.contains("already in this file"), "{duplicate}");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn fs_edits_are_guarded_stamped_and_visible_in_the_change_feed() {
+    // Two agents on one file: the first reads a section's hash and edits
+    // against it; the second edits against the same stale hash and must be
+    // refused. Then the change feed, from a git revision, must name exactly
+    // what moved and who moved it.
+    let root = temp_file("fs_feed");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let project = root.join("proj.fgx");
+    std::fs::write(
+        &project,
+        "fn total(a: i32, b: i32) -> i32:\n    return a + b\n",
+    )
+    .unwrap();
+    let csv = root.join("sales.csv");
+    std::fs::write(&csv, "region,units\nnorth,120\n").unwrap();
+    let p = project.display().to_string();
+    let csv_arg = csv.display().to_string();
+    assert_success(fgx(&[
+        "fs",
+        "add",
+        &p,
+        "--from",
+        &csv_arg,
+        "--by",
+        "human:viktor",
+        "--at",
+        "2026-09-20T09:00:00Z",
+    ]));
+    assert_success(fgx(&[
+        "fs",
+        "note",
+        &p,
+        "--on",
+        "@data.sales",
+        "--text",
+        "North looks doubled.",
+        "--by",
+        "agent:claude-opus-5",
+        "--at",
+        "2026-09-20T10:00:00Z",
+    ]));
+
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(args)
+            .output()
+    };
+    let have_git = git(&["init", "-q"]).is_ok_and(|out| out.status.success());
+    if have_git {
+        for args in [
+            &["add", "proj.fgx"][..],
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "-m",
+                "base",
+            ][..],
+        ] {
+            assert!(git(args).unwrap().status.success(), "git {args:?}");
+        }
+    }
+
+    let listing = assert_success(fgx(&["fs", "ls", &p, "--json"]));
+    let marker = "\"id\": \"@data.sales\", \"hash\": \"";
+    let start = listing.find(marker).expect(&listing) + marker.len();
+    let read_hash = listing[start..start + 16].to_string();
+
+    let fixed = root.join("fixed.csv");
+    std::fs::write(&fixed, "region,units\nnorth,60\n").unwrap();
+    let fixed_arg = fixed.display().to_string();
+    assert_success(fgx(&[
+        "fs",
+        "set",
+        &p,
+        "--tag",
+        "@data.sales",
+        "--from",
+        &fixed_arg,
+        "--expect",
+        &read_hash,
+        "--by",
+        "agent:claude-opus-5",
+        "--at",
+        "2026-09-21T08:00:00Z",
+    ]));
+    let stale = assert_failure(fgx(&[
+        "fs",
+        "set",
+        &p,
+        "--tag",
+        "@data.sales",
+        "--from",
+        &csv_arg,
+        "--expect",
+        &read_hash,
+        "--by",
+        "agent:other",
+    ]));
+    assert!(stale.contains("has changed since it was read"), "{stale}");
+    let written = std::fs::read_to_string(&project).unwrap();
+    assert!(
+        written.contains("north,60"),
+        "the refused edit must not land: {written}"
+    );
+    assert!(
+        written.contains("modified \"2026-09-21T08:00:00Z\" by \"agent:claude-opus-5\""),
+        "{written}"
+    );
+
+    assert_success(fgx(&[
+        "fs",
+        "resolve",
+        &p,
+        "--tag",
+        "@note.n1",
+        "--text",
+        "Halved at source.",
+        "--by",
+        "human:viktor",
+        "--at",
+        "2026-09-21T08:05:00Z",
+    ]));
+    assert!(assert_success(fgx(&["check", &p])).contains("ok"));
+
+    let since = assert_success(fgx(&[
+        "fs",
+        "changes",
+        &p,
+        "--since",
+        "2026-09-21T00:00:00Z",
+    ]));
+    assert!(since.contains("changed\t@data.sales"), "{since}");
+    assert!(since.contains("added\t@note.n2"), "{since}");
+    assert!(!since.contains("@function.total"), "{since}");
+
+    if have_git {
+        let feed = assert_success(fgx(&["fs", "changes", &p, "--rev", "HEAD", "--json"]));
+        assert!(feed.contains("forgentex.project_changes.v1"), "{feed}");
+        for expected in [
+            "\"id\": \"@data.sales\", \"kind\": \"data section\", \"change\": \"changed\"",
+            "\"id\": \"@note.n1\", \"kind\": \"note\", \"change\": \"changed\"",
+            "\"id\": \"@note.n2\", \"kind\": \"note\", \"change\": \"added\"",
+        ] {
+            assert!(feed.contains(expected), "missing {expected} in {feed}");
+        }
+        assert!(!feed.contains("@function.total"), "{feed}");
+    }
+
+    let stranded = assert_failure(fgx(&["fs", "rm", &p, "--tag", "@data.sales"]));
+    assert!(stranded.contains("--with-notes"), "{stranded}");
+    let removed = assert_success(fgx(&[
+        "fs",
+        "rm",
+        &p,
+        "--tag",
+        "@data.sales",
+        "--with-notes",
+    ]));
+    assert!(removed.contains("removed @note.n2"), "{removed}");
+    assert!(assert_success(fgx(&["check", &p])).contains("ok"));
+
+    let _ = std::fs::remove_dir_all(&root);
 }

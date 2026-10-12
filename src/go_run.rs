@@ -119,7 +119,25 @@ pub(crate) fn go_json_type(ty: &str) -> &'static str {
 /// driver unmarshals each argument into its typed parameter, calls the entry,
 /// and marshals the result back to JSON. Gated by the capsule's sandbox
 /// approval (the live capsule runtime, rt.1).
+/// Run a capsule live under the default managed policy: every enforceable limit
+/// applied, and any capsule declaring a limit that cannot be enforced refused.
 pub fn invoke_live(capsule: &Capsule, json_args: &str) -> Result<String, String> {
+    invoke_live_with(
+        capsule,
+        json_args,
+        crate::managed_exec::ManagedPolicy::default(),
+    )
+}
+
+/// Run a capsule live under `policy`. The host runtime runs inside the managed
+/// containment layer (`managed_exec`): wall deadline, CPU and output budgets,
+/// declared memory ceiling, and process-tree cleanup.
+pub fn invoke_live_with(
+    capsule: &Capsule,
+    json_args: &str,
+    policy: crate::managed_exec::ManagedPolicy,
+) -> Result<String, String> {
+    let managed_plan = crate::managed_exec::plan(capsule, policy)?;
     if !crate::sandbox::is_approved(capsule) {
         return Err("capsule effects are not covered by its sandbox".to_string());
     }
@@ -137,21 +155,22 @@ pub fn invoke_live(capsule: &Capsule, json_args: &str) -> Result<String, String>
         ));
         call_args.push(format!("a{i}"));
     }
-    let needs_os = !capsule.inputs.is_empty();
-    let mut imports = vec!["\t\"encoding/json\"", "\t\"fmt\""];
-    if needs_os {
-        imports.push("\t\"os\"");
-    }
-    let read_args = if needs_os {
-        "    var _args []json.RawMessage\n    json.Unmarshal([]byte(os.Args[1]), &_args)\n"
+    // `os` and `io` are always needed now: the request arrives on stdin and the
+    // result leaves through the saved stdout handle.
+    let imports = ["\t\"encoding/json\"", "\t\"fmt\"", "\t\"io\"", "\t\"os\""];
+    let read_args = if capsule.inputs.is_empty() {
+        "\t_, _ = io.ReadAll(os.Stdin)\n"
     } else {
-        ""
+        "\tvar _args []json.RawMessage\n\t_in, _ := io.ReadAll(os.Stdin)\n\tjson.Unmarshal(_in, &_args)\n"
     };
+    let nonce = crate::managed_protocol::nonce();
     let main_src = format!(
-        "package main\n\nimport (\n{}\n)\n\n{body}\n\nfunc main() {{\n{read_args}{}\n    _r := {entry}({})\n    _b, _ := json.Marshal(_r)\n    fmt.Println(string(_b))\n}}\n",
-        imports.join("\n"),
-        binds.join("\n"),
-        call_args.join(", ")
+        "package main\n\nimport (\n{imports}\n)\n\n{body}\n\nfunc main() {{\n{prelude}{read_args}{binds}\n\t_r := {entry}({args})\n\t_b, _ := json.Marshal(_r)\n\t{emit}\n}}\n",
+        imports = imports.join("\n"),
+        prelude = crate::managed_protocol::go_prelude(),
+        binds = binds.join("\n"),
+        args = call_args.join(", "),
+        emit = crate::managed_protocol::go_emit(&nonce, "string(_b)"),
     );
 
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -163,21 +182,45 @@ pub fn invoke_live(capsule: &Capsule, json_args: &str) -> Result<String, String>
     std::fs::write(&main_path, main_src)
         .map_err(|err| format!("failed to write go source: {err}"))?;
 
-    let output = Command::new(&go)
-        .arg("run")
-        .arg(&main_path)
-        .arg(json_args)
-        .output()
-        .map_err(|err| format!("failed to spawn go: {err}"))?;
+    // `go run` compiles and runs in one child tree, so the limits cover the
+    // toolchain as well as the capsule — which is why the managed defaults are
+    // more generous than the native ones.
+    let argv = vec![
+        go.to_string(),
+        "run".to_string(),
+        main_path.display().to_string(),
+    ];
+    let output = match crate::managed_exec::execute_with_input(
+        &argv,
+        &managed_plan,
+        Some(json_args.as_bytes()),
+    ) {
+        Ok(output) => output,
+        Err(err) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(err);
+        }
+    };
     let _ = std::fs::remove_dir_all(&dir);
+    let framed = crate::managed_protocol::split(
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
+        &nonce,
+    );
     if !output.status.success() {
+        // Compile errors from `go run` arrive here too, and they are exactly
+        // what a caller needs to see.
         return Err(format!(
             "go capsule '{}' failed: {}",
             capsule.name,
-            String::from_utf8_lossy(&output.stderr).trim()
+            if framed.diagnostics.is_empty() {
+                "no output".to_string()
+            } else {
+                framed.diagnostics
+            }
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    framed.result_or_error(&capsule.name)
 }
 
 fn is_numeric(ty: &str) -> bool {

@@ -496,6 +496,8 @@ fn collect_semantic_units(program: &crate::ast::Program, out: &mut Vec<(String, 
     use crate::ast::Item;
     for item in &program.items {
         match item {
+            // Carried sections hold content, not code to learn from.
+            Item::Data(_) | Item::Blob(_) | Item::Note(_) => {}
             Item::Struct(decl) => {
                 for field in &decl.fields {
                     collect_type_unit(&field.ty, out);

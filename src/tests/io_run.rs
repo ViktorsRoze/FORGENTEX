@@ -207,7 +207,10 @@ fn hosted_run_with_ir_executes_fir_body_instead_of_ast_body() {
         None,
         grants(&["fs.read"]),
         Vec::new(),
-        false,
+        crate::interp::CapsulePolicy {
+            warm: false,
+            ..Default::default()
+        },
     )
     .unwrap();
 

@@ -557,22 +557,31 @@ pub(crate) fn write_message<W: Write>(writer: &mut W, message: &str) -> Result<(
 
 pub(crate) fn string_field(source: &str, field: &str) -> Option<String> {
     let needle = format!("\"{field}\"");
-    let start = source.find(&needle)? + needle.len();
-    let rest = source[start..].trim_start();
-    let rest = rest.strip_prefix(':')?.trim_start();
-    let rest = rest.strip_prefix('"')?;
-    let mut out = String::new();
-    let mut chars = rest.chars();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '"' => return Some(out),
-            '\\' => match chars.next()? {
-                'n' => out.push('\n'),
-                't' => out.push('\t'),
-                'r' => out.push('\r'),
+    let mut cursor = 0;
+    while let Some(found) = source[cursor..].find(&needle) {
+        let start = cursor + found + needle.len();
+        cursor = start;
+        let rest = source[start..].trim_start();
+        let Some(rest) = rest.strip_prefix(':') else {
+            // The text appeared as a string value, not as this field's key.
+            continue;
+        };
+        let Some(rest) = rest.trim_start().strip_prefix('"') else {
+            continue;
+        };
+        let mut out = String::new();
+        let mut chars = rest.chars();
+        while let Some(ch) = chars.next() {
+            match ch {
+                '"' => return Some(out),
+                '\\' => match chars.next()? {
+                    'n' => out.push('\n'),
+                    't' => out.push('\t'),
+                    'r' => out.push('\r'),
+                    other => out.push(other),
+                },
                 other => out.push(other),
-            },
-            other => out.push(other),
+            }
         }
     }
     None
@@ -580,13 +589,24 @@ pub(crate) fn string_field(source: &str, field: &str) -> Option<String> {
 
 pub(crate) fn number_field(source: &str, field: &str) -> Option<i64> {
     let needle = format!("\"{field}\"");
-    let start = source.find(&needle)? + needle.len();
-    let rest = source[start..].trim_start().strip_prefix(':')?.trim_start();
-    let digits: String = rest
-        .chars()
-        .take_while(|ch| ch.is_ascii_digit() || *ch == '-')
-        .collect();
-    digits.parse().ok()
+    let mut cursor = 0;
+    while let Some(found) = source[cursor..].find(&needle) {
+        let start = cursor + found + needle.len();
+        cursor = start;
+        let rest = source[start..].trim_start();
+        let Some(rest) = rest.strip_prefix(':') else {
+            continue;
+        };
+        let digits: String = rest
+            .trim_start()
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit() || *ch == '-')
+            .collect();
+        if let Ok(value) = digits.parse() {
+            return Some(value);
+        }
+    }
+    None
 }
 
 /// Every value of a repeated numeric field, in order — used for the line list

@@ -1,4 +1,4 @@
-use crate::doctor::{doctor_report, doctor_status, DOCTOR_SCHEMA};
+use crate::doctor::{classify_windows_version, doctor_report, doctor_status, DOCTOR_SCHEMA};
 
 #[test]
 fn doctor_status_requires_a_supported_host_and_path_install() {
@@ -25,4 +25,20 @@ fn doctor_report_has_stable_machine_and_human_shapes() {
     let text = report.to_text();
     assert!(text.starts_with("Forgentex doctor\n"));
     assert!(text.contains("interpreter=ready"));
+}
+
+#[test]
+fn windows_nt_versions_are_reported_as_the_right_product_generation() {
+    assert_eq!(
+        classify_windows_version("Microsoft Windows [Version 10.0.19045.5965]"),
+        "Windows 10 build 19045.5965 (NT 10.0)"
+    );
+    assert_eq!(
+        classify_windows_version("Microsoft Windows [Version 10.0.26200.7171]"),
+        "Windows 11 build 26200.7171 (NT 10.0)"
+    );
+    assert_eq!(
+        classify_windows_version("windows (version unavailable)"),
+        "windows (version unavailable)"
+    );
 }

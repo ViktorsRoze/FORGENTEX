@@ -8,10 +8,25 @@
 //! the same program across its surfaces (human, agent, canonical AST, and
 //! compressed agent) so token-efficiency claims become evidence.
 //!
-//! The estimate is a *heuristic*, not an exact GPT/BPE count. It is fair
-//! and monotonic across surfaces — in particular it charges one token per
-//! punctuation character — so the ratios between surfaces are meaningful
-//! even though absolute counts are approximate.
+//! # What the estimate is, and is not
+//!
+//! The estimate is a *heuristic*: a few rules about letters, digits,
+//! whitespace, and punctuation that run instantly and need no tokenizer. It is
+//! useful for local budgets — "will this fit" — and nothing more.
+//!
+//! This module used to say the heuristic was "fair and monotonic across
+//! surfaces, so the ratios between surfaces are meaningful". That was wrong,
+//! and measurably so: against real byte-pair encoders (`cl100k_base` and
+//! `o200k_base`) the heuristic put `audio/src/dsp.fgx` at 0.97 agent/human when
+//! the agent form was actually about 1% *larger*, and `smoke/inline_tests.fgx`
+//! at 0.97 when it was about 7% larger. It does not merely misjudge the size of
+//! a difference; it can report the wrong direction. So no ratio it produces is
+//! evidence that one surface costs fewer tokens than another.
+//!
+//! Measured counts come from a real tokenizer through `--bpe-command`, which
+//! hands each surface to an external program and reads the count back. Those
+//! numbers are reported alongside the heuristic, never merged with it, and name
+//! the tokenizer that produced them.
 
 use crate::ast::Program;
 use crate::compress::{compress, minify_agent};
@@ -79,7 +94,26 @@ pub struct TokenReport {
     pub functions: usize,
     pub tests: usize,
     pub capsules: usize,
+    /// Counts from a real tokenizer, when one was supplied. Kept apart from the
+    /// heuristic fields so the two can never be read as the same measurement.
+    pub measured: Option<MeasuredTokens>,
 }
+
+/// Token counts produced by an external, real tokenizer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MeasuredTokens {
+    /// What produced the counts, as the external program described itself, or
+    /// the command line when it did not.
+    pub tokenizer: String,
+    pub human_tokens: usize,
+    pub agent_tokens: usize,
+    pub agent_minified_tokens: usize,
+    pub agent_compressed_tokens: usize,
+}
+
+/// The standing caveat attached to every heuristic ratio, in text and JSON, so
+/// a reader who only sees one number still sees what kind of number it is.
+pub const HEURISTIC_CAVEAT: &str = "heuristic-v1 ratios are estimates and can point the wrong way; they are not evidence that one surface costs fewer tokens. Use --bpe-command for measured counts.";
 
 fn ratio(part: usize, whole: usize) -> f64 {
     if whole == 0 {
@@ -111,7 +145,46 @@ pub fn report(file: &str, program: &Program) -> TokenReport {
         functions: program.functions().count(),
         tests: program.tests().count(),
         capsules: program.capsules().count(),
+        measured: None,
     }
+}
+
+/// The four surfaces a measurement covers, in the order they are reported.
+pub fn surfaces(program: &Program) -> [(&'static str, String); 4] {
+    let human = format_human(program);
+    let agent = format_agent(program);
+    let minified = minify_agent(&agent);
+    let compressed = compress(&minified).compressed;
+    [
+        ("human", human),
+        ("agent", agent),
+        ("agent_minified", minified),
+        ("agent_compressed", compressed),
+    ]
+}
+
+/// Measure every surface with an external tokenizer.
+///
+/// `count` receives one surface's exact text and returns its token count. The
+/// CLI passes a closure that runs the user's command; tests pass a pure one.
+/// Every surface must be measured by the same tokenizer, so a failure on any of
+/// them fails the whole measurement rather than leaving a partial table that
+/// mixes measured and estimated numbers.
+pub fn measure(
+    program: &Program,
+    tokenizer: &str,
+    mut count: impl FnMut(&str) -> Result<usize, String>,
+) -> Result<MeasuredTokens, String> {
+    let [human, agent, minified, compressed] = surfaces(program);
+    Ok(MeasuredTokens {
+        tokenizer: tokenizer.to_string(),
+        human_tokens: count(&human.1).map_err(|err| format!("human surface: {err}"))?,
+        agent_tokens: count(&agent.1).map_err(|err| format!("agent surface: {err}"))?,
+        agent_minified_tokens: count(&minified.1)
+            .map_err(|err| format!("agent_minified surface: {err}"))?,
+        agent_compressed_tokens: count(&compressed.1)
+            .map_err(|err| format!("agent_compressed surface: {err}"))?,
+    })
 }
 
 impl TokenReport {
@@ -153,11 +226,34 @@ impl TokenReport {
             self.functions,
             self.tests,
             self.capsules
-        )
+        ) + &self.measured_text()
+    }
+
+    fn measured_text(&self) -> String {
+        let mut out = format!(
+            "  note: {HEURISTIC_CAVEAT}
+"
+        );
+        if let Some(m) = &self.measured {
+            out.push_str(&format!(
+                "  measured tokenizer={}
+  measured human_tokens={} agent_tokens={} agent_minified_tokens={} agent_compressed_tokens={}
+  measured agent_vs_human={:.3} best_vs_human={:.3}
+",
+                m.tokenizer,
+                m.human_tokens,
+                m.agent_tokens,
+                m.agent_minified_tokens,
+                m.agent_compressed_tokens,
+                ratio(m.agent_tokens, m.human_tokens),
+                ratio(m.agent_compressed_tokens, m.human_tokens),
+            ));
+        }
+        out
     }
 
     pub fn to_json(&self) -> String {
-        format!(
+        let base = format!(
             "{{\n  \"schema\": \"{}\",\n  \"file\": \"{}\",\n  \"tokenizer\": \"{}\",\n  \"human_tokens\": {},\n  \"agent_tokens\": {},\n  \"agent_minified_tokens\": {},\n  \"agent_compressed_tokens\": {},\n  \"canonical_ast_tokens\": {},\n  \"agent_vs_human\": {:.4},\n  \"minified_vs_agent\": {:.4},\n  \"compressed_vs_agent\": {:.4},\n  \"best_vs_human\": {:.4},\n  \"human_chars\": {},\n  \"agent_chars\": {},\n  \"functions\": {},\n  \"tests\": {},\n  \"capsules\": {}\n}}",
             self.schema,
             self.file,
@@ -176,6 +272,30 @@ impl TokenReport {
             self.functions,
             self.tests,
             self.capsules
+        );
+        // Additive fields, so existing consumers of the v1 schema keep working:
+        // the kind of every ratio above, and the measured counts when present.
+        let body = base.trim_end().trim_end_matches('}').trim_end().to_string();
+        let measured = match &self.measured {
+            None => "null".to_string(),
+            Some(m) => format!(
+                "{{\"tokenizer\": \"{}\", \"human_tokens\": {}, \"agent_tokens\": {}, \"agent_minified_tokens\": {}, \"agent_compressed_tokens\": {}, \"agent_vs_human\": {:.4}, \"best_vs_human\": {:.4}}}",
+                crate::json::escape(&m.tokenizer),
+                m.human_tokens,
+                m.agent_tokens,
+                m.agent_minified_tokens,
+                m.agent_compressed_tokens,
+                ratio(m.agent_tokens, m.human_tokens),
+                ratio(m.agent_compressed_tokens, m.human_tokens),
+            ),
+        };
+        format!(
+            "{body},
+  \"ratio_kind\": \"heuristic\",
+  \"caveat\": \"{}\",
+  \"measured\": {measured}
+}}",
+            crate::json::escape(HEURISTIC_CAVEAT)
         )
     }
 }

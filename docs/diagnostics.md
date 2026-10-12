@@ -107,3 +107,210 @@ fgx diagnose <file> --json
 Those diagnostics use the parser infrastructure schema from
 [parser_infrastructure_v1.md](parser_infrastructure_v1.md), including spans,
 repair hints, preserved comments, and token/source-map output.
+
+## Complete code index
+
+Two tiers of diagnostic code exist, and the difference matters when you are
+automating repair:
+
+- **Catalogued codes** (`PAR001`, `TYP004`, `BOR002`, …) are the frozen public
+  set. Each has an entry in [the diagnostic catalog](diagnostic_catalog.md) with
+  a rule, a safety classification, suggested patch kinds, and review gates;
+  `fgx diagnostics list --json` and `fgx explain <code> --json` serve them, and
+  `fgx fix --plan` can propose repairs for them. The 0.1 compatibility contract
+  freezes their shape.
+- **Rule codes** — everything below — are the strings a check emits in
+  `error` / `code`. They are stable identifiers a tool can match on, but they
+  carry no catalog entry, so `explain` does not know them.
+
+Every code a check can emit is listed here, and a test walks the source to
+require it: a new `Diagnostic::new("…")` that is not documented fails the suite,
+so this index cannot quietly fall behind the checker.
+
+### Parsing and lexing
+
+| Code | Meaning |
+| --- | --- |
+| `invalid_token` | An unterminated string literal, or a character that cannot start a token. |
+
+### Names, modules, and imports
+
+| Code | Meaning |
+| --- | --- |
+| `duplicate_symbol` | The same name is declared in two modules of one project. |
+| `duplicate_module` | Two modules in the manifest share a name. |
+| `duplicate_trait` | A trait is declared more than once. |
+| `unresolved_import` | An import names a module or item that does not exist. |
+| `import_cycle` | Modules import each other in a cycle. |
+| `reserved_type_name` | A declaration reuses a built-in runtime type name. |
+| `reserved_trait_name` | A declaration reuses a built-in trait name (`Eq`). |
+| `reserved_prelude_alias` | A function takes the name of a prelude alias. |
+
+### Control flow, enums, and patterns
+
+| Code | Meaning |
+| --- | --- |
+| `while_not_bool` | A `while` condition is not `bool`. |
+| `match_not_enum` | A `match` scrutinee is not an enum value. |
+| `non_exhaustive_match` | A `match` leaves variants uncovered; the message names them. |
+| `pattern_type_mismatch` | A pattern names a variant of a different enum. |
+| `unknown_enum` | A pattern or construction names an enum that does not exist. |
+| `unknown_enum_variant` | An enum has no such variant. |
+| `variant_arity` | A variant takes exactly one payload argument, and did not get it. |
+| `variant_payload_type` | A variant payload has the wrong type. |
+| `binding_on_data_less_variant` | A pattern binds a payload from a variant that has none. |
+| `slice_range_type` | A slice range is applied to something that is not an array or slice. |
+| `slice_range_bound_not_integer` | A slice range bound is not an integer. |
+
+### Function values and generics
+
+| Code | Meaning |
+| --- | --- |
+| `not_callable` | The callee is not a function value. |
+| `fn_value_arity` | A function value was called with the wrong number of arguments. |
+| `fn_value_arg_type` | An argument to a function value has the wrong type. |
+| `invalid_fn_type` | An `Fn[...]` type omits its return type before the effects marker. |
+| `invalid_fn_binder` | A `forall[...]` entry is not a named type parameter with optional bounds. |
+| `fn_binder_position` | `forall[...]` must be the single first argument of `Fn[...]`. |
+| `fn_effect_position` | `effects[...]` must be the single final argument of `Fn[...]`. |
+| `duplicate_fn_binder` | A function-value binder is repeated. |
+| `duplicate_fn_binder_bound` | A binder repeats a bound. |
+| `duplicate_fn_effect` | A function-value effect is repeated. |
+| `unknown_fn_effect` | A function-value effect is not a known effect. |
+| `unresolved_fn_binder` | A binder cannot be inferred from the call. |
+| `unused_fn_binder` | A binder cannot be inferred from the signature that declares it. |
+| `duplicate_type_param` | A generic type parameter is repeated. |
+| `duplicate_trait_bound` | A trait bound is repeated. |
+| `missing_trait_bound` | Equality on a generic type needs an `Eq` bound. |
+| `unknown_bound_param` | A bound references a type parameter that does not exist. |
+| `trait_bound_not_satisfied` | A concrete type does not satisfy a bound the callee requires. |
+| `unresolved_trait_bound` | A bounded type parameter cannot be inferred for a call. |
+
+### Traits, implementations, and associated items
+
+| Code | Meaning |
+| --- | --- |
+| `builtin_trait_impl` | `Eq` conformance is structural and cannot be implemented explicitly. |
+| `unknown_trait` | A bound or implementation names a trait that does not exist. |
+| `unknown_impl_trait` | An `impl` names an unknown trait. |
+| `unknown_impl_bound_param` | An implementation bound references an unknown type parameter. |
+| `duplicate_impl_trait_bound` | An implementation repeats a trait bound. |
+| `duplicate_impl_type_param` | An implementation repeats a type parameter. |
+| `unconstrained_impl_type_param` | An implementation type parameter never appears in its target type. |
+| `duplicate_trait_item` | A trait declares the same item twice. |
+| `duplicate_trait_method` | A trait declares the same method twice. |
+| `duplicate_trait_method_impl` | An implementation maps one method more than once. |
+| `duplicate_trait_const_impl` | An implementation defines one constant more than once. |
+| `duplicate_trait_type_impl` | An implementation defines one associated type more than once. |
+| `missing_trait_method_impl` | An implementation is missing a required method. |
+| `missing_trait_const_impl` | An implementation is missing a required constant. |
+| `missing_trait_type_impl` | An implementation is missing a required associated type. |
+| `trait_const_impl_missing` | A use site needs a trait constant no applicable implementation provides. |
+| `associated_type_impl_missing` | A use site needs an associated type no applicable implementation provides. |
+| `unknown_trait_method` | A trait has no such method. |
+| `unknown_trait_method_call` | A call names a method the trait does not require. |
+| `unknown_trait_method_function` | A method maps to a function that does not exist. |
+| `unknown_trait_const` | A trait has no such constant. |
+| `unknown_trait_const_access` | A constant access names a constant the trait does not declare. |
+| `unknown_trait_type` | A trait has no such associated type. |
+| `unknown_associated_type_projection` | A projection names an associated type the trait does not declare. |
+| `unknown_projection_trait` | A projection names a trait that does not exist. |
+| `unknown_trait_default_function` | A method default references a function that does not exist. |
+| `trait_method_arity` | A trait method was called with the wrong number of arguments. |
+| `trait_method_arg_type` | An argument to a trait method has the wrong type. |
+| `trait_method_signature_mismatch` | A bound function does not match the method it implements. |
+| `trait_method_bound_not_satisfied` | A receiver type does not implement the trait a call requires. |
+| `trait_const_not_constant` | A trait constant is not a literal constant expression. |
+| `trait_const_type_mismatch` | A trait constant has the wrong type. |
+| `trait_default_not_pure` | A default function must be safe and pure. |
+| `trait_default_signature_mismatch` | A default function does not match the method it defaults. |
+| `unresolved_trait_self` | A trait method call cannot infer `Self` from its arguments. |
+
+### Concurrency
+
+| Code | Meaning |
+| --- | --- |
+| `concurrency_handle_type` | An operation needs a handle of its own constructor (`Task[T]`, `Channel[T]`, …). |
+| `task_arity` | A task callable must take exactly one argument. |
+| `task_not_callable` | A task needs a typed one-argument function value. |
+| `task_input_type` | A task input does not match the callable's parameter. |
+| `task_continuation_input_type` | A task result does not match the continuation's parameter. |
+| `task_group_capacity_type` | A task-group capacity is not an integer. |
+| `channel_capacity_type` | A channel capacity is not an integer. |
+| `channel_value_type` | A sent value does not match the channel's element type. |
+| `clock_tick_type` | A clock operation needs an integer tick count. |
+| `timer_delay_type` | A timer reschedule delay is not an integer. |
+| `timer_interval_period_type` | A timer interval period is not an integer. |
+
+### Shared values and pipelines
+
+| Code | Meaning |
+| --- | --- |
+| `share_default_type` | A shared value's default does not match its declared type. |
+| `share_invalid_version` | A version reference is not `<share>@<canonical unsigned version>`. |
+| `share_unknown_binding` | A capsule binds a shared value that is not declared. |
+| `share_versioned_writer` | An explicit version reference cannot be used for an `rw` binding. |
+| `shared_multiple_writers` | Two capsules claim `rw` on one shared value. |
+
+### Capsules, sandboxes, and effects
+
+| Code | Meaning |
+| --- | --- |
+| `capsule_missing_version` | A capsule does not declare a runtime version. |
+| `capsule_missing_sandbox` | A capsule does not declare a sandbox policy. |
+| `capsule_missing_typed_boundary` | A capsule declares neither a typed input nor a typed output. |
+| `capsule_empty_code` | A capsule's body is empty. |
+| `capsule_call_arity` | A capsule was called with the wrong number of arguments. |
+| `capsule_arg_type` | A capsule input has the wrong type. |
+| `capsule_fixture_arity` | A `mock` has a different input/output count than the boundary. |
+| `capsule_fixture_type` | A `mock` value's type differs from the boundary type. |
+| `capsule_unpinned_dependency` | A capsule dependency is not pinned to a version. |
+| `capsule_ecosystem_mismatch` | A dependency belongs to another language's ecosystem. |
+| `capsule_invalid_artifact_policy` | An artifact policy is malformed. |
+| `capsule_invalid_render_policy` | A render policy is malformed. |
+| `capsule_invalid_encode_policy` | An encode policy is malformed. |
+| `sandbox_effect_uncovered` | A declared effect has no matching sandbox grant — the check that keeps a declaration from outrunning its policy. |
+| `sandbox_invalid_limit` | A resource limit is malformed, for example `sandbox "limit.wall_ms x"`. |
+| `sandbox_invalid_redaction` | An audit redaction rule is malformed. |
+| `shell_capsule_no_allowlist` | A shell capsule does not declare an explicit command allowlist. |
+| `shell_command_wildcard` | A shell allowlist uses a wildcard, which grants more than it names. |
+| `contract_capsule_no_abi_hash` | A smart-contract capsule does not declare an ABI hash. |
+| `contract_capsule_secret_key` | A smart-contract capsule requests secret-key or wallet access, which is denied. |
+| `gpu_capsule_no_target` | A GPU capsule does not name an architecture (`sm_NN` / `compute_NN`) in its `env`. |
+
+### Exactness
+
+| Code | Meaning |
+| --- | --- |
+| `exact_arithmetic_uses_float` | An `@exact` function uses floating point directly. |
+| `exact_arithmetic_calls_inexact` | An `@exact` function reaches floating point through a call; the message names the callee and the far end of the chain. |
+
+### Carried sections
+
+The project filesystem's checks. See
+[the project filesystem](project_filesystem.md).
+
+| Code | Meaning |
+| --- | --- |
+| `blob_payload_invalid` | An inline payload is not valid base64. |
+| `blob_size_mismatch` | A payload does not decode to the declared byte count. |
+| `blob_hash_mismatch` | A payload does not match its declared `sha256`. |
+| `blob_inline_too_large` | More than 256 KB is carried inline; it belongs in the store. |
+| `blob_store_unverifiable` | A store-backed blob declares no hash, so its bytes cannot be verified. |
+| `note_target_missing` | A note is on a node that does not exist. |
+| `note_reply_missing` | A note replies to a note that does not exist. |
+| `note_reply_cycle` | A note replies to itself. |
+| `note_author_unqualified` | An author is neither `agent:<name>` nor `human:<name>`. |
+| `note_status_unknown` | A status is neither `open` nor `resolved`. |
+| `section_duplicate_name` | Two carried sections share a node id. |
+| `section_timestamp_invalid` | A timestamp is not fixed-width UTC (`YYYY-MM-DDTHH:MM:SSZ`), which the change feed compares as text. |
+
+Reading a payload from code (`section_text` / `section_bytes`):
+
+| Code | Meaning |
+| --- | --- |
+| `section_ref_unknown` | The id names no section carried in this file. |
+| `section_ref_not_a_payload` | The id names a node with no payload, such as a note. |
+| `section_ref_not_literal` | The id is not a string literal. A computed id could name a section that is not there, which the checker can rule out entirely only if the id is written down. |
+| `section_payload_out_of_line` | The blob keeps its bytes in the store, which a run cannot read yet. Carry it inline, or extract it and read the file through a granted effect. |
+| `section_payload_not_utf8` | `section_text` was used on a payload that is not valid UTF-8; `section_bytes` reads it. |

@@ -31,7 +31,14 @@ Item
   Capsule
   Share
   Pipeline
+  Data      // a carried text payload
+  Blob      // a carried byte payload
+  Note      // a remark on any node
 ```
+
+Every item carries a canonical `id` — `@function.total`, `@data.sales`,
+`@note.n1` — which is the address `fgx context`, `fgx map`, a semantic patch
+target, and a `NODE_HASH` precondition all use.
 
 Authored pipeline graphs use this canonical item shape:
 
@@ -50,6 +57,54 @@ Authored pipeline graphs use this canonical item shape:
 
 The stage array preserves the authored ready-node tie-break order. Edges
 preserve source order and bind producer, consumer, and shared value explicitly.
+
+Carried sections use three canonical item shapes. They are part of the
+canonical AST rather than a side channel, so a round-trip that dropped one fails
+instead of comparing equal:
+
+```json
+{
+  "kind": "data",
+  "id": "@data.sales",
+  "name": "sales",
+  "shape": "csv",
+  "meta": {
+    "created": "2026-09-20T09:00:00Z",
+    "created_by": "human:viktor",
+    "modified": "2026-09-21T08:00:00Z",
+    "modified_by": "agent:claude-opus-5"
+  },
+  "content": "region,units\nnorth,120"
+}
+{
+  "kind": "blob",
+  "id": "@blob.logo",
+  "name": "logo",
+  "media_type": "image/png",
+  "bytes": 6,
+  "sha256": "c3ab8ff1…",
+  "meta": {"created": null, "created_by": null, "modified": null, "modified_by": null},
+  "storage": "inline",
+  "base64": "Zm9vYmFy"
+}
+{
+  "kind": "note",
+  "id": "@note.n1",
+  "name": "n1",
+  "target": "@data.sales",
+  "author": "agent:claude-opus-5",
+  "created": "2026-09-20T10:20:00Z",
+  "reply_to": null,
+  "status": "open",
+  "text": "North looks doubled after the Q3 import."
+}
+```
+
+A payload appears as one string with `\n` separators rather than an array of
+lines, because the payload is the value: two files that differ by a line break
+are different data. A store-backed blob carries `"storage": "store"` with a
+`path` in place of `base64`, and its `sha256` is mandatory there, since the bytes
+live outside the file.
 
 User-defined interfaces use two canonical item shapes:
 
@@ -257,6 +312,9 @@ Parsed attributes have this shape:
 ## Compatibility Rules
 
 - The `schema` field changes when the canonical AST contract changes.
+- New item kinds are additive: a reader that does not know `data`, `blob`, or
+  `note` still parses the document, and the fields of the kinds it does know are
+  unchanged. Removing or renaming a kind or a field would not be.
 - Field order in canonical output is stable.
 - Formatter changes must not change canonical AST unless program semantics change.
 - Roundtrip equality is based on canonical AST serialization.

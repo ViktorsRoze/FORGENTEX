@@ -44,7 +44,7 @@ pub struct GraphModule {
     pub agent: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct GraphSymbol {
     pub kind: String,
     pub name: String,
@@ -1122,6 +1122,26 @@ fn symbol_from_item(
     module_tests: &[String],
 ) -> GraphSymbol {
     match item {
+        // Carried sections appear in the project map, not the symbol graph:
+        // they have no callers, callees, or types to relate.
+        Item::Data(section) => GraphSymbol {
+            kind: "data".to_string(),
+            name: section.name.clone(),
+            id: section.id.clone(),
+            ..GraphSymbol::default()
+        },
+        Item::Blob(section) => GraphSymbol {
+            kind: "blob".to_string(),
+            name: section.name.clone(),
+            id: section.id.clone(),
+            ..GraphSymbol::default()
+        },
+        Item::Note(note) => GraphSymbol {
+            kind: "note".to_string(),
+            name: note.name.clone(),
+            id: note.id.clone(),
+            ..GraphSymbol::default()
+        },
         Item::Struct(decl) => GraphSymbol {
             kind: "struct".to_string(),
             name: decl.name.clone(),

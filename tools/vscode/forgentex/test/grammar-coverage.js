@@ -36,6 +36,9 @@ const HUMAN_KEYWORDS = [
   "out", "output", "pipeline", "pub", "require", "requires", "return",
   "sandbox", "share", "stage", "struct", "test", "trait", "true", "type",
   "unsafe", "version", "via", "while",
+  // Carried sections: the project filesystem inside the file.
+  "data", "blob", "note", "content", "inline", "store", "created", "modified",
+  "sha256", "bytes", "status", "reply-to",
 ];
 
 const AGENT_KEYWORDS = [
@@ -45,6 +48,9 @@ const AGENT_KEYWORDS = [
   "LET", "M", "MOCK", "MT", "OP", "OUT", "PIPELINE", "PUB", "R", "REQ", "S",
   "SBX", "SET", "SHARE", "STAGE", "TEST", "TR", "TYPE", "UF", "VIA", "WH",
   "XTEST",
+  // Carried sections in the dense view.
+  "DATA", "ENDDATA", "BODY", "BLOB", "ENDBLOB", "B64", "SIZE", "HASH", "STORE",
+  "NOTE", "ENDNOTE", "TXT", "CRT", "MOD", "BY", "ON", "RE", "ST",
 ];
 
 const PRIMITIVE_TYPES = [
@@ -114,9 +120,22 @@ if (!fs.existsSync(path.join(root, manifest.main))) {
   fail(`package.json: missing main ${manifest.main}`);
 }
 
+/// Local modules required by `entry`, as relative paths with a .js suffix.
+function moduleRequires(entry) {
+  const text = fs.readFileSync(path.join(root, entry), "utf8");
+  return [...text.matchAll(/require\(\s*"\.\/([^"]+)"\s*\)/g)]
+    .map((match) => (match[1].endsWith(".js") ? match[1] : `${match[1]}.js`))
+    .filter((file) => fs.existsSync(path.join(root, file)));
+}
+
 // 2. Every contributed command must be registered in the extension, and every
 //    registered command must be contributed, or the palette and code disagree.
-const source = fs.readFileSync(path.join(root, manifest.main), "utf8");
+// The entry point plus the modules it pulls in: a command registered in a
+// sibling module is still registered, and splitting the extension across files
+// must not weaken this check.
+const source = [manifest.main, ...moduleRequires(manifest.main)]
+  .map((file) => fs.readFileSync(path.join(root, file), "utf8"))
+  .join("\n");
 const declared = manifest.contributes.commands.map((entry) => entry.command);
 const registered = [...source.matchAll(/registerCommand\(\s*"([^"]+)"/g)].map((m) => m[1]);
 for (const command of declared) {

@@ -457,8 +457,20 @@ fn windows_zero_capability_appcontainer_cannot_connect_to_loopback() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let port = listener.local_addr().unwrap().port();
+    let output = appcontainer_tcp_connect_result("deny_loopback", "127.0.0.1", port);
+    assert_eq!(output, "1");
+    assert!(matches!(
+        listener.accept(),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
+}
+
+/// Attempt one TCP connection from the zero-capability AppContainer. Returning
+/// `1` means Winsock refused the connection; `0` means containment failed.
+#[cfg(windows)]
+fn appcontainer_tcp_connect_result(name: &str, address_text: &str, port: u16) -> String {
     let source = format!(
-        r#"foreign deny_loopback c version "c11":
+        r#"foreign {name} c version "c11":
     output result: i32
     sandbox "fs.none"
     code:
@@ -468,26 +480,28 @@ fn windows_zero_capability_appcontainer_cannot_connect_to_loopback() {
         typedef int (WINAPI *wsa_startup_fn)(WORD, void *);
         typedef socket_handle (WINAPI *socket_fn)(int, int, int);
         typedef int (WINAPI *connect_fn)(socket_handle, const void *, int);
+        typedef unsigned long (WINAPI *inet_addr_fn)(const char *);
         typedef int (WINAPI *close_socket_fn)(socket_handle);
         typedef int (WINAPI *wsa_cleanup_fn)(void);
         struct local_sockaddr_in {{ short family; unsigned short port; unsigned long address; char zero[8]; }};
-        int deny_loopback(void) {{
+        int {name}(void) {{
             HMODULE library = LoadLibraryA("ws2_32.dll");
             if (library == NULL) return 1;
             wsa_startup_fn startup = (wsa_startup_fn)GetProcAddress(library, "WSAStartup");
             socket_fn make_socket = (socket_fn)GetProcAddress(library, "socket");
             connect_fn connect_socket = (connect_fn)GetProcAddress(library, "connect");
+            inet_addr_fn parse_address = (inet_addr_fn)GetProcAddress(library, "inet_addr");
             close_socket_fn close_socket = (close_socket_fn)GetProcAddress(library, "closesocket");
             wsa_cleanup_fn cleanup = (wsa_cleanup_fn)GetProcAddress(library, "WSACleanup");
             unsigned char data[512] = {{0}};
-            if (startup == NULL || make_socket == NULL || connect_socket == NULL || close_socket == NULL || cleanup == NULL) return 1;
+            if (startup == NULL || make_socket == NULL || connect_socket == NULL || parse_address == NULL || close_socket == NULL || cleanup == NULL) return 1;
             if (startup(0x0202, data) != 0) return 1;
             socket_handle socket = make_socket(2, 1, 6);
             if (socket == (socket_handle)(~(uintptr_t)0)) {{ cleanup(); return 1; }}
             struct local_sockaddr_in address = {{0}};
             address.family = 2;
             address.port = (unsigned short)(({port}u << 8) | ({port}u >> 8));
-            address.address = 0x0100007fu;
+            address.address = parse_address("{address_text}");
             int connected = connect_socket(socket, &address, sizeof(address));
             close_socket(socket);
             cleanup();
@@ -498,8 +512,41 @@ fn windows_zero_capability_appcontainer_cannot_connect_to_loopback() {
     );
     let program = parse_human(&source).unwrap();
     let invocation = invoke_live(&program, program.capsules().next().unwrap(), &[])
-        .expect("zero-capability AppContainer runner should report loopback denial");
-    assert_eq!(invocation.output, "1");
+        .expect("zero-capability AppContainer runner should report network denial");
+    invocation.output
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_zero_capability_appcontainer_cannot_connect_to_host_network() {
+    if crate::native_build::detect_toolchain().is_none() {
+        return;
+    }
+
+    // Ask the routing table which non-loopback address this host would use.
+    // UDP connect sends no packet, and TEST-NET-1 never names a public service.
+    let route = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+    route.connect("192.0.2.1:9").unwrap();
+    let host = route.local_addr().unwrap().ip();
+    assert!(!host.is_loopback() && !host.is_unspecified());
+
+    // The parent must prove the endpoint is reachable before the contained
+    // runner tries it. This makes denial evidence independent of public network
+    // availability, DNS, routing beyond the host, and remote service state.
+    let listener = std::net::TcpListener::bind((host, 0)).unwrap();
+    let endpoint = listener.local_addr().unwrap();
+    let control = std::net::TcpStream::connect(endpoint).unwrap();
+    let (accepted, _) = listener.accept().unwrap();
+    drop(accepted);
+    drop(control);
+    listener.set_nonblocking(true).unwrap();
+
+    let output = appcontainer_tcp_connect_result(
+        "deny_host_network",
+        &endpoint.ip().to_string(),
+        endpoint.port(),
+    );
+    assert_eq!(output, "1");
     assert!(matches!(
         listener.accept(),
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
@@ -552,6 +599,222 @@ fn windows_appcontainer_cannot_open_an_unrelated_named_pipe() {
     let invocation = invoke_live(&program, program.capsules().next().unwrap(), &[])
         .expect("AppContainer runner should complete after named-pipe denial");
     assert_eq!(invocation.output, "1");
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_appcontainer_cannot_open_or_signal_host_named_event() {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+
+    if crate::native_build::detect_toolchain().is_none() {
+        return;
+    }
+    let event_name = format!(
+        r"Local\Forgentex.AppContainer.EventProbe.{}",
+        std::process::id()
+    );
+    let wide_name = std::ffi::OsStr::new(&event_name)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: the event name is null-terminated and the returned handle is
+    // checked before ownership is transferred.
+    let event = unsafe { CreateEventW(std::ptr::null(), 1, 0, wide_name.as_ptr()) };
+    assert!(!event.is_null(), "failed to create parent named event");
+    // SAFETY: CreateEventW returned one newly owned valid handle.
+    let event = unsafe { OwnedHandle::from_raw_handle(event.cast()) };
+    const WAIT_OBJECT_0: u32 = 0;
+    const WAIT_TIMEOUT: u32 = 0x102;
+    // Parent control: this process can signal, observe, and reset the object.
+    assert_ne!(unsafe { SetEvent(event.as_raw_handle().cast()) }, 0);
+    assert_eq!(
+        unsafe { WaitForSingleObject(event.as_raw_handle().cast(), 0) },
+        WAIT_OBJECT_0
+    );
+    assert_ne!(unsafe { ResetEvent(event.as_raw_handle().cast()) }, 0);
+
+    let c_name = event_name.replace('\\', "\\\\");
+    let source = format!(
+        r#"foreign deny_event c version "c11":
+    output result: i32
+    sandbox "fs.none"
+    code:
+        #include <windows.h>
+        typedef HANDLE (WINAPI *open_event_fn)(DWORD, BOOL, LPCWSTR);
+        typedef BOOL (WINAPI *set_event_fn)(HANDLE);
+        typedef BOOL (WINAPI *close_handle_fn)(HANDLE);
+        int deny_event(void) {{
+            HMODULE library = LoadLibraryA("kernel32.dll");
+            if (library == NULL) return -1;
+            open_event_fn open_event = (open_event_fn)GetProcAddress(library, "OpenEventW");
+            set_event_fn set_event = (set_event_fn)GetProcAddress(library, "SetEvent");
+            close_handle_fn close_handle = (close_handle_fn)GetProcAddress(library, "CloseHandle");
+            if (open_event == NULL || set_event == NULL || close_handle == NULL) return -2;
+            HANDLE event = open_event(0x00100002, FALSE, L"{c_name}");
+            if (event == NULL) {{ FreeLibrary(library); return 1; }}
+            BOOL signaled = set_event(event);
+            close_handle(event);
+            FreeLibrary(library);
+            return signaled ? 0 : 2;
+        }}
+"#
+    );
+    let program = parse_human(&source).unwrap();
+    let invocation = invoke_live(&program, program.capsules().next().unwrap(), &[])
+        .expect("AppContainer named-event probe should complete");
+    assert_eq!(
+        invocation.output, "1",
+        "AppContainer unexpectedly opened or signaled the host event"
+    );
+    assert_eq!(
+        unsafe { WaitForSingleObject(event.as_raw_handle().cast(), 0) },
+        WAIT_TIMEOUT,
+        "host event became signaled after the contained probe"
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_appcontainer_cannot_query_a_hermetic_local_rpc_endpoint() {
+    use std::os::windows::ffi::OsStrExt;
+
+    if crate::native_build::detect_toolchain().is_none() {
+        return;
+    }
+    let protocol = "ncalrpc"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let endpoint_name = format!("forgentex-rpc-probe-{}", std::process::id());
+    let endpoint = std::ffi::OsStr::new(&endpoint_name)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: the protocol and endpoint strings are null-terminated. A null
+    // security descriptor asks RPC to create its ordinary local endpoint ACL.
+    assert_eq!(
+        unsafe {
+            RpcServerUseProtseqEpW(protocol.as_ptr(), 8, endpoint.as_ptr(), std::ptr::null())
+        },
+        0,
+        "failed to create the parent ncalrpc endpoint"
+    );
+    // SAFETY: the process RPC server owns the endpoint configured above;
+    // DontWait=1 starts its listener threads and returns immediately.
+    assert_eq!(unsafe { RpcServerListen(1, 8, 1) }, 0);
+    let _server = RpcServerGuard;
+
+    let mut binding_text = std::ptr::null_mut();
+    // SAFETY: all optional components are null, the two supplied strings are
+    // null-terminated, and binding_text receives RPC-owned storage.
+    assert_eq!(
+        unsafe {
+            RpcStringBindingComposeW(
+                std::ptr::null(),
+                protocol.as_ptr(),
+                std::ptr::null(),
+                endpoint.as_ptr(),
+                std::ptr::null(),
+                std::ptr::addr_of_mut!(binding_text),
+            )
+        },
+        0
+    );
+    let binding_text = RpcStringGuard(binding_text);
+    let mut binding = std::ptr::null_mut();
+    // SAFETY: binding_text remains live and binding receives one RPC handle.
+    assert_eq!(
+        unsafe { RpcBindingFromStringBindingW(binding_text.0, std::ptr::addr_of_mut!(binding)) },
+        0
+    );
+    let binding = RpcBindingGuard(binding);
+    // Parent control: the endpoint is not merely named; an RPC management
+    // request reaches it and confirms the server is listening.
+    assert_eq!(unsafe { RpcMgmtIsServerListening(binding.0) }, 0);
+
+    let source = format!(
+        r#"foreign deny_local_rpc c version "c11":
+    output result: i32
+    sandbox "fs.none"
+    code:
+        #include <windows.h>
+        typedef long rpc_status;
+        typedef void *rpc_binding;
+        typedef unsigned short *rpc_string;
+        typedef rpc_status (WINAPI *compose_fn)(rpc_string, rpc_string, rpc_string, rpc_string, rpc_string, rpc_string *);
+        typedef rpc_status (WINAPI *bind_fn)(rpc_string, rpc_binding *);
+        typedef rpc_status (WINAPI *listening_fn)(rpc_binding);
+        typedef rpc_status (WINAPI *binding_free_fn)(rpc_binding *);
+        typedef rpc_status (WINAPI *string_free_fn)(rpc_string *);
+        int deny_local_rpc(void) {{
+            HMODULE library = LoadLibraryA("rpcrt4.dll");
+            if (library == NULL) return -1;
+            compose_fn compose = (compose_fn)GetProcAddress(library, "RpcStringBindingComposeW");
+            bind_fn bind = (bind_fn)GetProcAddress(library, "RpcBindingFromStringBindingW");
+            listening_fn listening = (listening_fn)GetProcAddress(library, "RpcMgmtIsServerListening");
+            binding_free_fn free_binding = (binding_free_fn)GetProcAddress(library, "RpcBindingFree");
+            string_free_fn free_string = (string_free_fn)GetProcAddress(library, "RpcStringFreeW");
+            if (compose == NULL || bind == NULL || listening == NULL || free_binding == NULL || free_string == NULL) return -2;
+            rpc_string text = NULL;
+            rpc_status status = compose(NULL, L"ncalrpc", NULL, L"{endpoint_name}", NULL, &text);
+            if (status != 0) return 1;
+            rpc_binding binding = NULL;
+            status = bind(text, &binding);
+            if (status == 0) status = listening(binding);
+            if (binding != NULL) free_binding(&binding);
+            free_string(&text);
+            /* Zero means the contained client reached the host RPC server. */
+            return status == 0 ? 0 : 1;
+        }}
+"#
+    );
+    let program = parse_human(&source).unwrap();
+    let invocation = invoke_live(&program, program.capsules().next().unwrap(), &[])
+        .expect("AppContainer local-RPC probe should complete");
+    assert_eq!(
+        invocation.output, "1",
+        "zero-capability AppContainer reached the parent ncalrpc endpoint"
+    );
+}
+
+#[cfg(windows)]
+struct RpcServerGuard;
+
+#[cfg(windows)]
+impl Drop for RpcServerGuard {
+    fn drop(&mut self) {
+        // SAFETY: null addresses the RPC server in this process.
+        unsafe {
+            let _ = RpcMgmtStopServerListening(std::ptr::null_mut());
+        }
+    }
+}
+
+#[cfg(windows)]
+struct RpcStringGuard(*mut u16);
+
+#[cfg(windows)]
+impl Drop for RpcStringGuard {
+    fn drop(&mut self) {
+        // SAFETY: RpcStringBindingComposeW initialized this RPC-owned pointer.
+        unsafe {
+            let _ = RpcStringFreeW(std::ptr::addr_of_mut!(self.0));
+        }
+    }
+}
+
+#[cfg(windows)]
+struct RpcBindingGuard(*mut std::ffi::c_void);
+
+#[cfg(windows)]
+impl Drop for RpcBindingGuard {
+    fn drop(&mut self) {
+        // SAFETY: RpcBindingFromStringBindingW initialized this RPC handle.
+        unsafe {
+            let _ = RpcBindingFree(std::ptr::addr_of_mut!(self.0));
+        }
+    }
 }
 
 #[test]
@@ -638,6 +901,15 @@ fn host_registry_key_exists(key: &str) -> bool {
 #[cfg(windows)]
 #[link(name = "kernel32")]
 unsafe extern "system" {
+    fn CreateEventW(
+        event_attributes: *const std::ffi::c_void,
+        manual_reset: i32,
+        initial_state: i32,
+        name: *const u16,
+    ) -> *mut std::ffi::c_void;
+    fn SetEvent(event: *mut std::ffi::c_void) -> i32;
+    fn ResetEvent(event: *mut std::ffi::c_void) -> i32;
+    fn WaitForSingleObject(handle: *mut std::ffi::c_void, milliseconds: u32) -> u32;
     fn CreateNamedPipeW(
         name: *const u16,
         open_mode: u32,
@@ -648,6 +920,34 @@ unsafe extern "system" {
         default_timeout_ms: u32,
         security_attributes: *const std::ffi::c_void,
     ) -> *mut std::ffi::c_void;
+}
+
+#[cfg(windows)]
+#[link(name = "rpcrt4")]
+unsafe extern "system" {
+    fn RpcServerUseProtseqEpW(
+        protocol_sequence: *const u16,
+        max_calls: u32,
+        endpoint: *const u16,
+        security_descriptor: *const std::ffi::c_void,
+    ) -> i32;
+    fn RpcServerListen(minimum_threads: u32, max_calls: u32, dont_wait: u32) -> i32;
+    fn RpcMgmtStopServerListening(binding: *mut std::ffi::c_void) -> i32;
+    fn RpcStringBindingComposeW(
+        object_uuid: *const u16,
+        protocol_sequence: *const u16,
+        network_address: *const u16,
+        endpoint: *const u16,
+        options: *const u16,
+        string_binding: *mut *mut u16,
+    ) -> i32;
+    fn RpcBindingFromStringBindingW(
+        string_binding: *mut u16,
+        binding: *mut *mut std::ffi::c_void,
+    ) -> i32;
+    fn RpcMgmtIsServerListening(binding: *mut std::ffi::c_void) -> i32;
+    fn RpcBindingFree(binding: *mut *mut std::ffi::c_void) -> i32;
+    fn RpcStringFreeW(string: *mut *mut u16) -> i32;
 }
 
 #[cfg(windows)]
@@ -4079,4 +4379,120 @@ fn recursively_embedded_native_struct_is_rejected_without_recursing_forever() {
     let capsule = program.capsules().next().unwrap();
     let error = invoke_live(&program, capsule, &[NativeValue::Struct(Vec::new())]).unwrap_err();
     assert!(error.contains("recursively embedded"), "got: {error}");
+}
+
+/// Reproduces a known, unfixed Windows defect; ignored so it does not make the
+/// suite non-deterministic. Run it explicitly to work on the bug:
+/// `cargo test concurrent_live_native_calls -- --ignored`.
+///
+/// Fails roughly one run in ten. What the investigation established:
+///
+/// * the runner exits 0 having written nothing to stdout. Its generated `main`
+///   has exactly one `return 0`, reached only after every stdout write, and all
+///   of its failure paths write to stderr and return 2..=5 — so a 0 exit proves
+///   the child *did* produce and write its reply;
+/// * a stderr probe at the top of `main` arrives, while a second probe written
+///   milliseconds later does not. Both pipes therefore reach EOF early, while
+///   the child is still running and writing;
+/// * the parent loses the child's output, in other words, rather than the child
+///   failing to produce it.
+///
+/// Ruled out: every process limit (peak memory ~586KB against a 512MB cap, peak
+/// processes 1 against a cap of 1, wall and CPU budgets untouched); a truncated
+/// or corrupt runner binary; the pipeline layer, since plain `invoke_live`
+/// reproduces it; and a spawn-time handle-inheritance race, since serialising
+/// all process creation in this process does not change the failure rate.
+///
+/// It is not a regression from any change in this tree: it reproduces through
+/// code paths this branch never touched, and the same failure shows up in the
+/// `tests::pipeline` suite, whose tests are unmodified.
+#[test]
+#[ignore = "reproduces an unfixed Windows output-capture race; see the doc comment"]
+fn concurrent_live_native_calls_each_receive_their_own_reply() {
+    // Every native capsule call gets a private scratch directory and a fresh
+    // contained process, so calls made at the same time must not be able to
+    // lose, truncate, or cross each other's replies.
+    if crate::native_build::detect_toolchain().is_none() {
+        return;
+    }
+    let workers = 16;
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(workers));
+    let handles = (0..workers)
+        .map(|worker| {
+            let barrier = std::sync::Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                // A distinct constant per worker proves each reply came back to
+                // the call that asked for it, not merely that some reply arrived.
+                // Mirror the shape that failed in practice: an input read from
+                // the child's stdin and an owned buffer allocated by the capsule,
+                // so both directions of the boundary are under load.
+                let base = 100 + worker as i64;
+                let program = parse_human(&format!(
+                    "foreign concurrent c version \"c11\" effects [alloc]:
+    input count: i32
+    output samples: Vec[i16]
+    sandbox \"fs.none\"
+    code:
+        #include \"types.h\"
+        #include <stdint.h>
+        #include <stdlib.h>
+
+        FgxOwnedI16 concurrent(int32_t count) {{
+            FgxOwnedI16 result = {{ NULL, 0, 0 }};
+            if (count <= 0) return result;
+            result.ptr = (int16_t *)malloc((size_t)count * sizeof(int16_t));
+            if (result.ptr == NULL) return result;
+            result.len = (size_t)count;
+            result.capacity = (size_t)count;
+            for (size_t i = 0; i < result.len; ++i) {{
+                result.ptr[i] = (int16_t)({base} + (int32_t)i);
+            }}
+            return result;
+        }}
+
+        void concurrent_free(int16_t *ptr, size_t len, size_t capacity) {{
+            (void)len;
+            (void)capacity;
+            free(ptr);
+        }}
+"
+                ))
+                .unwrap();
+                let capsule = program.capsules().next().unwrap();
+                barrier.wait();
+                (0..4)
+                    .map(|_| {
+                        invoke_live(
+                            &program,
+                            capsule,
+                            &[NativeValue::Scalar(CapsuleValue::Int(3))],
+                        )
+                        .map(|invocation| invocation.output)
+                        .map_err(|err| format!("worker {worker}: {err}"))
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut failures = Vec::new();
+    for (worker, handle) in handles.into_iter().enumerate() {
+        for result in handle.join().expect("worker panicked") {
+            match result {
+                Ok(value) => {
+                    let base = 100 + worker;
+                    let expected = format!("[{base},{},{}]", base + 1, base + 2);
+                    if value != expected {
+                        failures.push(format!("worker {worker}: got {value}, wanted {expected}"));
+                    }
+                }
+                Err(err) => failures.push(err),
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "concurrent native calls lost replies:\n{}",
+        failures.join("\n")
+    );
 }

@@ -9,6 +9,6 @@ if ($CargoCommand) {
 
 & $Cargo fmt --check
 & $Cargo clippy -- -D warnings
-& $Cargo test
+& $Cargo test -- --test-threads=1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\fuzz.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\demo.ps1

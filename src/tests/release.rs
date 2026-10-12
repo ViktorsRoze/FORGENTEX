@@ -248,13 +248,20 @@ fn public_0_1_target_reports_explicit_release_blockers() {
         .find(|gate| gate.id == "public_0_1_distribution")
         .unwrap();
     assert_eq!(distribution.status, "partial");
-    assert_eq!(
-        distribution.gaps.len(),
-        1,
-        "distribution's only residual is the CI-runtime proof: {:?}",
-        distribution.gaps
-    );
-    assert!(distribution.gaps[0].contains("release-artifacts CI job"));
+    // Everything source can check passes, so whatever remains must be about the
+    // release run still to be recorded — and must name the file to fill in, so
+    // the report says what to do rather than only that something is missing.
+    assert!(!distribution.gaps.is_empty());
+    for gap in &distribution.gaps {
+        assert!(
+            gap.starts_with(crate::distribution::RELEASE_PROOF_PATH),
+            "unexpected distribution residual: {gap}"
+        );
+    }
+    assert!(distribution
+        .evidence
+        .iter()
+        .any(|item| item == crate::distribution::RELEASE_PROOF_PATH));
 
     let alias = release_check("public-0.1");
     assert_eq!(alias.decision, "public_0_1_not_ready");

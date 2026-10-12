@@ -36,6 +36,24 @@ pub fn generate_map_with_options(
                 items: vec![item.clone()],
             }));
             match item {
+                Item::Data(section) => out.push_str(&format!(
+                    "  DATA {} {} {} lines={}
+",
+                    section.name,
+                    section.id,
+                    section.kind,
+                    section.content.len()
+                )),
+                Item::Blob(section) => out.push_str(&format!(
+                    "  BLOB {} {} {} bytes={}
+",
+                    section.name, section.id, section.media_type, section.bytes
+                )),
+                Item::Note(note) => out.push_str(&format!(
+                    "  NOTE {} {} on {} by {}
+",
+                    note.name, note.id, note.target, note.author
+                )),
                 Item::Struct(decl) => {
                     out.push_str(&format!(
                         "  S {} {} fields={} tokens~{}\n",
@@ -159,6 +177,21 @@ pub fn get_symbol(root: &Path, target: &str, deps: Option<&str>) -> Result<Strin
             .map_err(|err| format!("failed to parse {}: {err}", file.display()))?;
         for item in program.items {
             match &item {
+                Item::Data(section) => {
+                    if target == section.id {
+                        found = Some(item.clone());
+                    }
+                }
+                Item::Blob(section) => {
+                    if target == section.id {
+                        found = Some(item.clone());
+                    }
+                }
+                Item::Note(note) => {
+                    if target == note.id {
+                        found = Some(item.clone());
+                    }
+                }
                 Item::Struct(decl) => {
                     if target == decl.id {
                         found = Some(item.clone());

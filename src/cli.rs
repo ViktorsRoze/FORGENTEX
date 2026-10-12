@@ -110,6 +110,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         "audit" => cmd_audit(&args[2..]),
         "verify" => cmd_verify(&args[2..]),
         "api" => cmd_api(&args[2..]),
+        "fs" => cmd_fs(&args[2..]),
         "effects" => cmd_effects(&args[2..]),
         "patch" => cmd_patch(&args[2..]),
         "run" => cmd_run(&args[2..]),
@@ -336,6 +337,16 @@ fn cmd_check(args: &[String]) -> Result<(), String> {
                 );
             }
         }
+        // A checker that reports errors must not exit successfully. The JSON
+        // report is already on stdout, so a wrapper still gets the diagnostics;
+        // what changes is that a build script or agent trusting the exit status
+        // can no longer mistake a rejected project for a clean one.
+        if !diagnostics.is_empty() {
+            return Err(format!(
+                "project check found {} diagnostic(s)",
+                diagnostics.len()
+            ));
+        }
         return Ok(());
     }
     let file = required_arg(args, 0, "check <file> --json")?;
@@ -356,6 +367,13 @@ fn cmd_check(args: &[String]) -> Result<(), String> {
                 diagnostic.code, diagnostic.node, diagnostic.message
             );
         }
+    }
+    // A checker that reports errors must not exit successfully. The report is
+    // already on stdout, so a wrapper still receives every diagnostic; what
+    // changes is that a build script or agent trusting the exit status can no
+    // longer mistake a rejected program for a clean one.
+    if !diagnostics.is_empty() {
+        return Err(format!("check found {} diagnostic(s)", diagnostics.len()));
     }
     Ok(())
 }
@@ -558,6 +576,651 @@ fn cmd_ir(args: &[String]) -> Result<(), String> {
         print!("{}", backend_ir_text(&ir));
     }
     Ok(())
+}
+
+/// `fgx fs` — move around the project filesystem carried inside a file.
+///
+/// The verbs are deliberately the ones an agent already knows from a shell, so
+/// finding a payload needs no new vocabulary: `ls` to see what is there, `cat`
+/// to read one section, `stat` for its provenance, and `notes` to read the
+/// annotation graph. Every section is addressed by its node id, which is the
+/// same id a semantic patch targets — so an agent can list, read, and then edit
+/// without ever converting between addressing schemes.
+fn cmd_fs(args: &[String]) -> Result<(), String> {
+    let usage = "fs ls|cat|stat|notes|add|set|rm|note|resolve|changes|extract <file> [--tag <node-id>] [--from <path>] [--out <dir>] [--as data|blob] [--expect <hash>] [--on <node-id>] [--text <text>] [--reply-to <note-id>] [--with-notes] [--against <file>] [--rev <git-rev>] [--since <iso>] [--by <author>] [--at <iso>] [--agent] [--human] [--json]";
+    let verb = required_arg(args, 0, usage)?;
+    let file = required_arg(args, 1, usage)?;
+    let program = read_program(file)?;
+    let json = args.iter().any(|arg| arg == "--json");
+    let root = Path::new(file).parent().unwrap_or(Path::new("."));
+    // Provenance for any verb that writes. `--at` must be the same fixed-width
+    // UTC the checker requires, or the file would be written and then rejected.
+    let at = || -> Result<String, String> {
+        let at = option_value(args, "--at")
+            .map(str::to_string)
+            .unwrap_or_else(now_iso8601);
+        if !crate::section_edit::is_timestamp(&at) {
+            return Err(format!("--at '{at}' must be YYYY-MM-DDTHH:MM:SSZ"));
+        }
+        Ok(at)
+    };
+    let by = || {
+        option_value(args, "--by")
+            .map(str::to_string)
+            .unwrap_or_else(default_author)
+    };
+    let expect = option_value(args, "--expect");
+    match verb {
+        "ls" => {
+            if json {
+                let entries = program
+                    .items
+                    .iter()
+                    .filter_map(fs_entry_json)
+                    .collect::<Vec<_>>();
+                println!(
+                    "{{\n  \"schema\": \"forgentex.project_fs.v1\",\n  \"file\": {},\n  \"sections\": [{}]\n}}",
+                    crate::json::string(file),
+                    entries.join(", ")
+                );
+            } else {
+                for item in &program.items {
+                    if let Some(line) = fs_entry_text(item) {
+                        println!("{line}");
+                    }
+                }
+            }
+            Ok(())
+        }
+        "cat" => {
+            let tag = option_value(args, "--tag").ok_or_else(|| format!("usage: {usage}"))?;
+            match find_section(&program, tag)? {
+                crate::ast::Item::Data(section) => {
+                    for line in &section.content {
+                        println!("{line}");
+                    }
+                    Ok(())
+                }
+                crate::ast::Item::Note(note) => {
+                    for line in &note.text {
+                        println!("{line}");
+                    }
+                    Ok(())
+                }
+                crate::ast::Item::Blob(section) => {
+                    // Bytes go to stdout unchanged, so `fgx fs cat --tag
+                    // @blob.logo > logo.png` is just a redirect.
+                    let bytes = crate::section::blob_bytes(section, root)?;
+                    use std::io::Write;
+                    std::io::stdout()
+                        .write_all(&bytes)
+                        .map_err(|err| format!("could not write blob bytes: {err}"))
+                }
+                other => Err(format!(
+                    "'{tag}' is a {} and has no payload to read",
+                    crate::ast::item_kind_name(other)
+                )),
+            }
+        }
+        "stat" => {
+            let tag = option_value(args, "--tag").ok_or_else(|| format!("usage: {usage}"))?;
+            let item = find_section(&program, tag)?;
+            if json {
+                println!(
+                    "{}",
+                    fs_entry_json(item).unwrap_or_else(|| "null".to_string())
+                );
+            } else {
+                print!("{}", fs_stat_text(item));
+            }
+            Ok(())
+        }
+        "notes" => {
+            let on = option_value(args, "--on");
+            let only_agent = args.iter().any(|arg| arg == "--agent");
+            let only_human = args.iter().any(|arg| arg == "--human");
+            let selected = program.notes().filter(|note| {
+                on.is_none_or(|target| note.target == target)
+                    && (!only_agent || note.is_agent())
+                    && (!only_human || !note.is_agent())
+            });
+            if json {
+                let rendered = selected
+                    .map(|note| {
+                        format!(
+                            "{{\"id\": {}, \"on\": {}, \"by\": {}, \"agent\": {}, \"status\": {}, \"created\": {}, \"reply_to\": {}, \"text\": {}}}",
+                            crate::json::string(&note.id),
+                            crate::json::string(&note.target),
+                            crate::json::string(&note.author),
+                            note.is_agent(),
+                            crate::json::string(&note.status),
+                            crate::json::opt_string(note.created.as_deref()),
+                            crate::json::opt_string(note.reply_to.as_deref()),
+                            crate::json::string(&note.text.join("\n"))
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                println!(
+                    "{{\n  \"schema\": \"forgentex.project_notes.v1\",\n  \"notes\": [{}]\n}}",
+                    rendered.join(", ")
+                );
+            } else {
+                for note in selected {
+                    let who = if note.is_agent() { "agent" } else { "human" };
+                    println!(
+                        "{} on {} [{}] {} {}",
+                        note.id,
+                        note.target,
+                        note.status,
+                        who,
+                        note.created.as_deref().unwrap_or("")
+                    );
+                    for line in &note.text {
+                        println!("    {line}");
+                    }
+                    if let Some(reply_to) = &note.reply_to {
+                        println!("    (reply to {reply_to})");
+                    }
+                }
+            }
+            Ok(())
+        }
+        "add" => {
+            let from = option_value(args, "--from").ok_or_else(|| format!("usage: {usage}"))?;
+            let source = Path::new(from);
+            let name = match option_value(args, "--tag") {
+                Some(tag) => tag
+                    .trim_start_matches("@data.")
+                    .trim_start_matches("@blob.")
+                    .to_string(),
+                None => source
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .ok_or_else(|| format!("cannot derive a section name from {from}"))?
+                    .to_string(),
+            };
+            let force_blob = matches!(option_value(args, "--as"), Some("blob"));
+            let bytes =
+                std::fs::read(source).map_err(|err| format!("could not read {from}: {err}"))?;
+            let (item, store_write) = crate::section::section_for_payload(
+                &name,
+                source,
+                bytes,
+                &at()?,
+                &by(),
+                force_blob,
+            )?;
+
+            let mut program = program;
+            let id = crate::ast::item_node_id(&item).to_string();
+            if program
+                .items
+                .iter()
+                .any(|existing| crate::ast::item_node_id(existing) == id)
+            {
+                return Err(format!(
+                    "'{id}' is already in this file; remove it first rather than shadowing it"
+                ));
+            }
+            // A payload too large to sit in the file goes to the store first:
+            // if that write fails, the project file is left untouched.
+            write_store(root, store_write)?;
+            program.items.push(item);
+            write_project(file, &program)?;
+            println!("added {id}");
+            Ok(())
+        }
+        "set" => {
+            // Replace a section's payload in place. It keeps its name, shape,
+            // and creation record; the edit is stamped as a modification.
+            let tag = option_value(args, "--tag").ok_or_else(|| format!("usage: {usage}"))?;
+            let from = option_value(args, "--from").ok_or_else(|| format!("usage: {usage}"))?;
+            let (name, is_blob) = match find_section(&program, tag)? {
+                crate::ast::Item::Data(section) => (section.name.clone(), false),
+                crate::ast::Item::Blob(section) => (section.name.clone(), true),
+                other => {
+                    return Err(format!(
+                        "'{tag}' is a {} and has no payload to replace",
+                        crate::ast::item_kind_name(other)
+                    ))
+                }
+            };
+            crate::section_edit::check_expected(&program, tag, expect)?;
+            let bytes =
+                std::fs::read(from).map_err(|err| format!("could not read {from}: {err}"))?;
+            let (at, by) = (at()?, by());
+            // A data section is refilled as text whatever the new file is
+            // called: its declared shape belongs to the section, not the file.
+            let (item, store_write) = if is_blob {
+                crate::section::section_for_payload(&name, Path::new(from), bytes, &at, &by, true)?
+            } else {
+                if std::str::from_utf8(&bytes).is_err() {
+                    return Err(format!(
+                        "{from} is not valid UTF-8, so it cannot refill data section '{tag}'"
+                    ));
+                }
+                crate::section::section_for_payload(
+                    &name,
+                    Path::new("payload.txt"),
+                    bytes,
+                    &at,
+                    &by,
+                    false,
+                )?
+            };
+            write_store(root, store_write)?;
+            let mut program = program;
+            crate::section_edit::replace_payload(&mut program, tag, item, &at, &by)?;
+            write_project(file, &program)?;
+            println!(
+                "set {tag} {}",
+                crate::patch::node_hash(&program, tag).unwrap_or_default()
+            );
+            Ok(())
+        }
+        "rm" => {
+            let tag = option_value(args, "--tag").ok_or_else(|| format!("usage: {usage}"))?;
+            crate::section_edit::check_expected(&program, tag, expect)?;
+            let with_notes = args.iter().any(|arg| arg == "--with-notes");
+            let mut program = program;
+            let removed = crate::section_edit::remove_section(&mut program, tag, with_notes)?;
+            write_project(file, &program)?;
+            for id in removed {
+                println!("removed {id}");
+            }
+            Ok(())
+        }
+        "note" => {
+            let on = option_value(args, "--on").ok_or_else(|| format!("usage: {usage}"))?;
+            let text = option_value(args, "--text").ok_or_else(|| format!("usage: {usage}"))?;
+            let mut program = program;
+            let id = crate::section_edit::add_note(
+                &mut program,
+                crate::section_edit::NewNote {
+                    on,
+                    text,
+                    reply_to: option_value(args, "--reply-to"),
+                    name: option_value(args, "--tag"),
+                    status: "open",
+                },
+                &at()?,
+                &by(),
+            )?;
+            write_project(file, &program)?;
+            println!("added {id}");
+            Ok(())
+        }
+        "resolve" => {
+            let tag = option_value(args, "--tag").ok_or_else(|| format!("usage: {usage}"))?;
+            crate::section_edit::check_expected(&program, tag, expect)?;
+            let mut program = program;
+            let reply = crate::section_edit::resolve_note(
+                &mut program,
+                tag,
+                option_value(args, "--text"),
+                &at()?,
+                &by(),
+            )?;
+            write_project(file, &program)?;
+            println!("resolved {tag}");
+            println!("added {reply}");
+            Ok(())
+        }
+        "changes" => {
+            let changes = if let Some(against) = option_value(args, "--against") {
+                crate::section_edit::changes_between(&read_program(against)?, &program)
+            } else if let Some(rev) = option_value(args, "--rev") {
+                crate::section_edit::changes_between(&program_at_revision(file, rev)?, &program)
+            } else if let Some(since) = option_value(args, "--since") {
+                crate::section_edit::changes_since(&program, since)?
+            } else {
+                return Err(format!(
+                    "fs changes needs --against <file>, --rev <git-rev>, or --since <iso>; usage: {usage}"
+                ));
+            };
+            if json {
+                let entries = changes
+                    .iter()
+                    .map(|change| {
+                        format!(
+                            "{{\"id\": {}, \"kind\": {}, \"change\": {}, \"before\": {}, \"after\": {}, \"at\": {}, \"by\": {}}}",
+                            crate::json::string(&change.id),
+                            crate::json::string(change.kind),
+                            crate::json::string(change.change),
+                            crate::json::opt_string(change.before.as_deref()),
+                            crate::json::opt_string(change.after.as_deref()),
+                            crate::json::opt_string(change.at.as_deref()),
+                            crate::json::opt_string(change.by.as_deref())
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                println!(
+                    "{{\n  \"schema\": \"forgentex.project_changes.v1\",\n  \"file\": {},\n  \"changes\": [{}]\n}}",
+                    crate::json::string(file),
+                    entries.join(", ")
+                );
+            } else {
+                for change in &changes {
+                    println!(
+                        "{}\t{}\t{}\t{}\t{}",
+                        change.change,
+                        change.id,
+                        change.kind,
+                        change.at.as_deref().unwrap_or("-"),
+                        change.by.as_deref().unwrap_or("-")
+                    );
+                }
+            }
+            Ok(())
+        }
+        "extract" => {
+            let out = option_value(args, "--out").ok_or_else(|| format!("usage: {usage}"))?;
+            let out = Path::new(out);
+            std::fs::create_dir_all(out)
+                .map_err(|err| format!("could not create {}: {err}", out.display()))?;
+            let mut written = Vec::new();
+            for item in &program.items {
+                let Some(name) = crate::section::file_name_for(item) else {
+                    continue;
+                };
+                // Section names are node-safe identifiers, so a name cannot
+                // climb out of the output directory; checked anyway, because
+                // this writes to a path the caller chose.
+                crate::interp::normalize_portable_path(&name)?;
+                let bytes = match item {
+                    crate::ast::Item::Data(section) => {
+                        let mut text = section.content.join("\n");
+                        text.push('\n');
+                        text.into_bytes()
+                    }
+                    crate::ast::Item::Blob(section) => crate::section::blob_bytes(section, root)?,
+                    _ => continue,
+                };
+                let target = out.join(&name);
+                std::fs::write(&target, &bytes)
+                    .map_err(|err| format!("could not write {}: {err}", target.display()))?;
+                written.push((
+                    crate::ast::item_node_id(item).to_string(),
+                    name,
+                    bytes.len(),
+                ));
+            }
+            if json {
+                let entries = written
+                    .iter()
+                    .map(|(id, name, bytes)| {
+                        format!(
+                            "{{\"id\": {}, \"file\": {}, \"bytes\": {bytes}}}",
+                            crate::json::string(id),
+                            crate::json::string(name)
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                println!(
+                    "{{\n  \"schema\": \"forgentex.project_fs_extract.v1\",\n  \"out\": {},\n  \"written\": [{}]\n}}",
+                    crate::json::string(&out.display().to_string()),
+                    entries.join(", ")
+                );
+            } else {
+                for (id, name, bytes) in &written {
+                    println!("{id}\t{name}\t{bytes}");
+                }
+            }
+            Ok(())
+        }
+        other => Err(format!("unknown fs verb '{other}'; usage: {usage}")),
+    }
+}
+
+/// Put a large payload into the content-addressed store. Identical bytes have
+/// an identical path, so an entry that already exists is already right.
+fn write_store(root: &Path, store_write: Option<(String, Vec<u8>)>) -> Result<(), String> {
+    let Some((relative, bytes)) = store_write else {
+        return Ok(());
+    };
+    let target = root.join(&relative);
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("could not create {}: {err}", parent.display()))?;
+    }
+    if !target.exists() {
+        std::fs::write(&target, &bytes)
+            .map_err(|err| format!("could not write {}: {err}", target.display()))?;
+    }
+    Ok(())
+}
+
+/// The project as it stood at a git revision, for the change feed.
+fn program_at_revision(file: &str, rev: &str) -> Result<crate::ast::Program, String> {
+    let path = Path::new(file);
+    let dir = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("cannot name {file} to git"))?;
+    // `rev:./name` resolves against the directory git runs in, so the file is
+    // found wherever the repository root happens to be.
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .arg("show")
+        .arg(format!("{rev}:./{name}"))
+        .output()
+        .map_err(|err| format!("could not run git: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git could not produce {file} at {rev}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let text =
+        String::from_utf8(output.stdout).map_err(|_| format!("{file} at {rev} is not UTF-8"))?;
+    if file.ends_with(".fgai") {
+        crate::parser::parse_agent(&text)
+    } else {
+        crate::parser::parse_human(&text)
+    }
+    .map_err(|err| format!("{file} at {rev} does not parse: {err}"))
+}
+
+/// The node hash of one item, exactly as `NODE_HASH` and `--expect` check it.
+fn item_hash(item: &crate::ast::Item) -> String {
+    let program = crate::ast::Program {
+        items: vec![item.clone()],
+    };
+    crate::patch::node_hash(&program, crate::ast::item_node_id(item)).unwrap_or_default()
+}
+
+/// Write a project back to the file it came from, in the syntax it was written
+/// in. A `.fgai` project stays dense; a `.fgx` project stays readable.
+fn write_project(file: &str, program: &crate::ast::Program) -> Result<(), String> {
+    let rendered = if file.ends_with(".fgai") {
+        crate::format::format_agent(program)
+    } else {
+        crate::format::format_human(program)
+    };
+    // Parse what will be written before replacing the file: a project that
+    // cannot be read back is worse than a failed add.
+    let reparsed = if file.ends_with(".fgai") {
+        crate::parser::parse_agent(&rendered)
+    } else {
+        crate::parser::parse_human(&rendered)
+    }
+    .map_err(|err| format!("refusing to write a file that cannot be parsed back: {err}"))?;
+    if reparsed.to_canonical_json() != program.to_canonical_json() {
+        return Err(
+            "refusing to write: the rendered file does not round-trip to the same program"
+                .to_string(),
+        );
+    }
+    std::fs::write(file, rendered).map_err(|err| format!("could not write {file}: {err}"))
+}
+
+/// The current UTC time as `YYYY-MM-DDTHH:MM:SSZ`.
+///
+/// The only clock read in the project. Everything below the command line takes
+/// a timestamp as an argument, so parsing, formatting, and checking stay
+/// deterministic and testable.
+fn now_iso8601() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0);
+    let days = secs.div_euclid(86_400);
+    let time = secs.rem_euclid(86_400);
+    // Civil-from-days, so no date library is needed for one timestamp.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        time / 3_600,
+        (time % 3_600) / 60,
+        time % 60
+    )
+}
+
+/// Who to record when the caller does not say.
+fn default_author() -> String {
+    let user = std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "unknown".to_string());
+    format!("human:{user}")
+}
+
+fn find_section<'a>(
+    program: &'a crate::ast::Program,
+    tag: &str,
+) -> Result<&'a crate::ast::Item, String> {
+    program
+        .items
+        .iter()
+        .find(|item| crate::ast::item_node_id(item) == tag)
+        .ok_or_else(|| format!("no section with node id '{tag}' in this file"))
+}
+
+fn fs_entry_text(item: &crate::ast::Item) -> Option<String> {
+    match item {
+        crate::ast::Item::Data(section) => Some(format!(
+            "{}\t{}\tlines={}\t{}",
+            section.id,
+            section.kind,
+            section.content.len(),
+            section.meta.modified.as_deref().unwrap_or("-")
+        )),
+        crate::ast::Item::Blob(section) => Some(format!(
+            "{}\t{}\tbytes={}\t{}",
+            section.id,
+            section.media_type,
+            section.bytes,
+            section.meta.modified.as_deref().unwrap_or("-")
+        )),
+        crate::ast::Item::Note(note) => Some(format!(
+            "{}\ton {}\t{}\t{}",
+            note.id, note.target, note.status, note.author
+        )),
+        _ => None,
+    }
+}
+
+fn fs_entry_json(item: &crate::ast::Item) -> Option<String> {
+    let meta = |meta: &crate::ast::SectionMeta| {
+        format!(
+            "\"created\": {}, \"created_by\": {}, \"modified\": {}, \"modified_by\": {}",
+            crate::json::opt_string(meta.created.as_deref()),
+            crate::json::opt_string(meta.created_by.as_deref()),
+            crate::json::opt_string(meta.modified.as_deref()),
+            crate::json::opt_string(meta.modified_by.as_deref()),
+        )
+    };
+    match item {
+        crate::ast::Item::Data(section) => Some(format!(
+            "{{\"id\": {}, \"hash\": {}, \"kind\": \"data\", \"name\": {}, \"shape\": {}, \"lines\": {}, {}}}",
+            crate::json::string(&section.id),
+            crate::json::string(&item_hash(item)),
+            crate::json::string(&section.name),
+            crate::json::string(&section.kind),
+            section.content.len(),
+            meta(&section.meta)
+        )),
+        crate::ast::Item::Blob(section) => Some(format!(
+            "{{\"id\": {}, \"hash\": {}, \"kind\": \"blob\", \"name\": {}, \"media_type\": {}, \"bytes\": {}, \"storage\": {}, \"sha256\": {}, {}}}",
+            crate::json::string(&section.id),
+            crate::json::string(&item_hash(item)),
+            crate::json::string(&section.name),
+            crate::json::string(&section.media_type),
+            section.bytes,
+            crate::json::string(match &section.payload {
+                crate::ast::BlobPayload::Inline(_) => "inline",
+                crate::ast::BlobPayload::Store(_) => "store",
+            }),
+            crate::json::opt_string(section.sha256.as_deref()),
+            meta(&section.meta)
+        )),
+        crate::ast::Item::Note(note) => Some(format!(
+            "{{\"id\": {}, \"hash\": {}, \"kind\": \"note\", \"on\": {}, \"by\": {}, \"agent\": {}, \"status\": {}, \"created\": {}, \"reply_to\": {}}}",
+            crate::json::string(&note.id),
+            crate::json::string(&item_hash(item)),
+            crate::json::string(&note.target),
+            crate::json::string(&note.author),
+            note.is_agent(),
+            crate::json::string(&note.status),
+            crate::json::opt_string(note.created.as_deref()),
+            crate::json::opt_string(note.reply_to.as_deref())
+        )),
+        _ => None,
+    }
+}
+
+fn fs_stat_text(item: &crate::ast::Item) -> String {
+    match item {
+        crate::ast::Item::Data(section) => format!(
+            "{}\nkind=data shape={} lines={}\ncreated={} by={}\nmodified={} by={}\n",
+            section.id,
+            section.kind,
+            section.content.len(),
+            section.meta.created.as_deref().unwrap_or("-"),
+            section.meta.created_by.as_deref().unwrap_or("-"),
+            section.meta.modified.as_deref().unwrap_or("-"),
+            section.meta.modified_by.as_deref().unwrap_or("-")
+        ),
+        crate::ast::Item::Blob(section) => format!(
+            "{}\nkind=blob media_type={} bytes={} storage={}\nsha256={}\ncreated={} by={}\nmodified={} by={}\n",
+            section.id,
+            section.media_type,
+            section.bytes,
+            match &section.payload {
+                crate::ast::BlobPayload::Inline(_) => "inline",
+                crate::ast::BlobPayload::Store(path) => path,
+            },
+            section.sha256.as_deref().unwrap_or("-"),
+            section.meta.created.as_deref().unwrap_or("-"),
+            section.meta.created_by.as_deref().unwrap_or("-"),
+            section.meta.modified.as_deref().unwrap_or("-"),
+            section.meta.modified_by.as_deref().unwrap_or("-")
+        ),
+        crate::ast::Item::Note(note) => format!(
+            "{}\nkind=note on={} by={} agent={} status={}\ncreated={}\nreply_to={}\n",
+            note.id,
+            note.target,
+            note.author,
+            note.is_agent(),
+            note.status,
+            note.created.as_deref().unwrap_or("-"),
+            note.reply_to.as_deref().unwrap_or("-")
+        ),
+        other => format!("{}\n", crate::ast::item_node_id(other)),
+    }
 }
 
 fn cmd_api(args: &[String]) -> Result<(), String> {
@@ -1240,7 +1903,7 @@ fn cmd_edit_bench(args: &[String]) -> Result<(), String> {
     let edits = option_value(args, "--edits")
         .and_then(|n| n.parse::<usize>().ok())
         .unwrap_or(8);
-    let report = crate::edit_bench::run(file, &program, edits);
+    let report = crate::edit_bench::run(file, &program, edits)?;
     if args.iter().any(|arg| arg == "--json") {
         println!("{}", report.to_json());
     } else {
@@ -1250,15 +1913,88 @@ fn cmd_edit_bench(args: &[String]) -> Result<(), String> {
 }
 
 fn cmd_token_report(args: &[String]) -> Result<(), String> {
-    let file = required_arg(args, 0, "token-report <file> [--json]")?;
+    let file = required_arg(
+        args,
+        0,
+        "token-report <file> [--bpe-command <program> [--bpe-arg <arg>]... [--bpe-name <label>]] [--json]",
+    )?;
     let program = read_program(file)?;
-    let report = crate::tokens::report(file, &program);
+    let mut report = crate::tokens::report(file, &program);
+    if let Some(program_path) = option_value(args, "--bpe-command") {
+        let extra: Vec<&str> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "--bpe-arg")
+            .map(|pair| pair[1].as_str())
+            .collect();
+        let label = option_value(args, "--bpe-name")
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                std::iter::once(program_path)
+                    .chain(extra.iter().copied())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            });
+        report.measured = Some(crate::tokens::measure(&program, &label, |text| {
+            count_with_external_tokenizer(program_path, &extra, text)
+        })?);
+    }
     if args.iter().any(|arg| arg == "--json") {
         println!("{}", report.to_json());
     } else {
         print!("{}", report.to_text());
     }
     Ok(())
+}
+
+/// Count one text's tokens with an external tokenizer.
+///
+/// The protocol is deliberately small so any tokenizer can sit behind it: the
+/// text arrives on stdin exactly as Forgentex would send it, and the program
+/// prints a single non-negative integer. `tools/tokenizer/tiktoken_count.py` is
+/// one such program. Anything else on stdout is an error rather than something
+/// to parse around, because a count read out of noise is worse than none.
+fn count_with_external_tokenizer(
+    program: &str,
+    args: &[&str],
+    text: &str,
+) -> Result<usize, String> {
+    use std::io::Write;
+    let mut child = std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("could not start tokenizer '{program}': {err}"))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "tokenizer stdin was not piped".to_string())?;
+    let payload = text.as_bytes().to_vec();
+    // Written from a thread so a tokenizer that prints before it finishes
+    // reading cannot deadlock against a full pipe.
+    let writer = std::thread::spawn(move || stdin.write_all(&payload));
+    let output = child
+        .wait_with_output()
+        .map_err(|err| format!("tokenizer '{program}' failed: {err}"))?;
+    writer
+        .join()
+        .map_err(|_| "tokenizer input writer panicked".to_string())?
+        .map_err(|err| format!("could not send text to tokenizer '{program}': {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "tokenizer '{program}' exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let printed = String::from_utf8_lossy(&output.stdout);
+    printed.trim().parse::<usize>().map_err(|_| {
+        format!(
+            "tokenizer '{program}' must print one non-negative integer, got {:?}",
+            printed.trim()
+        )
+    })
 }
 
 fn cmd_codebook(args: &[String]) -> Result<(), String> {
@@ -2067,11 +2803,21 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
             // auto-respawn on worker death. `--cold` restores per-call spawn;
             // `--warm` is accepted for compatibility (it is the default).
             let warm = !args.iter().any(|arg| arg == "--cold");
+            // `--trusted` is the operator's explicit acceptance that managed
+            // capsules may run even when they declare limits the runtime cannot
+            // enforce; those are waived and named in the call's receipt. Every
+            // enforceable limit still applies. A capsule can never grant this.
+            let policy = crate::interp::CapsulePolicy {
+                warm,
+                managed: crate::managed_exec::ManagedPolicy {
+                    trusted: args.iter().any(|arg| arg == "--trusted"),
+                },
+            };
             let ir = generate_backend_ir(Path::new(file))?;
             println!(
                 "{}",
                 run_entry_json_hosted_with_ir(
-                    &program, &ir, entry, &input, allow, fs_grants, net_allow, warm
+                    &program, &ir, entry, &input, allow, fs_grants, net_allow, policy
                 )?
             );
         } else {
@@ -2573,7 +3319,7 @@ fn print_help() {
 }
 
 fn help_text() -> String {
-    "Forgentex demo CLI\n\
+    "Forgentex CLI\n\
 \n\
 Commands:\n\
   fgx --version\n\
@@ -2639,9 +3385,20 @@ Commands:\n\
   fgx audit [project] [--json]\n\
   fgx verify [project] [--json]\n\
   fgx api --public [--project <path>]\n\
+  fgx fs ls|stat <file> [--tag <node-id>] [--json]\n\
+  fgx fs cat <file> --tag <node-id>\n\
+  fgx fs notes <file> [--on <node-id>] [--agent] [--human] [--json]\n\
+  fgx fs add <file> --from <path> [--tag <name>] [--as data|blob] [--by <author>] [--at <iso>]\n\
+  fgx fs set <file> --tag <node-id> --from <path> [--expect <hash>] [--by <author>] [--at <iso>]\n\
+  fgx fs rm <file> --tag <node-id> [--expect <hash>] [--with-notes]\n\
+  fgx fs note <file> --on <node-id> --text <text> [--reply-to <note-id>] [--tag <name>] [--by <author>] [--at <iso>]\n\
+  fgx fs resolve <file> --tag <note-id> [--text <reason>] [--expect <hash>] [--by <author>] [--at <iso>]\n\
+  fgx fs changes <file> --rev <git-rev>|--against <file>|--since <iso> [--json]\n\
+  fgx fs extract <file> --out <dir> [--json]\n\
   fgx effects <file> --json\n\
   fgx patch <source> <patch> --review|--check-only|--emit-review-json [--codebook <file>] [--project <path>]\n\
   fgx run <file> [--entry <function> --json-input <file> --backend interp]\n\
+  fgx run <file> --entry <function> --json-input <file> --live [--allow-effects a,b] [--grant-fs a,b] [--grant-net host,...] [--cold] [--trusted]\n\
   fgx dap
 \n  fgx debug <file> --entry <fn> [--json-input <in>] [--break <node-id>] [--max-steps N] [--live] [--allow-effects a,b] [--grant-fs a,b] [--grant-net host,...] [--values summary|full] [--tail N] [--break-if <node>=<expr>] [--watch <expr>] [--interactive] [--json]\n\
   fgx map <dir> --out <file> [--include-targets]\n\

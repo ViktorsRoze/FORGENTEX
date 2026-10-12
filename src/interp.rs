@@ -268,6 +268,7 @@ pub fn run_demo_with_ir(program: &Program, ir: &BackendIr) -> Result<String, Str
 fn run_demo_impl(program: &Program, fir: Option<&BackendIr>) -> Result<String, String> {
     let interpreter = Interpreter {
         program,
+        int_widths: std::cell::RefCell::new(Vec::new()),
         fir,
         io: None,
         net: None,
@@ -328,6 +329,43 @@ pub fn run_entry_json(program: &Program, entry: &str, input: &str) -> Result<Str
     run_entry_json_with_ir(program, &ir, entry, input)
 }
 
+/// What an entry produced, in the values the interpreter actually held: the
+/// arguments it was called with, its return value, and the bindings that
+/// survived the call.
+pub(crate) type EntryValues = (Vec<Value>, Value, HashMap<String, Value>);
+
+/// Run an entry the way [`run_entry_json`] does, but hand back the values
+/// instead of their JSON projection.
+///
+/// The backend differential test needs the *arguments* it fed the interpreter
+/// (to build an equivalent C call) and the resulting bindings (to compare the
+/// mutations both sides made), and recovering those by re-parsing the JSON
+/// would compare a rendering rather than the values themselves.
+pub(crate) fn run_entry_values(
+    program: &Program,
+    entry: &str,
+    input: &str,
+) -> Result<EntryValues, String> {
+    let ir = lower_program_to_run_ir(program);
+    let input = RunInput::parse(input)?;
+    let interpreter = Interpreter {
+        program,
+        int_widths: std::cell::RefCell::new(Vec::new()),
+        fir: Some(&ir),
+        io: None,
+        net: None,
+        capsules: None,
+        concurrency: ConcurrencyTrace::default(),
+        tracer: None,
+    };
+    let function = program
+        .find_function(entry)
+        .ok_or_else(|| trap("unknown_entry", format!("unknown function '{entry}'")))?;
+    let args = input.args_for(program, function)?;
+    let (return_value, bindings) = interpreter.execute_function(function, args.clone())?;
+    Ok((args, return_value, bindings))
+}
+
 pub fn run_entry_json_with_ir(
     program: &Program,
     ir: &BackendIr,
@@ -337,6 +375,7 @@ pub fn run_entry_json_with_ir(
     let input = RunInput::parse(input)?;
     let interpreter = Interpreter {
         program,
+        int_widths: std::cell::RefCell::new(Vec::new()),
         fir: Some(ir),
         io: None,
         net: None,
@@ -434,6 +473,7 @@ fn run_entry_with_io_context(
 ) {
     let interpreter = Interpreter {
         program,
+        int_widths: std::cell::RefCell::new(Vec::new()),
         fir,
         io: Some(io),
         net: None,
@@ -494,6 +534,7 @@ fn run_entry_with_net_impl(
 ) -> (Option<Value>, Vec<NetOp>, Option<String>) {
     let interpreter = Interpreter {
         program,
+        int_widths: std::cell::RefCell::new(Vec::new()),
         fir,
         io: None,
         net: Some(NetContext::new(allow)),
@@ -516,6 +557,7 @@ fn run_entry_with_net_impl(
 pub fn eval_expr_for_test(program: &Program, expr: &Expr) -> Result<Value, String> {
     let interpreter = Interpreter {
         program,
+        int_widths: std::cell::RefCell::new(Vec::new()),
         fir: None,
         io: None,
         net: None,
@@ -562,6 +604,7 @@ fn run_entry_json_live_impl(
     let input = RunInput::parse(input)?;
     let interpreter = Interpreter {
         program,
+        int_widths: std::cell::RefCell::new(Vec::new()),
         fir,
         io: None,
         net: None,
@@ -682,6 +725,43 @@ fn capsule_calls_json(calls: &[CapsuleCall]) -> String {
                     )
                 })
                 .unwrap_or_default();
+            let managed = call
+                .managed
+                .as_ref()
+                .map(|receipt| {
+                    let enforced = receipt
+                        .enforced
+                        .iter()
+                        .map(|(key, value, source)| {
+                            format!(
+                                "{{\"limit\": {}, \"value\": {}, \"source\": {}}}",
+                                quoted_json(key),
+                                quoted_json(value),
+                                quoted_json(source)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let waived = receipt
+                        .waived
+                        .iter()
+                        .map(|item| quoted_json(item))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let granted_env = receipt
+                        .granted_env
+                        .iter()
+                        .map(|item| quoted_json(item))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!(
+                        ", \"managed\": {{\"schema\": \"forgentex.managed_receipt.v1\", \"profile\": {}, \"warm\": {}, \"enforced\": [{enforced}], \"waived\": [{waived}], \"environment\": \"explicit_allowlist\", \"granted_env\": [{granted_env}], \"diagnostics\": {}, \"filesystem_isolation\": \"none\", \"network_isolation\": \"none\"}}",
+                        quoted_json(&receipt.profile),
+                        receipt.warm,
+                        quoted_json(&receipt.diagnostics)
+                    )
+                })
+                .unwrap_or_default();
             let native_failure = call
                 .native_failure
                 .as_ref()
@@ -713,7 +793,7 @@ fn capsule_calls_json(calls: &[CapsuleCall]) -> String {
                 })
                 .unwrap_or_default();
             format!(
-                "{{\"capsule\": {}, \"language\": {}, \"decision\": {}, \"redacted_inputs\": [{}]{native}{native_failure}}}",
+                "{{\"capsule\": {}, \"language\": {}, \"decision\": {}, \"redacted_inputs\": [{}]{native}{native_failure}{managed}}}",
                 quoted_json(&call.capsule),
                 quoted_json(&call.language),
                 quoted_json(&call.decision),
@@ -748,7 +828,10 @@ pub fn run_entry_json_hosted(
         capsule_allow,
         fs_grants,
         net_allow,
-        false,
+        CapsulePolicy {
+            warm: false,
+            ..CapsulePolicy::default()
+        },
     )
 }
 
@@ -761,7 +844,7 @@ pub fn run_entry_json_hosted_with_ir(
     capsule_allow: Option<Vec<String>>,
     fs_grants: Vec<String>,
     net_allow: Vec<String>,
-    warm: bool,
+    policy: CapsulePolicy,
 ) -> Result<String, String> {
     run_entry_json_hosted_impl(
         program,
@@ -771,7 +854,35 @@ pub fn run_entry_json_hosted_with_ir(
         capsule_allow,
         fs_grants,
         net_allow,
-        warm,
+        policy,
+    )
+}
+
+/// How a hosted run executes capsules.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CapsulePolicy {
+    /// One persistent worker per capsule (rt.3). Used only for capsules that
+    /// declare no limits, since a shared worker cannot apply per-call limits.
+    pub warm: bool,
+    /// The operator's managed-capsule policy, including whether the trusted
+    /// profile is granted.
+    pub managed: crate::managed_exec::ManagedPolicy,
+}
+
+impl Default for CapsulePolicy {
+    fn default() -> Self {
+        Self {
+            warm: true,
+            managed: crate::managed_exec::ManagedPolicy::default(),
+        }
+    }
+}
+
+/// Languages that run through a host runtime rather than a compiled runner.
+fn is_managed_language(language: &str) -> bool {
+    matches!(
+        language,
+        "python" | "node" | "typescript" | "go" | "java" | "csharp"
     )
 }
 
@@ -784,11 +895,12 @@ fn run_entry_json_hosted_impl(
     capsule_allow: Option<Vec<String>>,
     fs_grants: Vec<String>,
     net_allow: Vec<String>,
-    warm: bool,
+    policy: CapsulePolicy,
 ) -> Result<String, String> {
     let input = RunInput::parse(input)?;
     let interpreter = Interpreter {
         program,
+        int_widths: std::cell::RefCell::new(Vec::new()),
         fir,
         io: Some(IoContext::new(fs_grants)),
         net: Some(NetContext::new(net_allow)),
@@ -797,7 +909,8 @@ fn run_entry_json_hosted_impl(
                 Some(allow) => CapsuleHost::with_effects(allow),
                 None => CapsuleHost::new(),
             }
-            .with_warm(warm),
+            .with_warm(policy.warm)
+            .with_managed_policy(policy.managed),
         ),
         concurrency: ConcurrencyTrace::default(),
         tracer: None,
@@ -880,6 +993,7 @@ pub fn run_entry_with_warm_capsules(
 ) -> (Option<Value>, Vec<CapsuleCall>, Option<String>) {
     let interpreter = Interpreter {
         program,
+        int_widths: std::cell::RefCell::new(Vec::new()),
         fir: None,
         io: None,
         net: None,
@@ -910,6 +1024,7 @@ pub fn run_entry_with_capsules(
     let ir = lower_program_to_run_ir(program);
     let interpreter = Interpreter {
         program,
+        int_widths: std::cell::RefCell::new(Vec::new()),
         fir: Some(&ir),
         io: None,
         net: None,
@@ -941,6 +1056,7 @@ pub fn run_entry_with_capsule_effects(
     let ir = lower_program_to_run_ir(program);
     let interpreter = Interpreter {
         program,
+        int_widths: std::cell::RefCell::new(Vec::new()),
         fir: Some(&ir),
         io: None,
         net: None,
@@ -1019,6 +1135,7 @@ fn invoke_capsule_live_args_inner(
 ) -> (Result<CapsuleLiveOutcome, String>, Vec<CapsuleCall>) {
     let interpreter = Interpreter {
         program,
+        int_widths: std::cell::RefCell::new(Vec::new()),
         fir: None,
         io: None,
         net: None,
@@ -1083,6 +1200,21 @@ fn invoke_capsule_live_args_inner(
 
 struct Interpreter<'a> {
     program: &'a Program,
+    /// One map per active call frame, giving the width each arithmetic node in
+    /// that frame is checked at, keyed by node address.
+    ///
+    /// Integer arithmetic traps at the **declared** width rather than at 64
+    /// bits, so `i32 + i32` overflowing an `i32` is an error even though the sum
+    /// fits an `i64`. The evaluator has no type environment, so `int_width`
+    /// supplies one per frame.
+    ///
+    /// A frame rather than the whole program, because the FIR path rebuilds a
+    /// function's statements on every call: those nodes live only as long as the
+    /// call, and a later call can reuse the same addresses. Evaluation is
+    /// strictly nested — a callee's frame is pushed only after the caller has
+    /// finished evaluating its arguments — so the top of the stack is always the
+    /// frame the expression being evaluated belongs to.
+    int_widths: std::cell::RefCell<Vec<HashMap<usize, String>>>,
     fir: Option<&'a BackendIr>,
     io: Option<IoContext>,
     net: Option<NetContext>,
@@ -1908,6 +2040,7 @@ fn debug_entry_impl(
     // filesystem, the network, or a foreign toolchain.
     let interpreter = Interpreter {
         program,
+        int_widths: std::cell::RefCell::new(Vec::new()),
         fir: None,
         io: match (options.io_policy.clone(), options.hosted) {
             // A manifest policy carries artifact declarations and scopes that a
@@ -2014,6 +2147,9 @@ pub struct CapsuleHost {
     warm: bool,
     workers: std::cell::RefCell<HashMap<String, crate::capsule_worker::CapsuleWorker>>,
     native_runners: std::cell::RefCell<crate::ffi::NativeRunnerCache>,
+    /// The operator's policy for managed capsules. Only the operator can grant
+    /// the trusted profile; nothing a capsule declares can.
+    managed: crate::managed_exec::ManagedPolicy,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2026,6 +2162,34 @@ pub struct CapsuleCall {
     pub decision: String,
     pub native: Option<crate::ffi::NativeReceipt>,
     pub native_failure: Option<crate::ffi::NativeFailureReceipt>,
+    /// For managed capsules: which profile ran the call, which limits were
+    /// enforced, and which declarations were waived under the trusted profile.
+    pub managed: Option<ManagedReceipt>,
+}
+
+/// What was applied to one managed capsule call.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ManagedReceipt {
+    /// `contained`, or `trusted` when a declared limit was waived.
+    pub profile: String,
+    /// `(key, value, source)` for each enforced limit.
+    pub enforced: Vec<(String, String, String)>,
+    /// Declared limits that were not applied. Empty unless the operator chose
+    /// the trusted profile; never silently non-empty.
+    pub waived: Vec<String>,
+    /// Whether the call went through a persistent warm worker, which does not
+    /// apply per-call limits and is therefore only used when none are declared.
+    pub warm: bool,
+    /// What the capsule itself printed, bounded. A capsule's output used to be
+    /// taken as its result; now it is diagnostics, and diagnostics that vanish
+    /// are their own debugging problem, so they are reported here.
+    ///
+    /// Warm calls only for now: the cold runners report a failing capsule's
+    /// output in the error, but do not yet carry it back on success.
+    pub diagnostics: String,
+    /// Caller variables the capsule was granted by name. Everything else in the
+    /// caller's environment is absent from the child.
+    pub granted_env: Vec<String>,
 }
 
 struct CapsuleAuditInputs {
@@ -2093,6 +2257,7 @@ impl CapsuleHost {
             warm: false,
             workers: std::cell::RefCell::new(HashMap::new()),
             native_runners: std::cell::RefCell::new(crate::ffi::NativeRunnerCache::default()),
+            managed: crate::managed_exec::ManagedPolicy::default(),
         }
     }
 
@@ -2112,6 +2277,7 @@ impl CapsuleHost {
             warm: false,
             workers: std::cell::RefCell::new(HashMap::new()),
             native_runners: std::cell::RefCell::new(crate::ffi::NativeRunnerCache::default()),
+            managed: crate::managed_exec::ManagedPolicy::default(),
         }
     }
 
@@ -2122,6 +2288,15 @@ impl CapsuleHost {
     /// the worker died (a *transport* failure — broken pipe / EOF, not a
     /// capsule `{"err": …}`), replace it and retry the call once. A capsule's
     /// own error is deterministic and is never retried.
+    /// What the capsule has printed since its worker last answered.
+    pub(crate) fn warm_diagnostics(&self, capsule: &Capsule) -> String {
+        self.workers
+            .borrow()
+            .get(&capsule.name)
+            .map(|worker| worker.take_diagnostics())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn warm_call(&self, capsule: &Capsule, json_args: &str) -> Result<String, String> {
         match self.warm_call_once(capsule, json_args) {
             Ok(response) => Ok(response),
@@ -2164,6 +2339,19 @@ impl CapsuleHost {
 
     pub fn calls(&self) -> Vec<CapsuleCall> {
         self.calls.borrow().clone()
+    }
+
+    /// Attach what was applied to the managed call recorded last.
+    fn attach_managed(&self, receipt: ManagedReceipt) {
+        if let Some(call) = self.calls.borrow_mut().last_mut() {
+            call.managed = Some(receipt);
+        }
+    }
+
+    /// Grant (or withhold) the trusted profile for managed capsules.
+    pub fn with_managed_policy(mut self, policy: crate::managed_exec::ManagedPolicy) -> Self {
+        self.managed = policy;
+        self
     }
 
     fn record(
@@ -2212,6 +2400,7 @@ impl CapsuleHost {
             decision: decision.to_string(),
             native,
             native_failure: None,
+            managed: None,
         });
     }
 
@@ -2237,6 +2426,7 @@ impl CapsuleHost {
             decision: "error".to_string(),
             native: None,
             native_failure: Some(receipt),
+            managed: None,
         });
     }
 }
@@ -3500,7 +3690,27 @@ impl<'a> Interpreter<'a> {
         // spawning a process. The response envelope distinguishes a capsule
         // exception ({"err": …}) from a result ({"ok": …}) so a failing call
         // never kills the worker.
-        if host.warm && crate::capsule_worker::supports_language(&capsule.language) {
+        // Plan before dispatch so a capsule declaring a limit that cannot be
+        // enforced is refused before any process starts — warm or cold.
+        let managed_plan = if is_managed_language(&capsule.language) {
+            match crate::managed_exec::plan(capsule, host.managed) {
+                Ok(plan) => Some(plan),
+                Err(err) => {
+                    host.record(&capsule.name, &capsule.language, &audit, &err, "denied");
+                    return Err(trap("capsule_limit_unenforceable", err));
+                }
+            }
+        } else {
+            None
+        };
+        // A warm worker is one long-lived process shared by every call, so it
+        // cannot apply per-call limits. A capsule that declares any runs on the
+        // contained cold path instead, where they are enforced.
+        let declares_limits = !crate::sandbox::analyze_capsule(capsule).limits.is_empty();
+        if host.warm
+            && !declares_limits
+            && crate::capsule_worker::supports_language(&capsule.language)
+        {
             match host
                 .warm_call(capsule, &inputs)
                 .and_then(|raw| parse_worker_envelope(&raw))
@@ -3513,6 +3723,14 @@ impl<'a> Interpreter<'a> {
                         &value_to_json(&value),
                         "allow",
                     );
+                    host.attach_managed(ManagedReceipt {
+                        profile: "warm_worker".to_string(),
+                        enforced: Vec::new(),
+                        waived: Vec::new(),
+                        warm: true,
+                        diagnostics: host.warm_diagnostics(capsule),
+                        granted_env: Vec::new(),
+                    });
                     return Ok(retag_struct_output(capsule, value));
                 }
                 Err(err) => {
@@ -3531,27 +3749,43 @@ impl<'a> Interpreter<'a> {
         ) {
             return self.call_native_capsule(host, capsule, source_args, args, env, &audit);
         }
+        let policy = host.managed;
         let dispatch = match capsule.language.as_str() {
-            "python" => crate::python_run::invoke_live(capsule, &inputs),
-            "node" | "typescript" => crate::node_run::invoke_live(capsule, &inputs),
-            "go" => crate::go_run::invoke_live(capsule, &inputs),
+            "python" => crate::python_run::invoke_live_with(capsule, &inputs, policy),
+            "node" | "typescript" => crate::node_run::invoke_live_with(capsule, &inputs, policy),
+            "go" => crate::go_run::invoke_live_with(capsule, &inputs, policy),
             "java" => {
                 let plain = args.iter().map(value_to_arg).collect::<Vec<_>>();
-                crate::jvm_run::invoke_live(capsule, &plain)
+                crate::jvm_run::invoke_live_with(capsule, &plain, policy)
             }
             // Same type-directed boundary as the JVM. Wired but unverified on a
             // box without a .NET SDK (see dotnet_run::invoke_live).
             "csharp" => {
                 let plain = args.iter().map(value_to_arg).collect::<Vec<_>>();
-                crate::dotnet_run::invoke_live(capsule, &plain)
+                crate::dotnet_run::invoke_live_with(capsule, &plain, policy)
             }
             other => Err(format!(
                 "live invocation of '{other}' capsules is not wired yet"
             )),
         };
+        let receipt = managed_plan.map(|plan| ManagedReceipt {
+            profile: plan.profile.to_string(),
+            diagnostics: String::new(),
+            enforced: plan
+                .enforced
+                .iter()
+                .map(|(key, value, source)| (key.clone(), value.clone(), source.to_string()))
+                .collect(),
+            waived: plan.waived.clone(),
+            warm: false,
+            granted_env: plan.granted_env.clone(),
+        });
         match dispatch {
             Ok(output) => {
                 host.record(&capsule.name, &capsule.language, &audit, &output, "allow");
+                if let Some(receipt) = receipt.clone() {
+                    host.attach_managed(receipt);
+                }
                 let json = JsonParser::new(&output).parse().map_err(|err| {
                     trap(
                         "capsule_bad_output",
@@ -3566,6 +3800,9 @@ impl<'a> Interpreter<'a> {
             }
             Err(err) => {
                 host.record(&capsule.name, &capsule.language, &audit, &err, "error");
+                if let Some(receipt) = receipt {
+                    host.attach_managed(receipt);
+                }
                 let err = capsule_error_for_caller(&err, &audit.redacted);
                 Err(trap(
                     "capsule_call_failed",
@@ -3660,6 +3897,37 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    /// The declared integer width of an arithmetic node, if it has one.
+    ///
+    /// Absent for float and non-numeric operations, and for expressions built
+    /// only from literals: those have no width until a context supplies one,
+    /// and are checked at the boundary they flow into instead.
+    fn integer_width(&self, expr: &Expr) -> Option<String> {
+        if !matches!(expr, Expr::Binary { op, .. } if matches!(
+            op.as_str(),
+            "+" | "-" | "*" | "/" | "%" | "<<" | ">>"
+        )) {
+            return None;
+        }
+        self.int_widths
+            .borrow()
+            .last()?
+            .get(&(expr as *const Expr as usize))
+            .cloned()
+    }
+
+    /// Run `body` with the widths of `frame` in scope.
+    ///
+    /// The guard shape matters: the frame has to be popped even when the call
+    /// traps, or an error unwinding out of a callee would leave its widths
+    /// applying to the caller's nodes.
+    fn with_int_widths<T>(&self, frame: HashMap<usize, String>, body: impl FnOnce() -> T) -> T {
+        self.int_widths.borrow_mut().push(frame);
+        let result = body();
+        self.int_widths.borrow_mut().pop();
+        result
+    }
+
     fn execute_function(
         &self,
         function: &FunctionDecl,
@@ -3718,7 +3986,10 @@ impl<'a> Interpreter<'a> {
                 t.depth += 1;
             }
         }
-        let outcome = self.run_body(&function.body, &mut env, &format!("{}.stmt", function.id));
+        let widths = crate::int_width::annotate(&function.body, &function.params, &function.ret);
+        let outcome = self.with_int_widths(widths, || {
+            self.run_body(&function.body, &mut env, &format!("{}.stmt", function.id))
+        });
         match outcome {
             Ok(control) => {
                 let value = match control {
@@ -3795,9 +4066,13 @@ impl<'a> Interpreter<'a> {
                 ));
             }
         }
-        if let Control::Return(value) =
-            self.run_body(&body, &mut env, &format!("{}.stmt", function.id))?
-        {
+        // The FIR path rebuilds `body` on every call, so its widths are computed
+        // for these nodes and discarded with them.
+        let widths = crate::int_width::annotate(&body, &function.params, &function.ret);
+        let control = self.with_int_widths(widths, || {
+            self.run_body(&body, &mut env, &format!("{}.stmt", function.id))
+        })?;
+        if let Control::Return(value) = control {
             return Ok((value, env));
         }
         Ok((Value::Void, env))
@@ -4416,9 +4691,27 @@ impl<'a> Interpreter<'a> {
                 }
             }
             Expr::Binary { op, left, right } => {
+                let width = self.integer_width(expr);
                 let left = self.eval_expr(left, env)?;
                 let right = self.eval_expr(right, env)?;
-                eval_binary(op, left, right)
+                // The shift amount is checked against the shifted type's width
+                // before the shift happens: `eval_binary` only knows about 64,
+                // so `1 << 40` on an `i32` would otherwise succeed.
+                if let Some(width) = &width {
+                    match op.as_str() {
+                        "<<" | ">>" => check_shift_amount(&right, width)?,
+                        "/" | "%" => check_division(op, &left, &right, width)?,
+                        _ => {}
+                    }
+                }
+                let value = eval_binary(op, left, right)?;
+                // Integer arithmetic is checked at the declared width, so a sum
+                // that fits an `i64` but not the `i32` it was written at is an
+                // error rather than a value no `i32` could hold.
+                match width {
+                    Some(width) => narrow_to_width(op, value, &width),
+                    None => Ok(value),
+                }
             }
             Expr::Call { name, args } => {
                 if is_cpu_feature_probe(name) || name == "aligned" {
@@ -8348,6 +8641,104 @@ impl<'a> Interpreter<'a> {
                     None => Err(trap("unknown_symbol", format!("unknown symbol '{var}'"))),
                 }
             }
+            // Payloads the file itself carries (docs/project_filesystem.md).
+            // Reading one is not I/O: the bytes are in the program, so this
+            // needs no effect and grants no authority. An out-of-line payload
+            // *would* be a file read, and is refused rather than quietly
+            // reaching outside the program.
+            "section_text" | "section_bytes" => {
+                expect_arity(name, args, 1)?;
+                let id = match &args[0] {
+                    Expr::String(id) => id.clone(),
+                    _ => {
+                        return Err(trap(
+                            "section_ref_not_literal",
+                            format!("'{name}' needs a literal node id"),
+                        ))
+                    }
+                };
+                let item = self
+                    .program
+                    .items
+                    .iter()
+                    .find(|item| crate::ast::item_node_id(item) == id)
+                    .ok_or_else(|| {
+                        trap(
+                            "section_ref_unknown",
+                            format!("'{id}' is not a section carried in this file"),
+                        )
+                    })?;
+                let bytes = match item {
+                    crate::ast::Item::Data(section) => {
+                        let mut text = section.content.join("
+");
+                        if name == "section_text" {
+                            return Ok(Some(Value::String(text)));
+                        }
+                        text.push('\n');
+                        text.into_bytes()
+                    }
+                    crate::ast::Item::Blob(section) => match &section.payload {
+                        crate::ast::BlobPayload::Inline(lines) => {
+                            let bytes = crate::section::decode_base64(&lines.join(""))
+                                .map_err(|err| trap("blob_payload_invalid", err))?;
+                            // The declared size and hash are checked here as
+                            // well as by `fgx check`: a program must not read
+                            // bytes that disagree with what the file says they
+                            // are, whether or not the checker ran.
+                            if bytes.len() as u64 != section.bytes {
+                                return Err(trap(
+                                    "blob_size_mismatch",
+                                    format!(
+                                        "blob '{id}' declares {} bytes but its payload decodes to {}",
+                                        section.bytes,
+                                        bytes.len()
+                                    ),
+                                ));
+                            }
+                            if let Some(declared) = &section.sha256 {
+                                let actual = crate::crypto::sha256_hex(&bytes);
+                                if &actual != declared {
+                                    return Err(trap(
+                                        "blob_hash_mismatch",
+                                        format!("blob '{id}' does not match its declared sha256"),
+                                    ));
+                                }
+                            }
+                            bytes
+                        }
+                        crate::ast::BlobPayload::Store(path) => {
+                            return Err(trap(
+                                "section_payload_out_of_line",
+                                format!(
+                                    "blob '{id}' keeps its bytes in the store at '{path}', which a run cannot read yet; carry it inline, or extract it with `fgx fs extract` and read the file through a granted effect"
+                                ),
+                            ))
+                        }
+                    },
+                    other => {
+                        return Err(trap(
+                            "section_ref_not_a_payload",
+                            format!("'{id}' is a {} and has no payload to read", crate::ast::item_kind_name(other)),
+                        ))
+                    }
+                };
+                if name == "section_text" {
+                    let text = String::from_utf8(bytes).map_err(|_| {
+                        trap(
+                            "section_payload_not_utf8",
+                            format!("'{id}' is not valid UTF-8, so it has no text to read"),
+                        )
+                    })?;
+                    return Ok(Some(Value::String(text)));
+                }
+                Ok(Some(Value::Array(
+                    bytes
+                        .into_iter()
+                        .map(|byte| Value::Int(byte as i64))
+                        .collect(),
+                )))
+            }
             // String library (lang.3): concatenate, measure, and stringify.
             "str_concat" => {
                 expect_arity(name, args, 2)?;
@@ -9825,6 +10216,131 @@ fn match_pattern(pattern: &Pattern, value: &Value) -> Option<Vec<(String, Value)
             }
             _ => None,
         },
+    }
+}
+
+/// The inclusive range of an integer type, as `(min, max)` over `i128` so every
+/// supported width — signed and unsigned, up to 64 bits — is expressible.
+pub(crate) fn integer_range(width: &str) -> Option<(i128, i128)> {
+    Some(match width {
+        "i8" => (i8::MIN as i128, i8::MAX as i128),
+        "i16" => (i16::MIN as i128, i16::MAX as i128),
+        "i32" => (i32::MIN as i128, i32::MAX as i128),
+        // `isize` is the host pointer width; the interpreter runs on 64-bit
+        // hosts and the C backend guards against `PTRDIFF_MAX` for the same
+        // reason, so both agree wherever the program is actually run.
+        "i64" | "isize" => (i64::MIN as i128, i64::MAX as i128),
+        "u8" => (0, u8::MAX as i128),
+        "u16" => (0, u16::MAX as i128),
+        "u32" => (0, u32::MAX as i128),
+        "u64" | "usize" => (0, u64::MAX as i128),
+        _ => return None,
+    })
+}
+
+/// Reject `MIN / -1` and `MIN % -1`.
+///
+/// The quotient is one past the type's maximum, so division is already caught
+/// by the range check — but the remainder is zero and would slip through, while
+/// the operation is still an overflow. Both are rejected here so the two forms
+/// answer alike, which is also what the C backend and Rust do.
+fn check_division(op: &str, left: &Value, right: &Value, width: &str) -> Result<(), String> {
+    let Some((min, _)) = integer_range(width) else {
+        return Ok(());
+    };
+    if min == 0 {
+        return Ok(());
+    }
+    let (Value::Int(numerator), Value::Int(denominator)) = (left, right) else {
+        return Ok(());
+    };
+    if *numerator as i128 == min && *denominator == -1 {
+        return Err(trap(
+            "integer_overflow",
+            format!("{op} of the smallest {width} by -1 overflows"),
+        ));
+    }
+    Ok(())
+}
+
+/// Reject a shift amount outside `[0, width)`.
+///
+/// Shifting by at least the width is undefined in C and rejected by every other
+/// language with defined integer semantics, so it traps here rather than
+/// producing a value that depends on the backend.
+fn check_shift_amount(amount: &Value, width: &str) -> Result<(), String> {
+    let bits = i128::from(width_bits(width));
+    let raw = match amount {
+        Value::Int(raw) => *raw as i128,
+        Value::UInt(raw) => *raw as i128,
+        _ => return Ok(()),
+    };
+    if raw < 0 || raw >= bits {
+        return Err(trap(
+            "invalid_shift",
+            format!("shift amount {raw} is outside 0..{bits} for {width}"),
+        ));
+    }
+    Ok(())
+}
+
+fn width_bits(width: &str) -> u32 {
+    match width {
+        "i8" | "u8" => 8,
+        "i16" | "u16" => 16,
+        "i32" | "u32" => 32,
+        _ => 64,
+    }
+}
+
+/// Apply the declared width to a value the 64-bit evaluator just produced.
+///
+/// Arithmetic traps when the result leaves the width. Shifts are the exception:
+/// a shift moves a bit pattern, so bits leaving the top are discarded rather
+/// than an error — but the shift *amount* must be inside the width, which is
+/// checked here because the evaluator only knows about 64.
+fn narrow_to_width(op: &str, value: Value, width: &str) -> Result<Value, String> {
+    let Some((min, max)) = integer_range(width) else {
+        return Ok(value);
+    };
+    let raw = match &value {
+        Value::Int(raw) => *raw as i128,
+        Value::UInt(raw) => *raw as i128,
+        // Float and non-numeric results are not width-checked.
+        _ => return Ok(value),
+    };
+    if matches!(op, "<<" | ">>") {
+        let bits = width_bits(width);
+        let truncated = if bits >= 64 {
+            raw
+        } else {
+            let mask = (1i128 << bits) - 1;
+            let kept = raw & mask;
+            // Re-sign the retained bits for a signed width, so shifting off the
+            // top of an `i32` yields an `i32` rather than a large positive
+            // number, matching the two's-complement result the C backend
+            // produces for the same expression.
+            if min < 0 && kept > max {
+                kept - (1i128 << bits)
+            } else {
+                kept
+            }
+        };
+        return Ok(rewrap(&value, truncated));
+    }
+    if raw < min || raw > max {
+        return Err(trap(
+            "integer_overflow",
+            format!("{op} result {raw} does not fit {width}"),
+        ));
+    }
+    Ok(value)
+}
+
+fn rewrap(original: &Value, raw: i128) -> Value {
+    match original {
+        Value::UInt(_) if raw >= 0 => Value::UInt(raw as u64),
+        _ => Value::Int(raw as i64),
     }
 }
 

@@ -881,9 +881,14 @@ fn source_backends_inline_trait_associated_constants() {
     let (_, c) = crate::c_backend::generate_c_for_project(&dir).unwrap();
     let zig = crate::zig_backend::generate_zig_for_project(&dir).unwrap();
     for source in [&c, &zig] {
-        assert!(source.contains("21 * 2"), "{source}");
+        // The associated constant is inlined in both backends. How the multiply
+        // is then spelled differs: C routes integer arithmetic through a
+        // width-checked helper, Zig still emits the operator.
         assert!(!source.contains("Limits::max"), "{source}");
+        assert!(source.contains("21"), "{source}");
     }
+    assert!(c.contains("fgx_checked_i32_mul(21, 2)"), "{c}");
+    assert!(zig.contains("21 * 2"), "{zig}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1110,10 +1115,15 @@ fn source_backends_specialize_generic_impl_associated_items() {
     let zig = crate::zig_backend::generate_zig_for_project(&dir).unwrap();
     for source in [&c, &zig] {
         assert!(source.contains("identity__fgx_mono_i32(value)"), "{source}");
-        assert!(source.contains("+ 6"), "{source}");
         assert!(!source.contains("Echo::"), "{source}");
         assert!(!source.contains("Self::Item"), "{source}");
     }
+    // The addition survives in both; C checks it at the declared width.
+    assert!(
+        c.contains("fgx_checked_i32_add(identity__fgx_mono_i32(value), 6)"),
+        "{c}"
+    );
+    assert!(zig.contains("+ 6"), "{zig}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

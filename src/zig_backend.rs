@@ -797,7 +797,13 @@ fn emit_assignment(
     out: &mut String,
 ) -> Result<(), String> {
     let pad = indent(level);
-    let value = emit_expr(expr, env, structs)?;
+    let target_ty = inferred_zig_type(target, env, structs);
+    let value = if native_option_suffix(&target_ty).is_some() && is_native_option_constructor(expr)
+    {
+        emit_native_option_constructor(expr, env, structs)?
+    } else {
+        emit_expr(expr, env, structs)?
+    };
     match target {
         Expr::Index { base, index } => {
             let base_text = emit_expr(base, env, structs)?;

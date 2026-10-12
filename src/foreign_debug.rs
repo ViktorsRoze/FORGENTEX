@@ -151,7 +151,7 @@ pub fn admit(capsule: &Capsule, requested: bool) -> ForeignDebugAdmission {
 
 // --- Attaching the foreign debugger ----------------------------------------
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -169,6 +169,8 @@ pub struct AttachedDebugger {
     /// The script the capsule body was written to, which is what breakpoints
     /// and stack frames refer to.
     pub script: PathBuf,
+    /// The loopback port the debugger adapter is listening on.
+    pub port: u16,
 }
 
 impl Drop for AttachedDebugger {
@@ -179,6 +181,36 @@ impl Drop for AttachedDebugger {
         let _ = self.child.wait();
         let _ = std::fs::remove_dir_all(&self.scratch);
     }
+}
+
+/// Strip insignificant whitespace so a match does not depend on how the child
+/// adapter spaces its JSON.
+fn compact(message: &str) -> String {
+    let mut out = String::with_capacity(message.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in message.chars() {
+        if in_string {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => {
+                in_string = true;
+                out.push(ch);
+            }
+            c if c.is_whitespace() => {}
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Reserve a loopback port by binding and immediately releasing it.
@@ -258,21 +290,67 @@ pub fn attach_python(
             Err(_) => std::thread::sleep(Duration::from_millis(50)),
         }
     };
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .map_err(|err| format!("could not bound debugpy reads: {err}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .map_err(|err| format!("could not bound debugpy writes: {err}"))?;
     let writer = stream
         .try_clone()
         .map_err(|err| format!("could not split the debug connection: {err}"))?;
 
-    Ok(AttachedDebugger {
+    let mut attached = AttachedDebugger {
         child,
         stream: BufReader::new(stream),
         writer,
         seq: 0,
         scratch,
         script,
-    })
+        port,
+    };
+    attached.handshake()?;
+    Ok(attached)
 }
 
 impl AttachedDebugger {
+    /// Bring the child adapter to the point where it accepts configuration.
+    ///
+    /// debugpy's ordering is particular and not what the DAP specification's
+    /// happy path suggests:
+    ///
+    /// * the `initialized` **event** is withheld until the session is attached,
+    ///   so waiting for it before sending `attach` deadlocks;
+    /// * `attach` must carry `connect` naming the adapter's own endpoint.
+    ///   Without it the adapter answers the request but never registers the
+    ///   attach, and later reports "Missing launch request or attach request
+    ///   before configuration done request" while the client waits.
+    ///
+    /// Both were found by driving a real debugpy 1.8 session; encoding them
+    /// here keeps every caller from rediscovering them.
+    fn handshake(&mut self) -> Result<(), String> {
+        self.request(
+            "initialize",
+            "{\"adapterID\":\"forgentex\",\"pathFormat\":\"path\",\"linesStartAt1\":true,\"columnsStartAt1\":true}",
+        )?;
+        self.read_until(|message| {
+            compact(message).contains("\"type\":\"response\"")
+                && compact(message).contains("\"command\":\"initialize\"")
+        })?
+        .ok_or_else(|| "debugpy closed before answering initialize".to_string())?;
+
+        let port = self.port;
+        self.request(
+            "attach",
+            &format!("{{\"connect\":{{\"host\":\"127.0.0.1\",\"port\":{port}}}}}"),
+        )?;
+        self.read_until(|message| compact(message).contains("\"event\":\"initialized\""))?
+            .ok_or_else(|| {
+                "debugpy never reported `initialized`; the attach was not registered".to_string()
+            })?;
+        Ok(())
+    }
+
     /// Send a DAP request and return its sequence number.
     pub fn request(&mut self, command: &str, arguments: &str) -> Result<i64, String> {
         self.seq += 1;
@@ -318,13 +396,30 @@ impl AttachedDebugger {
     pub fn read_until<F: Fn(&str) -> bool>(&mut self, wanted: F) -> Result<Option<String>, String> {
         // Bounded so a protocol mismatch surfaces as an error rather than a
         // hang: a debugged capsule is already paused and would wait forever.
+        let mut recent = std::collections::VecDeque::with_capacity(4);
         for _ in 0..200 {
-            match self.read()? {
-                Some(message) if wanted(&message) => return Ok(Some(message)),
-                Some(_) => continue,
-                None => return Ok(None),
+            match self.read() {
+                Err(err) => {
+                    let context = recent.into_iter().collect::<Vec<_>>().join(" | ");
+                    return Err(if context.is_empty() {
+                        err
+                    } else {
+                        format!("{err}; unmatched debugpy messages: {context}")
+                    });
+                }
+                Ok(Some(message)) if wanted(&message) => return Ok(Some(message)),
+                Ok(Some(message)) => {
+                    if recent.len() == 4 {
+                        recent.pop_front();
+                    }
+                    recent.push_back(message);
+                }
+                Ok(None) => return Ok(None),
             }
         }
-        Err("debugpy produced no matching message within the message budget".to_string())
+        Err(format!(
+            "debugpy produced no matching message within the message budget; unmatched messages: {}",
+            recent.into_iter().collect::<Vec<_>>().join(" | ")
+        ))
     }
 }

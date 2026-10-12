@@ -128,6 +128,41 @@
         "command": "forgentex.showUnsafeArchitectureSlices",
         "title": "Forgentex: Show Unsafe Architecture Slices",
         "category": "Forgentex"
+      },
+      {
+        "command": "forgentex.fsRefresh",
+        "title": "Forgentex: Refresh Project Filesystem",
+        "category": "Forgentex",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "forgentex.fsAdd",
+        "title": "Forgentex: Add File to Project…",
+        "category": "Forgentex",
+        "icon": "$(add)"
+      },
+      {
+        "command": "forgentex.fsExtract",
+        "title": "Forgentex: Extract Payloads to Folder…",
+        "category": "Forgentex",
+        "icon": "$(desktop-download)"
+      },
+      {
+        "command": "forgentex.fsPreviewBlob",
+        "title": "Forgentex: Preview Blob",
+        "category": "Forgentex",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "forgentex.fsShowNotes",
+        "title": "Forgentex: Show Notes on Section",
+        "category": "Forgentex",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "forgentex.fsReveal",
+        "title": "Forgentex: Reveal Section",
+        "category": "Forgentex"
       }
     ],
     "menus": {
@@ -141,6 +176,11 @@
           "command": "forgentex.runDiagnostics",
           "when": "resourceExtname == .fgx || resourceExtname == .fgai",
           "group": "navigation@21"
+        },
+        {
+          "command": "forgentex.fsExtract",
+          "when": "(resourceExtname == .fgx || resourceExtname == .fgai) && forgentex.hasSections",
+          "group": "navigation@22"
         }
       ],
       "editor/context": [
@@ -165,6 +205,45 @@
           "command": "forgentex.applyPatchPreview",
           "when": "resourceExtname == .fgp",
           "group": "forgentex@20"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "forgentex.fsAdd",
+          "when": "view == forgentex.projectFilesystem",
+          "group": "navigation@10"
+        },
+        {
+          "command": "forgentex.fsExtract",
+          "when": "view == forgentex.projectFilesystem",
+          "group": "navigation@20"
+        },
+        {
+          "command": "forgentex.fsRefresh",
+          "when": "view == forgentex.projectFilesystem",
+          "group": "navigation@30"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "forgentex.fsPreviewBlob",
+          "when": "view == forgentex.projectFilesystem && viewItem == forgentex.blob",
+          "group": "inline@10"
+        },
+        {
+          "command": "forgentex.fsShowNotes",
+          "when": "view == forgentex.projectFilesystem && (viewItem == forgentex.data || viewItem == forgentex.blob)",
+          "group": "forgentex@10"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "forgentex.fsReveal",
+          "when": "false"
+        },
+        {
+          "command": "forgentex.fsPreviewBlob",
+          "when": "resourceExtname == .fgx || resourceExtname == .fgai"
         }
       ]
     },
@@ -200,6 +279,11 @@
           "default": 400,
           "minimum": 200,
           "description": "Debounce delay in milliseconds before a check-on-type run. Values below 200 are clamped."
+        },
+        "forgentex.author": {
+          "type": "string",
+          "default": "",
+          "description": "Author recorded when this editor adds a section, for example agent:claude-opus-5 or human:viktor. Empty lets the CLI record the current user."
         }
       }
     },
@@ -288,7 +372,27 @@
           }
         ]
       }
-    ]
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "forgentex",
+          "title": "Forgentex",
+          "icon": "$(database)"
+        }
+      ]
+    },
+    "views": {
+      "forgentex": [
+        {
+          "id": "forgentex.projectFilesystem",
+          "name": "Project Filesystem",
+          "icon": "$(database)",
+          "contextualTitle": "Data, bytes, and notes carried in this file",
+          "when": "resourceExtname == .fgx || resourceExtname == .fgai"
+        }
+      ]
+    }
   },
   "capabilities": {
     "untrustedWorkspaces": {

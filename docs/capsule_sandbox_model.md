@@ -1,7 +1,17 @@
 # Capsule Sandbox Model (v2.3)
 
-v2.3 makes a capsule's constrained environment explicit, checkable, and
-enforced at the boundary — without invoking a foreign runtime. It defines
+v2.3 makes a capsule's constrained environment explicit and checkable at the
+boundary — without invoking a foreign runtime.
+
+> **Checked is not the same as enforced.** This page defines the policy a
+> capsule declares and the checker verifies. Whether the operating system then
+> *stops* a capsule that does something it did not declare depends on the
+> runtime and the platform. Managed runtimes (Python, Node, Go, JVM, .NET) now
+> enforce time, CPU, output, and (on Windows) memory limits, but still do not
+> deny filesystem or network access. See
+> [enforcement_matrix.md](enforcement_matrix.md) for exactly what is enforced
+> where.
+ It defines
 the sandbox capability model, reconciles declared effects against granted
 capabilities, parses resource limits, produces an enforcement plan, and
 gates mock execution on sandbox approval.
@@ -11,7 +21,7 @@ memory limits as described below. A native runner without explicit resource
 limits receives mandatory 30,000 ms wall, 30,000 ms CPU, and 512 MiB memory
 ceilings, and first-time compilation is separately process-tree-contained under
 a hard 60,000 ms wall ceiling.
-Filesystem/network syscall isolation and byte accounting remain deferred.
+Filesystem and network isolation is enforced for live native runners on Windows (zero-capability AppContainer) and remains deferred on Linux and macOS and for every managed runtime; see [enforcement_matrix.md](enforcement_matrix.md).
 v2.3 continues to own the policy contract used by those runtime slices.
 
 ## Sandbox rules
@@ -36,7 +46,7 @@ A grant is `<capability> [scope]`. The capability's prefix is its category:
 | `fs` | `fs.read`, `fs.write` | host path |
 | `net` | `net.connect`, `net.listen` | host:port |
 | `proc` | `proc.spawn` | command |
-| `env` | `env.read` | variable |
+| `env` | `env.read` | variable — **enforced** for managed capsules: a variable the capsule does not name is absent from its environment |
 | `chain` | `chain.read`, `chain.write` | network/VM |
 | `gpu` | `gpu.compute` | device |
 
@@ -61,8 +71,12 @@ budgets, while Unix processes inherit whole-second `RLIMIT_CPU` and per-process
 conservative aggregate Job I/O ceiling over read/write/other transfer bytes,
 including runner protocol overhead. Ubuntu/macOS `limit.fs_bytes` and every
 live-native `limit.net_bytes` declaration fail preflight until equivalent
-enforcement exists; non-native executors still retain these as executor-plan
-data. `limit.output_bytes` bounds combined native-child stdout and stderr
+enforcement exists. Managed runtimes (Python, Node, TypeScript, Go, JVM, .NET)
+enforce `wall_ms`, `cpu_ms`, and `output_bytes` everywhere and `mem_mb` on
+Windows, and refuse a capsule declaring any limit they cannot enforce unless the
+operator runs it with `--trusted`, which records every waived declaration in the
+call's `forgentex.managed_receipt.v1`. See
+[enforcement_matrix.md](enforcement_matrix.md). `limit.output_bytes` bounds combined native-child stdout and stderr
 capture; it must be 1..=402,653,184. When absent, the 402,653,184-byte maximum
 is the mandatory default. Crossing it terminates the process tree before any
 partial response is accepted.

@@ -135,7 +135,25 @@ fn matches(expected: &CapsuleValue, got: &str) -> bool {
 /// stdout. The live capsule runtime (rt.1) path: real runtime values are
 /// marshaled across the typed boundary instead of replaying mock fixtures, gated
 /// by the capsule's sandbox approval.
+/// Run a capsule live under the default managed policy: every enforceable limit
+/// applied, and any capsule declaring a limit that cannot be enforced refused.
 pub fn invoke_live(capsule: &Capsule, json_args: &str) -> Result<String, String> {
+    invoke_live_with(
+        capsule,
+        json_args,
+        crate::managed_exec::ManagedPolicy::default(),
+    )
+}
+
+/// Run a capsule live under `policy`. The host runtime runs inside the managed
+/// containment layer (`managed_exec`): wall deadline, CPU and output budgets,
+/// declared memory ceiling, and process-tree cleanup.
+pub fn invoke_live_with(
+    capsule: &Capsule,
+    json_args: &str,
+    policy: crate::managed_exec::ManagedPolicy,
+) -> Result<String, String> {
+    let managed_plan = crate::managed_exec::plan(capsule, policy)?;
     if !crate::sandbox::is_approved(capsule) {
         return Err("capsule effects are not covered by its sandbox".to_string());
     }
@@ -153,29 +171,48 @@ pub fn invoke_live(capsule: &Capsule, json_args: &str) -> Result<String, String>
     std::fs::create_dir_all(&dir).map_err(|err| format!("failed to create scratch dir: {err}"))?;
     let is_ts = capsule.language == "typescript";
     let driver_path = dir.join(if is_ts { "driver.ts" } else { "driver.mjs" });
+    let nonce = crate::managed_protocol::nonce();
     let driver = format!(
-        "{body}\nconst _args = JSON.parse(process.argv[2]);\nconst _result = {entry}(..._args);\nconsole.log(JSON.stringify(_result));\n"
+        "{prelude}{body}\nconst _chunks = [];\nfor await (const _c of process.stdin) _chunks.push(_c);\nconst _args = JSON.parse(Buffer.concat(_chunks).toString('utf8') || '[]');\nconst _result = {entry}(..._args);\n{emit};\n",
+        prelude = crate::managed_protocol::node_prelude(&nonce),
+        emit = crate::managed_protocol::node_emit(&nonce, "_result"),
     );
     std::fs::write(&driver_path, driver).map_err(|err| format!("failed to write driver: {err}"))?;
 
-    let mut command = Command::new(&node_name);
+    let mut argv = vec![node_name.to_string()];
     if is_ts {
-        command.arg("--experimental-strip-types");
+        argv.push("--experimental-strip-types".to_string());
     }
-    let output = command
-        .arg(&driver_path)
-        .arg(json_args)
-        .output()
-        .map_err(|err| format!("failed to spawn node: {err}"))?;
+    argv.push(driver_path.display().to_string());
+    let output = match crate::managed_exec::execute_with_input(
+        &argv,
+        &managed_plan,
+        Some(json_args.as_bytes()),
+    ) {
+        Ok(output) => output,
+        Err(err) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(err);
+        }
+    };
     let _ = std::fs::remove_dir_all(&dir);
+    let framed = crate::managed_protocol::split(
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
+        &nonce,
+    );
     if !output.status.success() {
         return Err(format!(
             "node capsule '{}' raised: {}",
             capsule.name,
-            String::from_utf8_lossy(&output.stderr).trim()
+            if framed.diagnostics.is_empty() {
+                "no output".to_string()
+            } else {
+                framed.diagnostics
+            }
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    framed.result_or_error(&capsule.name)
 }
 
 fn select<'a>(program: &'a Program, name: Option<&str>) -> Option<&'a Capsule> {
@@ -265,8 +302,11 @@ pub fn run(file: &str, program: &Program, name: Option<&str>) -> Result<WebRun, 
     }
     let is_ts = capsule.language == "typescript";
     let driver_path = dir.join(if is_ts { "driver.ts" } else { "driver.mjs" });
+    let nonce = crate::managed_protocol::nonce();
     let driver = format!(
-        "{body}\nconst _args = JSON.parse(process.argv[2]);\nconst _result = {entry}(..._args);\nconsole.log(JSON.stringify(_result));\n"
+        "{prelude}{body}\nconst _chunks = [];\nfor await (const _c of process.stdin) _chunks.push(_c);\nconst _args = JSON.parse(Buffer.concat(_chunks).toString('utf8') || '[]');\nconst _result = {entry}(..._args);\n{emit};\n",
+        prelude = crate::managed_protocol::node_prelude(&nonce),
+        emit = crate::managed_protocol::node_emit(&nonce, "_result"),
     );
     if std::fs::write(&driver_path, driver).is_err() {
         report.status = "error".to_string();
@@ -280,10 +320,15 @@ pub fn run(file: &str, program: &Program, name: Option<&str>) -> Result<WebRun, 
         if is_ts {
             command.arg("--experimental-strip-types");
         }
-        command.arg(&driver_path).arg(&args);
-        match command.output() {
+        command.arg(&driver_path);
+        match crate::managed_protocol::run_with_stdin(&mut command, &args) {
             Ok(out) if out.status.success() => {
-                let got = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                let framed = crate::managed_protocol::split(
+                    &String::from_utf8_lossy(&out.stdout),
+                    &String::from_utf8_lossy(&out.stderr),
+                    &nonce,
+                );
+                let got = framed.result.unwrap_or_default();
                 let expected = fixture
                     .outputs
                     .first()

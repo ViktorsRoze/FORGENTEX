@@ -89,6 +89,8 @@ pub fn check(program: &Program) -> Vec<Diagnostic> {
     diagnostics.extend(crate::shell::validate(program));
     // Exact-arithmetic opt-in: a function marked @exact must not use float.
     diagnostics.extend(crate::numeric::validate(program));
+    // Carried sections: names, note targets, and payload integrity.
+    diagnostics.extend(crate::section::validate(program));
     // Prelude aliases are reserved: a user function may not take one.
     diagnostics.extend(crate::prelude::validate(program));
     // Smart-contract capsule review (v2.8): require an ABI hash and deny
@@ -116,6 +118,9 @@ impl<'a> TypeEnvironment<'a> {
         let mut structs = HashMap::new();
         for item in &program.items {
             match item {
+                // Carried sections have no types to check; `section::validate`
+                // checks what they do have.
+                Item::Data(_) | Item::Blob(_) | Item::Note(_) => {}
                 Item::Function(function) => {
                     functions.insert(function.name.clone(), function);
                 }
@@ -2060,6 +2065,73 @@ impl<'a> Checker<'a> {
                     let (ty, diagnostics) = check_intrinsic_call(name, &arg_types, node);
                     self.diagnostics.extend(diagnostics);
                     return ty;
+                }
+                // Reading a payload the file itself carries. The argument is a
+                // node id, and it must be a literal: an id computed at runtime
+                // could name a section that is not there, which is a failure
+                // the checker can prevent entirely.
+                if matches!(name.as_str(), "section_text" | "section_bytes") {
+                    if args.len() != 1 {
+                        self.diagnostics.push(
+                            Diagnostic::new(
+                                "call_arity",
+                                node,
+                                format!("builtin '{name}' expects 1 argument"),
+                            )
+                            .suggest("fix_call_arguments"),
+                        );
+                    }
+                    if let Some(Expr::String(id)) = args.first() {
+                        let known = self
+                            .program
+                            .items
+                            .iter()
+                            .any(|item| crate::ast::item_node_id(item) == id.as_str());
+                        if !known {
+                            self.diagnostics.push(
+                                Diagnostic::new(
+                                    "section_ref_unknown",
+                                    node,
+                                    format!("'{id}' is not a section carried in this file"),
+                                )
+                                .suggest("point it at a data or blob section that exists"),
+                            );
+                        } else if !self.program.items.iter().any(|item| {
+                            crate::ast::item_node_id(item) == id.as_str()
+                                && matches!(
+                                    item,
+                                    crate::ast::Item::Data(_) | crate::ast::Item::Blob(_)
+                                )
+                        }) {
+                            self.diagnostics.push(
+                                Diagnostic::new(
+                                    "section_ref_not_a_payload",
+                                    node,
+                                    format!("'{id}' has no payload to read"),
+                                )
+                                .suggest("read a data or blob section; a note has no payload"),
+                            );
+                        }
+                    } else if args.len() == 1 {
+                        self.diagnostics.push(
+                            Diagnostic::new(
+                                "section_ref_not_literal",
+                                node,
+                                format!(
+                                    "builtin '{name}' needs a literal node id, for example \"@data.sales\""
+                                ),
+                            )
+                            .suggest("write the id as a string literal"),
+                        );
+                    }
+                    return if name == "section_text" {
+                        Type::Primitive("str".to_string())
+                    } else {
+                        Type::Generic {
+                            name: "Vec".to_string(),
+                            args: vec![Type::Primitive("u8".to_string())],
+                        }
+                    };
                 }
                 if matches!(name.as_str(), "str_len" | "str_contains") {
                     let expected = if name == "str_len" { 1 } else { 2 };
@@ -6105,6 +6177,12 @@ fn builtin_call_type(name: &str) -> Option<Type> {
         "pop" => Some(Type::Unknown),
         // String library (lang.3).
         "str_concat" | "int_to_str" | "str_slice" => Some(Type::Primitive("str".to_string())),
+        // Payloads the file carries (see docs/project_filesystem.md).
+        "section_text" => Some(Type::Primitive("str".to_string())),
+        "section_bytes" => Some(Type::Generic {
+            name: "Vec".to_string(),
+            args: vec![Type::Primitive("u8".to_string())],
+        }),
         "str_len" => Some(Type::Primitive("usize".to_string())),
         "str_find" => Some(Type::Unknown),
         "str_contains" => Some(Type::Bool),

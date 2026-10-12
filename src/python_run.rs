@@ -176,7 +176,25 @@ fn select<'a>(program: &'a Program, name: Option<&str>) -> Option<&'a Capsule> {
 /// runtime values across the typed boundary and dispatches to the host python,
 /// instead of replaying mock fixtures. The call is gated by the capsule's
 /// sandbox approval just like the fixture runner.
+/// Run a capsule live under the default managed policy: every enforceable limit
+/// applied, and any capsule declaring a limit that cannot be enforced refused.
 pub fn invoke_live(capsule: &Capsule, json_args: &str) -> Result<String, String> {
+    invoke_live_with(
+        capsule,
+        json_args,
+        crate::managed_exec::ManagedPolicy::default(),
+    )
+}
+
+/// Run a capsule live under `policy`. The host runtime runs inside the managed
+/// containment layer (`managed_exec`): wall deadline, CPU and output budgets,
+/// declared memory ceiling, and process-tree cleanup.
+pub fn invoke_live_with(
+    capsule: &Capsule,
+    json_args: &str,
+    policy: crate::managed_exec::ManagedPolicy,
+) -> Result<String, String> {
+    let managed_plan = crate::managed_exec::plan(capsule, policy)?;
     if !crate::sandbox::is_approved(capsule) {
         return Err("capsule effects are not covered by its sandbox".to_string());
     }
@@ -191,25 +209,46 @@ pub fn invoke_live(capsule: &Capsule, json_args: &str) -> Result<String, String>
     let dir = std::env::temp_dir().join(format!("forgentex_{}_{}_pylive", std::process::id(), seq));
     std::fs::create_dir_all(&dir).map_err(|err| format!("failed to create scratch dir: {err}"))?;
     let driver_path = dir.join("driver.py");
+    // The request arrives on stdin, the answer leaves on a tagged line, and the
+    // body's own printing is diagnostics. See `managed_protocol`.
+    let nonce = crate::managed_protocol::nonce();
     let driver = format!(
-        "import json, sys\n{body}\n_inputs = json.loads(sys.argv[1])\n_result = {entry}(*_inputs)\nprint(json.dumps(_result))\n"
+        "{prelude}{body}\n_inputs = json.loads(sys.stdin.read())\n_result = {entry}(*_inputs)\n{emit}\n",
+        prelude = crate::managed_protocol::python_prelude(&nonce),
+        emit = crate::managed_protocol::python_emit(&nonce, "_result"),
     );
     std::fs::write(&driver_path, driver).map_err(|err| format!("failed to write driver: {err}"))?;
 
-    let output = Command::new(&py_name)
-        .arg(&driver_path)
-        .arg(json_args)
-        .output()
-        .map_err(|err| format!("failed to spawn python: {err}"))?;
+    let argv = vec![py_name.to_string(), driver_path.display().to_string()];
+    let output =
+        crate::managed_exec::execute_with_input(&argv, &managed_plan, Some(json_args.as_bytes()));
+    let output = match output {
+        Ok(output) => output,
+        Err(err) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(err);
+        }
+    };
     let _ = std::fs::remove_dir_all(&dir);
+    let framed = crate::managed_protocol::split(
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
+        &nonce,
+    );
     if !output.status.success() {
+        // The traceback is in the diagnostics now, because the body's output and
+        // the runtime's error stream are the same channel.
         return Err(format!(
             "python capsule '{}' raised: {}",
             capsule.name,
-            String::from_utf8_lossy(&output.stderr).trim()
+            if framed.diagnostics.is_empty() {
+                "no output".to_string()
+            } else {
+                framed.diagnostics
+            }
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    framed.result_or_error(&capsule.name)
 }
 
 pub fn run(file: &str, program: &Program, name: Option<&str>) -> Result<PythonRun, String> {
@@ -293,8 +332,11 @@ pub fn run(file: &str, program: &Program, name: Option<&str>) -> Result<PythonRu
         return Ok(report);
     }
     let driver_path = dir.join("driver.py");
+    let nonce = crate::managed_protocol::nonce();
     let driver = format!(
-        "import json, sys\n{body}\n_inputs = json.loads(sys.argv[1])\n_result = {entry}(*_inputs)\nprint(json.dumps(_result))\n"
+        "{prelude}{body}\n_inputs = json.loads(sys.stdin.read())\n_result = {entry}(*_inputs)\n{emit}\n",
+        prelude = crate::managed_protocol::python_prelude(&nonce),
+        emit = crate::managed_protocol::python_emit(&nonce, "_result"),
     );
     if std::fs::write(&driver_path, driver).is_err() {
         report.status = "error".to_string();
@@ -304,10 +346,18 @@ pub fn run(file: &str, program: &Program, name: Option<&str>) -> Result<PythonRu
 
     for fixture in &capsule.fixtures {
         let args = json_inputs(&fixture.inputs);
-        let output = Command::new(&py_name).arg(&driver_path).arg(&args).output();
+        let output = crate::managed_protocol::run_with_stdin(
+            Command::new(&py_name).arg(&driver_path),
+            &args,
+        );
         match output {
             Ok(out) if out.status.success() => {
-                let got = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                let framed = crate::managed_protocol::split(
+                    &String::from_utf8_lossy(&out.stdout),
+                    &String::from_utf8_lossy(&out.stderr),
+                    &nonce,
+                );
+                let got = framed.result.unwrap_or_default();
                 let expected = fixture
                     .outputs
                     .first()

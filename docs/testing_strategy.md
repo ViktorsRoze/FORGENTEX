@@ -11,7 +11,7 @@ Run these before treating a change as stable:
 ```powershell
 cargo fmt --check
 cargo clippy -- -D warnings
-cargo test
+cargo test -- --test-threads=1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\demo.ps1
 ```
 
@@ -347,8 +347,17 @@ Stage 22 fuzz/property tests:
 - Semantic patches satisfy `patch -> check -> format -> parse -> check`.
 - Target invariants exercise ABI and assembly validation across x86_64,
   ARM/AArch64, and RISC-V.
-- `fgx diff-test --json` emits `forgentex.backend_differential.v1` and links
-  interpreter golden execution, generated C output, and FGIR symbol presence.
+- `fgx diff-test --json` emits `forgentex.backend_differential.v1`. It runs the
+  golden input through the interpreter, then **compiles the generated C and runs
+  the entry on the same arguments**, comparing the return value and every `&mut`
+  slice the call mutated. Floating-point values are compared as bit patterns at
+  their declared width, so two numbers that print alike but are not alike still
+  fail. The `native_execution` field records what was actually established —
+  `matched`, `mismatched`, `unsupported` (a signature the harness cannot
+  construct a call for), `unavailable` (no host C toolchain), or `failed` — so a
+  run that could not execute the C never reads as one that did. Symbol presence
+  in the header, source, and FGIR is still checked, but it is no longer the whole
+  test.
 
 Project tests:
 

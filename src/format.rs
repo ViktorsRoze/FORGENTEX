@@ -1,7 +1,7 @@
 use crate::ast::{
-    AsmBlock, Attribute, Capsule, CapsuleBinding, CapsuleFixture, EnumDecl, Expr, FunctionDecl,
-    Item, PipelineDecl, Program, ShareDecl, Stmt, StructDecl, TestDecl, TestExpectation, TraitDecl,
-    TraitImplDecl,
+    AsmBlock, Attribute, BlobPayload, BlobSection, Capsule, CapsuleBinding, CapsuleFixture,
+    DataSection, EnumDecl, Expr, FunctionDecl, Item, NoteNode, PipelineDecl, Program, SectionMeta,
+    ShareDecl, Stmt, StructDecl, TestDecl, TestExpectation, TraitDecl, TraitImplDecl,
 };
 
 pub fn format_human(program: &Program) -> String {
@@ -20,6 +20,9 @@ pub fn format_human(program: &Program) -> String {
             Item::Capsule(capsule) => format_capsule_human(&mut out, capsule),
             Item::Share(share) => format_share_human(&mut out, share),
             Item::Pipeline(pipeline) => format_pipeline_human(&mut out, pipeline),
+            Item::Data(section) => format_data_human(&mut out, section),
+            Item::Blob(section) => format_blob_human(&mut out, section),
+            Item::Note(note) => format_note_human(&mut out, note),
         }
     }
     finish_document(out)
@@ -41,6 +44,9 @@ pub fn format_agent(program: &Program) -> String {
             Item::Capsule(capsule) => format_capsule_agent(&mut out, capsule),
             Item::Share(share) => format_share_agent(&mut out, share),
             Item::Pipeline(pipeline) => format_pipeline_agent(&mut out, pipeline),
+            Item::Data(section) => format_data_agent(&mut out, section),
+            Item::Blob(section) => format_blob_agent(&mut out, section),
+            Item::Note(note) => format_note_agent(&mut out, note),
         }
     }
     // Render high-frequency builtins with their short two-letter aliases.
@@ -898,4 +904,158 @@ fn quoted_string(value: &str) -> String {
     }
     out.push('"');
     out
+}
+
+// ---- Carried sections: data, blobs, and the note graph --------------------
+//
+// These render in the same shape as a capsule, which is the shape both
+// audiences already know: a header line, indented metadata, then one verbatim
+// block. The agent view prefixes the block with its line count, so a reader can
+// skip a payload without scanning it — the same trick `CODE <n>` uses.
+
+fn format_meta_human(out: &mut String, meta: &SectionMeta) {
+    if let Some(created) = &meta.created {
+        out.push_str(&format!("    created {}", quoted_string(created)));
+        if let Some(by) = &meta.created_by {
+            out.push_str(&format!(" by {}", quoted_string(by)));
+        }
+        out.push('\n');
+    }
+    if let Some(modified) = &meta.modified {
+        out.push_str(&format!("    modified {}", quoted_string(modified)));
+        if let Some(by) = &meta.modified_by {
+            out.push_str(&format!(" by {}", quoted_string(by)));
+        }
+        out.push('\n');
+    }
+}
+
+fn format_verbatim_human(out: &mut String, label: &str, lines: &[String]) {
+    out.push_str(&format!("    {label}:\n"));
+    for line in lines {
+        if line.is_empty() {
+            out.push('\n');
+        } else {
+            out.push_str(&format!("        {line}\n"));
+        }
+    }
+}
+
+fn format_data_human(out: &mut String, section: &DataSection) {
+    format_attrs_human(out, &section.attrs, 0);
+    out.push_str(&format!("data {} {}:\n", section.name, section.kind));
+    format_meta_human(out, &section.meta);
+    format_verbatim_human(out, "content", &section.content);
+    trim_trailing_newline(out);
+}
+
+fn format_blob_human(out: &mut String, section: &BlobSection) {
+    format_attrs_human(out, &section.attrs, 0);
+    out.push_str(&format!("blob {} {}:\n", section.name, section.media_type));
+    format_meta_human(out, &section.meta);
+    out.push_str(&format!("    bytes {}\n", section.bytes));
+    if let Some(hash) = &section.sha256 {
+        out.push_str(&format!("    sha256 {}\n", quoted_string(hash)));
+    }
+    match &section.payload {
+        BlobPayload::Inline(lines) => format_verbatim_human(out, "inline", lines),
+        BlobPayload::Store(path) => out.push_str(&format!("    store {}\n", quoted_string(path))),
+    }
+    trim_trailing_newline(out);
+}
+
+fn format_note_human(out: &mut String, note: &NoteNode) {
+    format_attrs_human(out, &note.attrs, 0);
+    out.push_str(&format!(
+        "note {} on {}:\n",
+        note.name,
+        quoted_string(&note.target)
+    ));
+    out.push_str(&format!("    by {}\n", quoted_string(&note.author)));
+    if let Some(created) = &note.created {
+        out.push_str(&format!("    created {}\n", quoted_string(created)));
+    }
+    if let Some(reply_to) = &note.reply_to {
+        out.push_str(&format!("    reply-to {}\n", quoted_string(reply_to)));
+    }
+    out.push_str(&format!("    status {}\n", quoted_string(&note.status)));
+    format_verbatim_human(out, "text", &note.text);
+    trim_trailing_newline(out);
+}
+
+fn trim_trailing_newline(out: &mut String) {
+    while out.ends_with('\n') {
+        out.pop();
+    }
+}
+
+fn format_meta_agent(out: &mut String, meta: &SectionMeta) {
+    if let Some(created) = &meta.created {
+        out.push_str(&format!("  CRT {}", quoted_string(created)));
+        if let Some(by) = &meta.created_by {
+            out.push_str(&format!(" BY {}", quoted_string(by)));
+        }
+        out.push('\n');
+    }
+    if let Some(modified) = &meta.modified {
+        out.push_str(&format!("  MOD {}", quoted_string(modified)));
+        if let Some(by) = &meta.modified_by {
+            out.push_str(&format!(" BY {}", quoted_string(by)));
+        }
+        out.push('\n');
+    }
+}
+
+fn format_verbatim_agent(out: &mut String, label: &str, lines: &[String]) {
+    out.push_str(&format!("  {label} {}\n", lines.len()));
+    for line in lines {
+        out.push_str(line);
+        out.push('\n');
+    }
+}
+
+fn format_data_agent(out: &mut String, section: &DataSection) {
+    format_attrs_agent(out, &section.attrs);
+    out.push_str(&format!("DATA {} {}\n", section.name, section.kind));
+    format_meta_agent(out, &section.meta);
+    format_verbatim_agent(out, "BODY", &section.content);
+    out.push_str("ENDDATA");
+}
+
+fn format_blob_agent(out: &mut String, section: &BlobSection) {
+    format_attrs_agent(out, &section.attrs);
+    out.push_str(&format!(
+        "BLOB {} {}\n",
+        section.name,
+        quoted_string(&section.media_type)
+    ));
+    format_meta_agent(out, &section.meta);
+    out.push_str(&format!("  SIZE {}\n", section.bytes));
+    if let Some(hash) = &section.sha256 {
+        out.push_str(&format!("  HASH {}\n", quoted_string(hash)));
+    }
+    match &section.payload {
+        BlobPayload::Inline(lines) => format_verbatim_agent(out, "B64", lines),
+        BlobPayload::Store(path) => out.push_str(&format!("  STORE {}\n", quoted_string(path))),
+    }
+    out.push_str("ENDBLOB");
+}
+
+fn format_note_agent(out: &mut String, note: &NoteNode) {
+    format_attrs_agent(out, &note.attrs);
+    out.push_str(&format!(
+        "NOTE {} ON {}\n",
+        note.name,
+        quoted_string(&note.target)
+    ));
+    out.push_str(&format!("  BY {}\n", quoted_string(&note.author)));
+    if let Some(created) = &note.created {
+        out.push_str(&format!("  CRT {}\n", quoted_string(created)));
+    }
+    if let Some(reply_to) = &note.reply_to {
+        out.push_str(&format!("  RE {}\n", quoted_string(reply_to)));
+    }
+    out.push_str(&format!("  ST {}\n", quoted_string(&note.status)));
+    format_verbatim_agent(out, "TXT", &note.text);
+    out.push_str("ENDNOTE");
 }

@@ -397,7 +397,7 @@ fn release_gates() -> Vec<ReleaseGate> {
             "ci_fuzz_differential",
             "CI, Fuzzing, And Differential Tests",
             "pass",
-            "CI runs fmt, clippy, tests, and scheduled fuzz/backend differential checks.",
+            "CI runs fmt, clippy, tests, and scheduled fuzz/backend differential checks; the differential compiles and runs the generated C and compares results against the interpreter.",
             &[
                 ".github/workflows/ci.yml",
                 "fgx fuzz --json",
@@ -539,6 +539,7 @@ fn public_0_1_gates() -> Vec<ReleaseGate> {
             &[
                 "README.md#installation",
                 ".github/workflows/ci.yml",
+                "docs/public_0_1_release_proof.md",
                 "src/distribution.rs",
                 "src/tests/distribution.rs",
                 "fgx dist-manifest --json",

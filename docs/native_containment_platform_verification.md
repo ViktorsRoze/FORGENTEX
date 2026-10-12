@@ -159,11 +159,21 @@ cargo test windows_low_integrity_runner_cannot_modify_a_medium_integrity_workspa
 cargo test windows_appcontainer_runner_cannot_read_a_workspace_file -- --nocapture
 cargo test windows_appcontainer_cannot_write_a_user_owned_low_integrity_directory -- --nocapture
 cargo test windows_zero_capability_appcontainer_cannot_connect_to_loopback -- --nocapture
+cargo test windows_zero_capability_appcontainer_cannot_connect_to_host_network -- --nocapture
 cargo test windows_appcontainer_cannot_open_an_unrelated_named_pipe -- --nocapture
+cargo test windows_appcontainer_cannot_open_or_signal_host_named_event -- --nocapture
+cargo test windows_appcontainer_cannot_query_a_hermetic_local_rpc_endpoint -- --nocapture
 cargo test windows_appcontainer_cannot_modify_the_host_user_registry -- --nocapture
 ```
 
-All eleven must pass. Successful native receipts must record `process_limit: 1`,
+All fourteen must pass. The same matrix can be run with exact OS, compiler, Rust,
+Git, duration, and per-test status evidence captured under `target/`:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows-containment-check.ps1
+```
+
+Successful native receipts must record `process_limit: 1`,
 source `default`, and `peak_tree_processes: 1`. They must also record
 `windows_ui_restrictions: 255` with source `job_object`. The portable
 ambient-authority test above additionally attempts a Windows child side effect
@@ -181,19 +191,62 @@ test must prove that the foreign runner cannot modify an existing
 medium-integrity workspace file and that its original bytes remain unchanged.
 The AppContainer tests additionally prove ordinary workspace-read,
 user-owned/low-integrity-directory write, live loopback-connect, unrelated
-named-pipe, and host-HKCU write denial.
+named-pipe, host named-event open/signal, local-RPC management query, and
+host-HKCU write denial. The
+host-network test first connects
+from the parent to a listener bound to the machine's routed non-loopback IPv4
+address, then proves the contained runner cannot reach that same endpoint. It
+is therefore hermetic and distinguishes AppContainer denial from an absent
+route, firewall refusal, DNS failure, or unavailable public service.
+
+Regular AppContainers can access some common system COM objects, so built-in
+COM activation is not treated as blanket denial evidence. A repeated
+`Shell.Application` probe produced nondeterministic process behavior and was
+removed from the release matrix. COM/RPC coverage must use a dedicated test
+server with a parent control and a deterministic application-level response,
+not an ambient system class. See Microsoft's current
+[`AppContainer` guidance](https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer).
+
+The RPC test creates a unique parent-owned `ncalrpc` endpoint, starts the RPC
+server without waiting, and requires a parent binding to return `RPC_S_OK` from
+`RpcMgmtIsServerListening`. The contained client composes the same binding but
+must not receive `RPC_S_OK`. This is a real local-RPC transport handshake with
+no network, ambient service, endpoint mapper registration, or MIDL dependency.
+It proves endpoint reachability denial; it does not replace application-level
+authorization callbacks on a server that intentionally grants AppContainer
+access. Microsoft documents the management call's listening contract and
+recommends interface callbacks for secure RPC servers:
+[`RpcMgmtIsServerListening`](https://learn.microsoft.com/en-us/windows/win32/api/rpcdce/nf-rpcdce-rpcmgmtisserverlistening),
+[`RpcServerRegisterIfEx`](https://learn.microsoft.com/en-us/windows/win32/api/rpcdce/nf-rpcdce-rpcserverregisterifex).
+
+### AppContainer profile lifecycle policy
+
+The runtime policy is `versioned_immutable_no_runtime_delete`:
+
+1. `Forgentex.NativeRunner.0_1` permanently means the current zero-capability
+   runner identity. A capability or isolation-semantic change requires a new
+   versioned profile name; an existing name is never repurposed.
+2. Runtime code may only create the current profile or derive its SID. It never
+   enumerates or deletes current or prior profiles. A source regression asserts
+   that `DeleteAppContainerProfile` is not linked into the runtime module.
+3. Profile creation/lookup is guarded by the version-derived named mutex across
+   threads and `fgx` processes. Migration to a new profile can coexist with
+   active runners using an older profile.
+4. No cleanup command ships until it can acquire the matching profile mutex,
+   prove no runner using that profile is active, close every profile-storage
+   handle, and retry a failed deletion. Microsoft documents that deletion with
+   open storage handles may be incomplete and leaves state undetermined on
+   failure, so automatic startup/shutdown cleanup is forbidden. See
+   [`DeleteAppContainerProfile`](https://learn.microsoft.com/en-us/windows/win32/api/userenv/nf-userenv-deleteappcontainerprofile).
 
 Remaining Windows work:
 
-1. Repeat the eleven-test matrix on each supported Windows 10/11 build and record
-   the exact build/compiler evidence.
-2. Add a hermetic external-network attempt that does not depend on public
-   network availability.
-3. Expand undeclared IPC coverage beyond named pipes (for example RPC/COM
-   activation) without granting a general capability SID.
-4. Decide and document profile cleanup/migration policy before renaming the
-   stable AppContainer profile. Deleting it must never occur while runners are
-   active.
+1. Repeat the fourteen-test matrix on each supported Windows 10/11 build and
+   retain the exact evidence emitted by `windows-containment-check.ps1`.
+2. Add a MIDL-backed application RPC procedure with an explicit security
+   callback, then prove an AppContainer request never reaches its dispatch
+   routine. The current management handshake covers transport reachability,
+   not application-interface authorization.
 
 ## Result report
 

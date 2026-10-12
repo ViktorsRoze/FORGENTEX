@@ -5,6 +5,8 @@ const fs = require("fs");
 const path = require("path");
 const vscode = require("vscode");
 
+const { registerProjectFilesystem } = require("./projectFs");
+
 const FGX_LANGUAGES = [
   { language: "forgentex-fgx", extension: ".fgx" },
   { language: "forgentex-fgai", extension: ".fgai" },
@@ -113,6 +115,10 @@ function activate(context) {
     vscode.commands.registerCommand("forgentex.runDiagnostics", () => runDiagnostics(diagnostics)),
     vscode.commands.registerCommand("forgentex.showUnsafeArchitectureSlices", showUnsafeArchitectureSlices)
   );
+
+  // The project filesystem view: sections, their provenance, and the note
+  // graph, for files that carry data and bytes beside their code.
+  registerProjectFilesystem(context);
 
   registerAutomaticDiagnostics(context, diagnostics);
 

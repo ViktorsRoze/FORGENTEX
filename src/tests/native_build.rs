@@ -15,6 +15,54 @@ fn out_dir(tag: &str) -> PathBuf {
 }
 
 #[test]
+#[cfg(windows)]
+fn windows_appcontainer_profile_lookup_is_parallel_safe() {
+    let workers = 16;
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(workers));
+    let handles = (0..workers)
+        .map(|_| {
+            let barrier = std::sync::Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                (0..4)
+                    .map(|_| crate::native_build::windows_native_appcontainer_sid_string())
+                    .collect::<Result<Vec<_>, _>>()
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut expected: Option<String> = None;
+    for handle in handles {
+        for sid in handle
+            .join()
+            .expect("profile lookup thread panicked")
+            .unwrap()
+        {
+            assert!(!sid.is_empty());
+            if let Some(expected) = &expected {
+                assert_eq!(&sid, expected);
+            } else {
+                expected = Some(sid);
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_appcontainer_profile_policy_is_versioned_and_never_deletes_at_runtime() {
+    assert!(crate::native_build::NATIVE_APPCONTAINER_NAME.ends_with(".0_1"));
+    assert_eq!(
+        crate::native_build::NATIVE_APPCONTAINER_PROFILE_POLICY,
+        "versioned_immutable_no_runtime_delete"
+    );
+    assert!(
+        !include_str!("../native_build.rs").contains("DeleteAppContainerProfile"),
+        "runtime containment must never delete an AppContainer profile"
+    );
+}
+
+#[test]
 fn native_build_collects_facts_and_honors_exact() {
     let out = out_dir("facts");
     let _ = fs::remove_dir_all(&out);

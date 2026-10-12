@@ -8,11 +8,27 @@ and practical* for an agent-native, polyglot language.
 
 ## The three zones
 
-| Zone | Behaves like | Memory issues possible? | Who guarantees safety |
+| Zone | Behaves like | Memory issues possible? | What stands behind it |
 | --- | --- | --- | --- |
-| **Forgentex safe code** | Rust | No | the compiler (compile-time + bounds checks) |
+| **Forgentex safe code** | Rust | Not by construction — see below | the checker and the emitted runtime guards |
 | **Forgentex `unsafe`** | C | Yes — but explicit and reviewed | the human reviewer |
 | **Foreign capsules** (C/C++/Python/…) | that language | Yes inside the capsule | the typed boundary + sandbox |
+
+**What "not by construction" means, and what it does not.** The safe subset has
+no construct that expresses an out-of-bounds access, a dangling reference, or a
+use-after-move: the borrow checker rejects the aliasing and lifetime errors at
+check time, and indexing is guarded at run time in both backends. That is a
+statement about the *language*, and it is the same kind of claim Rust makes for
+its safe subset.
+
+It is not a proof that this *implementation* is free of memory-safety defects. A
+bug in the checker, in the lowering, in the runtime, or at a foreign boundary
+could still let one through, and no amount of regression coverage turns that
+into a proof. What the project actually has is a stated model, a conformance
+suite that pins it, and defects that get fixed and guarded when they are found.
+Read the table as "the language gives you no way to write it, and the
+implementation is tested to keep it that way" — not as "it has been proven
+impossible".
 
 ### Zone 1 — Safe code (the default): like Rust
 
@@ -32,8 +48,11 @@ The default surface is memory-safe, checked before anything runs:
 - **No raw pointers in safe code.** No dereference, no pointer arithmetic
   without opting out.
 
-In the safe subset a buffer overflow, dangling reference, or use-after-move
-**cannot ship** — they are caught at check time or trapped at runtime.
+In the safe subset a buffer overflow, dangling reference, or use-after-move has
+no way to be written: each is either rejected at check time or trapped at run
+time. That is a property of the rules above, held in place by the conformance
+suite — not an assertion that the compiler and runtime implementing them have
+been proven correct.
 
 ### Zone 2 — `unsafe`: like C, but explicit and auditable
 
@@ -134,10 +153,16 @@ unsafety."
   unsafe shallow copies cannot reach
   source emission. Expanding this subset requires the same explicit ownership
   and deallocation proof, not direct allocator access from safe code.
-- **Integer overflow is a correctness, not a memory-safety, matter.** Overflow
-  is not auto-checked in emitted C by default (it wraps, unless you use the
-  `core_math_checked_*` builtins). Bounds and aliasing — the memory-safety
-  guarantees — are enforced.
+- **Integer overflow is a correctness, not a memory-safety, matter — and it is
+  checked.** Every integer operation traps at its declared width, in the
+  interpreter and in the emitted C alike; `docs/numeric_determinism.md` gives
+  the rule for each operation and width. This paragraph previously said that
+  emitted C "wraps", which was wrong in a way worth naming: signed overflow is
+  *undefined* in C, not wrapping. Wrapping is a GCC option (`-fwrapv`), and code
+  that assumes it gets a different answer per compiler, optimisation level, and
+  target. The backend now emits an explicit guard per operation instead of
+  relying on any of that. Bounds and aliasing — the memory-safety guarantees —
+  are enforced separately and were never affected by this.
 
 ## In one line
 

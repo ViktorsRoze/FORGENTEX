@@ -1,0 +1,32 @@
+data sales csv:
+    created "2026-09-20T09:00:00Z" by "human:viktor"
+    modified "2026-09-20T10:15:00Z" by "agent:claude-opus-5"
+    content:
+        region,units
+        north,120
+        south,98
+
+blob logo image/png:
+    created "2026-09-20T09:05:00Z" by "human:viktor"
+    bytes 6
+    sha256 "c3ab8ff13720e8ad9047dd39466b3c8974e592c2fa383d4a3960714caef0c4f2"
+    inline:
+        Zm9vYmFy
+
+note n1 on "@data.sales":
+    by "agent:claude-opus-5"
+    created "2026-09-20T10:20:00Z"
+    status "open"
+    text:
+        North looks doubled after the Q3 import.
+
+note n2 on "@data.sales":
+    by "human:viktor"
+    created "2026-09-20T10:31:00Z"
+    reply-to "@note.n1"
+    status "resolved"
+    text:
+        Confirmed and fixed at source.
+
+fn total(a: i32, b: i32) -> i32:
+    return a + b

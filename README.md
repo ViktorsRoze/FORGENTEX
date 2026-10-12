@@ -341,17 +341,21 @@ come from not sending irrelevant code in the first place.
 
 | Mechanism | What the agent receives | Current measured signal |
 |---|---|---:|
-| `.fgai` agent view | A compact form of the same program | About **3–14% fewer** heuristic tokens than `.fgx` in current samples |
-| Lossless compact rendering | The smallest reversible file representation found by the benchmark | Roughly **0.82–0.91×** the human-view token count |
-| Map + context + semantic patch | Relevant symbols and a small edit instead of a whole-file rewrite | Around **2× cheaper** on a small two-function sample and **8× cheaper** on a twelve-function sample |
+| `.fgai` agent view | A compact form of the same program | **Not a general saving.** Measured with real BPE (`cl100k_base`, `o200k_base`): 13–15% smaller on small declaration-heavy files, up to ~7% *larger* on body-heavy ones, ~1% larger across the sample. The heuristic estimator had reported a saving on every file |
+| Lossless compact rendering | The smallest reversible file representation found by the benchmark | Heuristic only (0.82–0.91× human); not yet measured with a real tokenizer |
+| Map + context + semantic patch | Relevant symbols and a small edit instead of a whole-file rewrite | **Not shown to beat a competent agent.** A cost model (not a measured task): far cheaper than re-sending the whole file each edit, but 0.94–1.83× the cost of reading the file once and sending small text patches, on single files |
 | Capsule boundary cards | Types, effects, capabilities, and hashes without repeatedly loading the foreign body | About **3.1× smaller** than the C body and **6.8× smaller** than the Java body in current toy cases |
 
 These are development measurements, not universal performance claims. The
-current reports use a heuristic tokenizer and small repository examples; they
-should be rerun with the target model's tokenizer and real workloads before
-being used as external benchmarks. The important result so far is structural:
-**symbol-level retrieval and semantic edits reduce context much more reliably
-than punctuation compression by itself.**
+heuristic estimator can report the wrong *direction*, not just the wrong size —
+it said the agent view saved tokens on files where real BPE shows it costs more
+— so only the rows marked as measured are evidence. Measure with your target
+model's tokenizer via `fgx token-report --bpe-command` before relying on any of
+them. What is actually established so far is narrower
+than this section once claimed: neither the dense syntax nor symbol-level
+editing has been shown to save tokens against a well-configured conventional
+workflow. Both remain hypotheses worth measuring with real agents — especially
+for files too large to keep in context and for edits spanning many files.
 
 You can reproduce the repository's measurements:
 
@@ -379,6 +383,7 @@ language that should carry production systems.
 | Polyglot capsules | Typed and audited bridges cover several host/toolchain-backed languages, with availability depending on installed runtimes |
 | Runtime experiments | Warm Python, Node, and Go workers; typed budgeted derived/source-declared dependency pipelines; deterministic task, task-group, and channel foundations |
 | Media experiments | Small image, audio, timeline, shader, canvas, and preview proofs exercise the data plane |
+| Project filesystem | One file can carry its code, its data payloads, its bytes, and an annotation graph, with guarded edits and a change feed |
 | Ecosystem | Standard library, package story, native coverage, documentation, and compatibility guarantees are still maturing |
 
 The repository's internal `v1`, `v2`, and `v3` labels describe development
@@ -424,9 +429,35 @@ regression-tested behavior:
 - **Typed data movement:** the linear data plane tracks ownership transitions
   and receipts through pipeline stages rather than treating bulk data as
   unstructured process output.
-- **Quality gates:** the Rust library and CLI suites currently total **1,126
-  passing tests** (1,071 library tests and 55 CLI tests), plus fuzz,
-  differential, conformance, and strict release-gate workflows.
+- **A project filesystem in one file:** `data`, `blob`, and `note` join `fn`
+  and `struct` as item kinds, so a single file can carry the CSV/JSON/YAML/SQL it
+  reads, the images, audio, video, or compiled artifacts it ships (inline base64
+  up to 256 KB, content-addressed beyond it), and a graph of remarks that
+  records whether an agent or a person wrote each one. `fgx fs` navigates and
+  edits it with shell verbs; every writing verb takes `--expect <hash>` and
+  refuses a stale edit, stamps who changed what when, and `fgx fs changes`
+  reports what moved since a git revision, an earlier copy, or a timestamp. See
+  [the project filesystem](docs/project_filesystem.md).
+- **Capsule containment, measured rather than asserted:** managed Python, Node,
+  TypeScript, Go, JVM, and .NET capsules now run under real deadlines, CPU,
+  memory, output, and process-tree limits, with an explicit environment instead
+  of the caller's; a limit the platform cannot enforce is refused before launch
+  unless the operator passes `--trusted`, which records the waiver in a receipt.
+  What is enforced where is tabulated per runtime and platform in
+  [the enforcement matrix](docs/enforcement_matrix.md), including what is *not*.
+- **Integer semantics specified per width:** the interpreter and the C backend
+  now agree on overflow, division, and shift behaviour at every declared width,
+  through explicit guards rather than C's undefined behaviour.
+- **Editor support for all of it:** the VS Code extension renders carried
+  sections in their own language, lists them in a Project Filesystem view with
+  their provenance and remarks, and previews bytes as image, audio, video, text,
+  or a hex dump.
+- **Quality gates:** the Rust library and CLI suites currently total **1,290
+  passing tests** (1,225 library tests and 65 CLI tests), plus fuzz,
+  differential, conformance, and strict release-gate workflows. One Windows
+  native-capture flake is characterised and `#[ignore]`d rather than left to
+  fail intermittently; see
+  [known limits](docs/public_0_1_profile.md#known-limits).
 
 For the detailed ledger, see [V3 progress](docs/v3_progress.md) and the
 [gap-closure plan](docs/gap_closure_plan.md).
@@ -447,11 +478,17 @@ Prerequisites:
 | `host-c-compiler` | optional | run the C backend and native/capsule demonstrations |
 | `zig-0.14` | optional | run the Zig backend |
 
-Supported host matrix for 0.1: `x86_64-pc-windows-msvc` (primary, CI-verified;
-Windows 10 is supported),
-with `x86_64-unknown-linux-gnu` and `aarch64-apple-darwin` buildable from the
-same dependency-free source. From a repository checkout, install both current
-binaries onto your `PATH`:
+0.1 verifies **one** host: `x86_64-pc-windows-msvc` on Windows 10 and
+Windows 11. CI builds, checksums, and clean-installs it, and the run is recorded
+in [the release proof](docs/public_0_1_release_proof.md).
+
+`x86_64-unknown-linux-gnu` and `aarch64-apple-darwin` are listed in the manifest
+as `source-build-unverified`. The compiler is dependency-free Rust and is
+expected to build there, but no CI job has proven it, so 0.1 promises nothing
+about them — verifying them is the first post-0.1 distribution task. If you
+build on one, a report either way is a useful contribution.
+
+From a repository checkout, install both current binaries onto your `PATH`:
 
 ```powershell
 cd C:\path\to\Forgentex
@@ -470,7 +507,10 @@ requires a supported host and the current `fgx` executable to resolve from
 
 Release builds are checksummed (SHA-256) and clean-install-verified by the
 `release-artifacts` CI job; downloaded artifacts ship a `CHECKSUMS.txt` you can
-verify before putting the binaries on your `PATH`.
+verify before putting the binaries on your `PATH`. The digests that run
+published are recorded in
+[the release proof](docs/public_0_1_release_proof.md), so you can compare a
+binary you downloaded against the run that produced it.
 
 To exercise the complete `forgepack` workflow through one copied executable,
 run:
@@ -492,7 +532,7 @@ runtimes or toolchains.
 ```powershell
 cd C:\path\to\Forgentex
 cargo build
-cargo test
+cargo test -- --test-threads=1
 ```
 
 Format, inspect, and check a program:
@@ -600,7 +640,7 @@ Argument notation used below:
 | `fgx fix --plan <file\|project> [--target <triple>] [--json]` | Produce a non-destructive remediation plan for current diagnostics. |
 | `fgx release-check [--target v1.0\|0.1] [--json] [--strict]` | Run release gates. Historical internal `v1.0` remains available; `0.1` reports the forthcoming public contract and its explicit blockers. Strict mode fails unless the selected target is ready. |
 | `fgx release-evidence [--json] [--strict]` | Rerun the frozen public 0.1 example suite (dual-view round-trip, checker, recorded interpreter results) and republish supported limits as `forgentex.public_0_1_evidence.v1`. Strict mode fails on any unresolved gap. |
-| `fgx dist-manifest [--json]` | Print the public 0.1 distribution manifest (`forgentex.distribution.v1`): shipped binaries, install paths, supported host matrix, backends, prerequisites, checksum algorithm, and distribution readiness gaps. |
+| `fgx dist-manifest [--json]` | Print the public 0.1 distribution manifest (`forgentex.distribution.v1`): shipped binaries, install paths, hosts with their support level (`verified` or `source-build-unverified`), backends, prerequisites, checksum algorithm, and the fields of the release proof still outstanding. |
 
 ### Running programs and governed effects
 
@@ -629,7 +669,7 @@ Argument notation used below:
 | `fgx capsule-lock <file> [--json]` | Resolve capsule dependencies into deterministic lock information. |
 | `fgx capsule-audit <file> [--json] [--strict]` | Audit capsule types, effects, capabilities, hashes, dependencies, and policy findings. |
 | `fgx namespace <file> [--json] [--strict]` | Review shared names and cross-language namespace collisions. |
-| `fgx sandbox <file> [--json] [--strict]` | Review the sandbox policy required by a capsule file. |
+| `fgx sandbox <file> [--json] [--strict]` | Review the sandbox policy required by a capsule file. What is *enforced* at run time, per runtime and platform, is in [docs/enforcement_matrix.md](docs/enforcement_matrix.md). |
 | `fgx runtimes [--json]` | Report discovered host runtimes and bridge availability. |
 | `fgx native-review <file> [--json] [--strict]` | Review native-language capsule declarations and native policy requirements. |
 | `fgx shell-review <file> [--json] [--strict]` | Review shell capsules and their command/capability surface. |
@@ -671,7 +711,7 @@ Argument notation used below:
 |---|---|
 | `fgx compress <file> [--emit] [--json]` | Analyze compact representations and optionally emit the selected lossless form. |
 | `fgx token-report <file> [--json]` | Compare heuristic token counts for human, agent, and compact source views. |
-| `fgx edit-bench <file> [--edits <n>] [--json]` | Compare whole-file editing cost with map/context/semantic-patch cost. |
+| `fgx edit-bench <file> [--edits <n>] [--json]` | Cost model comparing whole-file resend, read-once text patches, and map/symbol/semantic patches (heuristic counts; not a measured task). |
 | `fgx capsule-tokens <file> [--json]` | Compare foreign capsule bodies with their typed boundary-card context. |
 | `fgx codebook build\|check\|measure\|stats\|encode\|decode [project\|input] [--codebook <file>] [--previous <file>] [--out <file>] [--budget <n>] [--cryptic] [--force-codebook] [--json]` | Build, evolve, and audit a semantic project tier containing identifiers, naming morphology, type/effect shapes, exact AST patterns, and one-/two-slot atomic expression/statement templates. Stable lineage and never-larger exchange rules apply. |
 | `fgx map <dir> --out <file> [--include-targets]` | Build a structural symbol map for a directory. |
@@ -692,6 +732,54 @@ Argument notation used below:
 | `fgx graph diff <before> <after> [--json]` | Compare two program graphs structurally. |
 | `fgx graph roundtrip <project\|dir\|file> [--json]` | Verify source-to-graph-to-source stability. |
 | `fgx graph context <graph> <symbol> --deps types,effects,tests [--json]` | Extract focused symbol context directly from a graph artifact. |
+
+### Debugging
+
+The debugger is interpreter-first and governed: a debug run applies the same
+effect grants a real run does. Details and the staged plan are in
+[the debugger plan](docs/debugger_plan.md).
+
+| Command | Purpose |
+| --- | --- |
+| `fgx debug <file> --entry <fn> [--json-input <in>] [--json]` | Trace a run statement by statement, with source positions and governed effects (`forgentex.debug_trace.v1`). |
+| `fgx debug … --break <node-id> [--break-if <node>=<expr>] [--watch <expr>]` | Stop at a node, stop only when a condition holds, or record an expression at every step. |
+| `fgx debug … --interactive` | Step, inspect, and evaluate expressions against live frames. |
+| `fgx debug … --max-steps <n> \| --tail <n> [--values summary\|full]` | Bound a trace from the start or keep the last N steps, which is the end that matters when a failure is at the finish. |
+| `fgx debug … --live [--allow-effects a,b] [--grant-fs a,b] [--grant-net host,…]` | Debug a run that calls capsules, under explicit grants. |
+| `fgx dap` | Serve the Debug Adapter Protocol, which the VS Code extension speaks. |
+
+A Python capsule can run under its own debugger: `foreign_debug` launches it
+under `debugpy` in the interpreter its declared `env` resolves to, and every
+containment relaxation this requires — a loopback listener, suspended deadlines,
+nondeterminism — is named and recorded in `forgentex.foreign_debug.v1` whether
+the attach is admitted or denied. Node and Go delegation, and compiled-capsule
+handoff, are not built.
+
+### The project filesystem
+
+Data, bytes, and remarks carried inside one file. Every section is addressed by
+the node id the rest of the toolchain already uses (`@data.sales`, `@blob.logo`,
+`@note.n1`), so listing a section and editing it need no translation. Details in
+[the project filesystem](docs/project_filesystem.md).
+
+| Command | Purpose |
+| --- | --- |
+| `fgx fs ls <file> [--json]` | List every carried section with its shape or media type, provenance, and content hash. |
+| `fgx fs cat <file> --tag <node-id>` | Print one payload. Blob bytes go to stdout unchanged, so `> logo.png` is just a redirect. |
+| `fgx fs stat <file> --tag <node-id> [--json]` | Size, hash, storage, and who touched it when. |
+| `fgx fs notes <file> [--on <node-id>] [--agent] [--human] [--json]` | Read the annotation graph, filtered to one target or to what agents or people wrote. |
+| `fgx fs add <file> --from <path> [--as data\|blob] [--tag <name>]` | Put a file in. Known text shapes become readable `data`; everything else becomes a `blob`, inline to 256 KB and content-addressed beyond it. |
+| `fgx fs set <file> --tag <node-id> --from <path> [--expect <hash>]` | Replace a payload in place, keeping the section's name, shape, and creation record. |
+| `fgx fs rm <file> --tag <node-id> [--with-notes] [--expect <hash>]` | Remove a section. Refused while remarks are attached unless `--with-notes` takes the thread too. |
+| `fgx fs note <file> --on <node-id> --text <text> [--reply-to <note-id>]` | Add a remark, or a reply to one. |
+| `fgx fs resolve <file> --tag <note-id> [--text <reason>]` | Resolve a thread, recording who closed it and why as a resolved reply. |
+| `fgx fs changes <file> --rev <git-rev>\|--against <file>\|--since <iso> [--json]` | What moved: added, removed, or changed nodes with before/after hashes (`--rev`, `--against`, covering code too), or everything edited after a timestamp (`--since`). |
+| `fgx fs extract <file> --out <dir> [--json]` | Materialise every payload as a real file, verifying store-backed blobs against their hashes. |
+
+Every writing verb takes `--expect <hash>` — the hash `fs ls --json` reports —
+and refuses an edit whose section moved since it was read, so concurrent agents
+fail loudly instead of overwriting each other. `--by` and `--at` record
+authorship and time, defaulting to the current user and clock.
 
 ### Fuzzing, differential testing, and performance
 
@@ -729,9 +817,16 @@ The candidate contract and machine-checked blockers are defined in the
 `--strict` intentionally fails while its decision is
 `public_0_1_not_ready`.
 
-Until those promises are written down and enforced, v3 should be approached as
-a sophisticated preview: excellent for experiments, language design work, and
-agent-tooling research, but not yet for production commitments.
+Where that stands today: 20 of the 21 public 0.1 gates pass. The one that does
+not is distribution, and what it waits on is narrow — a recorded green
+`release-artifacts` run on the verified Windows host, which
+[the release proof](docs/public_0_1_release_proof.md) holds a slot for and
+`fgx dist-manifest` reports field by field until it is filled in.
+
+Until the release is tagged, treat this as a sophisticated preview: excellent
+for experiments, language design work, and agent-tooling research, but not yet
+for production commitments. The standing limits are listed in the
+[public 0.1 profile](docs/public_0_1_profile.md#known-limits).
 
 ## Documentation
 

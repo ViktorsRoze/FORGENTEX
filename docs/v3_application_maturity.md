@@ -145,11 +145,13 @@ existing `S`/`F`/`R`/`UF`/`LET`/`SET`/`REQ`/`IF`/`FOR` tokens):
 
 Density rules for the `.fgai` surface:
 
-- **Keyword brevity is the primary lever** — the measured tokenizer
-  (`docs/token_efficiency_findings.md`) shows short keywords and fewer
-  newlines move tokens, while single spaces are nearly free under BPE. So
-  prioritize 2-letter keywords and statement/brace compaction; keep just
-  enough whitespace to tokenize unambiguously.
+- **Keyword brevity is a hypothesis, not a measured lever.** It was adopted on
+  the strength of the `heuristic-v1` estimator, which charges `ceil(len/4)` per
+  word and so rewards shortening any keyword. Real BPE disagrees: common
+  keywords such as `struct` and `return` are already single tokens, and across
+  the measured sample in `docs/token_efficiency_findings.md` the dense surface
+  is ~1% *larger* overall. Measure a proposed density rule with
+  `fgx token-report --bpe-command` before treating it as a saving.
 - The canonical `.fgai` format minimizes insignificant whitespace (no padding
   before `{`, single-space token separation), and the `agent-min` surface
   (`minify_agent`) drops indentation entirely.

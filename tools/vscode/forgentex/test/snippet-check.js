@@ -15,8 +15,18 @@ const cp = require("child_process");
 
 const root = path.join(__dirname, "..");
 const repoRoot = path.join(root, "..", "..", "..");
-const fgxPath = process.argv[2]
-  || path.join(repoRoot, "target", "release", process.platform === "win32" ? "fgx.exe" : "fgx");
+// Whichever build is newer: a stale release binary rejects syntax the language
+// has since gained, which would read as a broken snippet.
+const fgxPath = process.argv[2] || newestBuild();
+
+function newestBuild() {
+  const exe = process.platform === "win32" ? "fgx.exe" : "fgx";
+  const candidates = ["release", "debug"]
+    .map((profile) => path.join(repoRoot, "target", profile, exe))
+    .filter((candidate) => fs.existsSync(candidate));
+  candidates.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+  return candidates[0] || path.join(repoRoot, "target", "release", exe);
+}
 
 // Snippets that are not standalone Forgentex source.
 const NOT_SOURCE = new Set(["Patch Operation"]);
@@ -27,7 +37,9 @@ const NEEDS_FUNCTION = new Set(["While Loop", "Match"]);
 // Extra context some snippets need to type-check on their own.
 const PRELUDE = {
   Match: "enum Name:\n    First\n    Second\n\n",
-  "Inline Test": "fn call() -> i32:\n    return 0\n\n"
+  "Inline Test": "fn call() -> i32:\n    return 0\n\n",
+  // A remark is about something, so it needs something to be about.
+  Note: "data name csv:\n    content:\n        region,units\n\n"
 };
 
 // Replace ${1:default} and ${1} with their default text, innermost first.
@@ -35,6 +47,9 @@ function expand(body) {
   let text = body.join("\n");
   for (let i = 0; i < 10; i++) {
     const next = text
+      // A choice placeholder expands to its first option, which is what the
+      // editor inserts when the snippet is accepted without choosing.
+      .replace(/\$\{\d+\|([^|}]*)\|\}/g, (all, options) => options.split(",")[0])
       .replace(/\$\{\d+:([^{}]*)\}/g, "$1")
       .replace(/\$\{\d+\}/g, "")
       .replace(/\$\d+/g, "");

@@ -204,7 +204,21 @@ fn matches(expected: &CapsuleValue, got: &str) -> bool {
 /// Best-effort placeholder: this mirrors the verified JVM path but is **not
 /// exercised on a box without a .NET SDK**, so treat it as unproven until a host
 /// `dotnet` runs the gated test.
+/// Run a capsule live under the default managed policy: every enforceable limit
+/// applied, and any capsule declaring a limit that cannot be enforced refused.
 pub fn invoke_live(capsule: &Capsule, args: &[String]) -> Result<String, String> {
+    invoke_live_with(capsule, args, crate::managed_exec::ManagedPolicy::default())
+}
+
+/// Run a capsule live under `policy`. The host runtime runs inside the managed
+/// containment layer (`managed_exec`): wall deadline, CPU and output budgets,
+/// declared memory ceiling, and process-tree cleanup.
+pub fn invoke_live_with(
+    capsule: &Capsule,
+    args: &[String],
+    policy: crate::managed_exec::ManagedPolicy,
+) -> Result<String, String> {
+    let managed_plan = crate::managed_exec::plan(capsule, policy)?;
     if !crate::sandbox::is_approved(capsule) {
         return Err("capsule effects are not covered by its sandbox".to_string());
     }
@@ -239,18 +253,24 @@ pub fn invoke_live(capsule: &Capsule, args: &[String]) -> Result<String, String>
         .first()
         .map(|o| o.ty.to_agent())
         .unwrap_or_default();
+    // The capsule body may print; only the tagged line is the result, and the
+    // body's own Console output is redirected to the diagnostic channel. See
+    // `managed_protocol`.
+    let nonce = crate::managed_protocol::nonce();
+    let emit = crate::managed_protocol::dotnet_emit(&nonce, "_json");
+    let invariant = "System.Globalization.CultureInfo.InvariantCulture";
     let print = match out_ty.as_str() {
         "str" => format!(
-            "string _r = {call};\n        System.Console.WriteLine(\"\\\"\" + _r.Replace(\"\\\\\", \"\\\\\\\\\").Replace(\"\\\"\", \"\\\\\\\"\") + \"\\\"\");"
+            "string _r = {call};\n        string _json = \"\\\"\" + _r.Replace(\"\\\\\", \"\\\\\\\\\").Replace(\"\\\"\", \"\\\\\\\"\") + \"\\\"\";\n        {emit}"
         ),
-        "bool" => format!("System.Console.WriteLine(({call}) ? \"true\" : \"false\");"),
-        "f32" | "f64" => format!(
-            "System.Console.WriteLine(System.Convert.ToString({call}, System.Globalization.CultureInfo.InvariantCulture));"
+        "bool" => format!("string _json = ({call}) ? \"true\" : \"false\";\n        {emit}"),
+        _ => format!(
+            "string _json = System.Convert.ToString({call}, {invariant});\n        {emit}"
         ),
-        _ => format!("System.Console.WriteLine({call});"),
     };
     let program_cs = format!(
-        "class ForgentexDriver {{\n    static void Main(string[] args) {{\n        {print}\n    }}\n}}\n{body}\n"
+        "class ForgentexDriver {{\n    static void Main(string[] args) {{\n{prelude}        {print}\n    }}\n}}\n{body}\n",
+        prelude = crate::managed_protocol::dotnet_prelude()
     );
     let csproj = format!(
         "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>{}</TargetFramework></PropertyGroup></Project>\n",
@@ -281,14 +301,18 @@ pub fn invoke_live(capsule: &Capsule, args: &[String]) -> Result<String, String>
         ));
     }
 
-    let mut command = Command::new(&dotnet.exe);
-    command.arg(out_dir.join("app.dll"));
-    for arg in args {
-        command.arg(arg);
-    }
-    let output = command
-        .output()
-        .map_err(|err| format!("failed to spawn dotnet: {err}"))?;
+    let mut argv = vec![
+        dotnet.exe.clone(),
+        out_dir.join("app.dll").display().to_string(),
+    ];
+    argv.extend(args.iter().cloned());
+    let output = match crate::managed_exec::execute(&argv, &managed_plan) {
+        Ok(output) => output,
+        Err(err) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(err);
+        }
+    };
     let _ = std::fs::remove_dir_all(&dir);
     if !output.status.success() {
         return Err(format!(
@@ -297,7 +321,12 @@ pub fn invoke_live(capsule: &Capsule, args: &[String]) -> Result<String, String>
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    crate::managed_protocol::split(
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
+        &nonce,
+    )
+    .result_or_error(&capsule.name)
 }
 
 fn select<'a>(program: &'a Program, name: Option<&str>) -> Option<&'a Capsule> {

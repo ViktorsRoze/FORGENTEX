@@ -14,8 +14,19 @@ const os = require("os");
 
 const root = path.join(__dirname, "..");
 const repoRoot = path.join(root, "..", "..", "..");
-const fgxPath = process.argv[2]
-  || path.join(repoRoot, "target", "release", process.platform === "win32" ? "fgx.exe" : "fgx");
+// Prefer an explicit path, else whichever build is newer: a stale release
+// binary silently lacks commands the extension now calls, which shows up as an
+// empty view rather than an error.
+const fgxPath = process.argv[2] || newestBuild();
+
+function newestBuild() {
+  const exe = process.platform === "win32" ? "fgx.exe" : "fgx";
+  const candidates = ["release", "debug"]
+    .map((profile) => path.join(repoRoot, "target", profile, exe))
+    .filter((candidate) => fs.existsSync(candidate));
+  candidates.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+  return candidates[0] || path.join(repoRoot, "target", "release", exe);
+}
 
 let failures = 0;
 function check(condition, label) {
@@ -35,6 +46,10 @@ const registered = {
   formattingProviders: 0,
   completionProviders: 0,
   debugAdapters: [],
+  codeLensProviders: [],
+  treeViews: [],
+  handlers: {},
+  executed: [],
   listeners: {}
 };
 const published = new Map();
@@ -106,10 +121,21 @@ const vscodeStub = {
     registerDocumentSymbolProvider: () => { registered.symbolProviders += 1; return { dispose: () => {} }; },
     registerHoverProvider: () => { registered.hoverProviders += 1; return { dispose: () => {} }; },
     registerDocumentFormattingEditProvider: () => { registered.formattingProviders += 1; return { dispose: () => {} }; },
-    registerCompletionItemProvider: () => { registered.completionProviders += 1; return { dispose: () => {} }; }
+    registerCompletionItemProvider: () => { registered.completionProviders += 1; return { dispose: () => {} }; },
+    registerCodeLensProvider: (selector, provider) => {
+      registered.codeLensProviders.push(provider);
+      return { dispose: () => {} };
+    }
   },
   commands: {
-    registerCommand: (name) => { registered.commands.push(name); return { dispose: () => {} }; }
+    registerCommand: (name, handler) => {
+      registered.commands.push(name);
+      registered.handlers[name] = handler;
+      return { dispose: () => {} };
+    },
+    executeCommand: async (name, ...args) => {
+      registered.executed.push([name, ...args]);
+    }
   },
   debug: {
     registerDebugAdapterDescriptorFactory: (type, factory) => {
@@ -141,9 +167,56 @@ const vscodeStub = {
     showErrorMessage: (message) => { console.error(`  (popup) ${message}`); },
     showInformationMessage: () => {},
     showTextDocument: async () => {},
-    createWebviewPanel: () => ({ webview: { html: "" }, dispose: () => {} })
+    createWebviewPanel: () => ({ webview: { html: "" }, dispose: () => {} }),
+    createTreeView: (id, options) => {
+      registered.treeViews.push({ id, options });
+      return { dispose: () => {} };
+    },
+    onDidChangeActiveTextEditor: (fn) => {
+      registered.listeners.activeEditor = fn;
+      return { dispose: () => {} };
+    }
   },
-  ViewColumn: { One: 1, Two: 2, Beside: 3 }
+  ViewColumn: { One: 1, Two: 2, Beside: 3 },
+  TreeItemCollapsibleState: { None: 0, Collapsed: 1, Expanded: 2 },
+  TreeItem: class {
+    constructor(label, collapsibleState) {
+      this.label = label;
+      this.collapsibleState = collapsibleState;
+    }
+  },
+  ThemeIcon: class {
+    constructor(id, color) {
+      this.id = id;
+      this.color = color;
+    }
+  },
+  ThemeColor: class {
+    constructor(id) {
+      this.id = id;
+    }
+  },
+  MarkdownString: class {
+    constructor(value) {
+      this.value = value;
+    }
+  },
+  CodeLens: class {
+    constructor(range, command) {
+      this.range = range;
+      this.command = command;
+    }
+  },
+  EventEmitter: class {
+    constructor() {
+      this.event = () => ({ dispose: () => {} });
+    }
+    fire() {}
+    dispose() {}
+  },
+  Uri: {
+    file: (value) => ({ fsPath: value, toString: () => `file://${value}` })
+  }
 };
 
 const originalResolve = Module._resolveFilename;
@@ -184,7 +257,15 @@ async function main() {
   // 1. activate() must wire every provider and command.
   const context = { subscriptions: [] };
   extension.activate(context);
-  check(registered.commands.length === 6, `activate registers 6 commands (got ${registered.commands.length})`);
+  // Compared against the manifest rather than a fixed number, so adding a
+  // command cannot quietly go unregistered and cannot break this check either.
+  const contributed = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"))
+    .contributes.commands.map((entry) => entry.command);
+  const missing = contributed.filter((name) => !registered.commands.includes(name));
+  check(
+    missing.length === 0,
+    `activate registers every contributed command (${registered.commands.length}/${contributed.length}${missing.length ? `, missing ${missing.join(", ")}` : ""})`
+  );
   check(registered.symbolProviders === 4, `symbol providers for 4 languages (got ${registered.symbolProviders})`);
   check(registered.hoverProviders === 4, `hover providers for 4 languages (got ${registered.hoverProviders})`);
   check(registered.formattingProviders === 2, `formatting providers for 2 source languages (got ${registered.formattingProviders})`);
@@ -270,7 +351,89 @@ async function main() {
     "languageServiceMode=disabled suppresses checking");
   settings = { ...settings, languageServiceMode: "cli" };
 
-  // 8. No scratch mirror files may survive a run.
+  // 8. The project filesystem view: a file's sections, grouped, with every
+  //     remark hanging under the thing it is about. Driven against the real
+  //     CLI, so a change to the `fgx fs` output shape fails here.
+  const projectFs = require("../projectFs.js");
+  check(
+    registered.treeViews.some((view) => view.id === "forgentex.projectFilesystem"),
+    "activate registers the project filesystem view"
+  );
+
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "forgentex-fsview-"));
+  const projectFile = path.join(projectDir, "project.fgx");
+  fs.writeFileSync(
+    projectFile,
+    [
+      "data sales csv:",
+      '    created "2026-09-20T09:00:00Z" by "human:viktor"',
+      "    content:",
+      "        region,units",
+      "        north,120",
+      "",
+      "blob logo image/png:",
+      "    bytes 6",
+      '    sha256 "c3ab8ff13720e8ad9047dd39466b3c8974e592c2fa383d4a3960714caef0c4f2"',
+      "    inline:",
+      "        Zm9vYmFy",
+      "",
+      'note n1 on "@data.sales":',
+      '    by "agent:claude-opus-5"',
+      '    status "open"',
+      "    text:",
+      "        North looks doubled.",
+      "",
+      "fn total(a: i32, b: i32) -> i32:",
+      "    return a + b",
+      ""
+    ].join("\n")
+  );
+
+  const provider = new projectFs.__test.ProjectFsProvider();
+  await provider.load({
+    languageId: "forgentex-fgx",
+    uri: vscodeStub.Uri.file(projectFile)
+  });
+  const groups = provider.getChildren();
+  check(
+    groups.map((group) => group.label).join(",") === "Data,Bytes",
+    `sections are grouped (got ${groups.map((g) => g.label).join(",") || "nothing"})`
+  );
+  const dataRows = groups[0] ? provider.getChildren(groups[0]) : [];
+  check(
+    dataRows.length === 1 && dataRows[0].entry.id === "@data.sales",
+    "the data group lists the carried payload"
+  );
+  check(
+    dataRows[0] && provider.getChildren(dataRows[0]).length === 1,
+    "a remark hangs under the section it is about"
+  );
+  const noteRow = dataRows[0] && provider.getChildren(dataRows[0])[0];
+  check(
+    noteRow && noteRow.entry.agent === true && noteRow.description.includes("agent"),
+    "an agent's remark is marked as one"
+  );
+  const blobRow = groups[1] ? provider.getChildren(groups[1])[0] : null;
+  check(
+    blobRow && blobRow.description.includes("image/png") && blobRow.description.includes("6 B"),
+    `a blob shows its type and size (got ${blobRow ? blobRow.description : "nothing"})`
+  );
+
+  // A preview renders a payload for what it is, rather than as text.
+  const png = projectFs.__test.blobPreviewHtml("@blob.logo", "image/png", Buffer.from("foobar"));
+  check(png.includes("<img src=\"data:image/png;base64,"), "an image blob previews as an image");
+  const opaque = projectFs.__test.blobPreviewHtml(
+    "@blob.raw",
+    "application/octet-stream",
+    Buffer.from([0, 1, 2, 250])
+  );
+  check(
+    opaque.includes("00000000") && opaque.includes("00 01 02 fa"),
+    "an opaque blob previews as a hex dump"
+  );
+  fs.rmSync(projectDir, { recursive: true, force: true });
+
+  // 9. No scratch mirror files may survive a run.
   const leaked = fs.readdirSync(os.tmpdir()).filter((f) => f.startsWith("forgentex-check-"));
   check(leaked.length === 0, `no scratch files leaked (found ${leaked.length})`);
 

@@ -53,6 +53,8 @@ impl<'a> ProgramContext<'a> {
         let mut structs = HashMap::new();
         for item in &program.items {
             match item {
+                // Data, blob, and note sections carry content, not behaviour.
+                Item::Data(_) | Item::Blob(_) | Item::Note(_) => {}
                 Item::Function(function) => {
                     functions.insert(function.name.clone(), function);
                 }

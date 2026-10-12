@@ -134,7 +134,21 @@ fn java_parse(ty: &str, idx: usize) -> String {
 /// declared type (`java_parse`), and the result is printed as JSON (numbers and
 /// booleans as-is, strings quoted) so the interpreter parses it uniformly.
 /// Gated by the capsule's sandbox approval (the live capsule runtime, rt.1).
+/// Run a capsule live under the default managed policy: every enforceable limit
+/// applied, and any capsule declaring a limit that cannot be enforced refused.
 pub fn invoke_live(capsule: &Capsule, args: &[String]) -> Result<String, String> {
+    invoke_live_with(capsule, args, crate::managed_exec::ManagedPolicy::default())
+}
+
+/// Run a capsule live under `policy`. The host runtime runs inside the managed
+/// containment layer (`managed_exec`): wall deadline, CPU and output budgets,
+/// declared memory ceiling, and process-tree cleanup.
+pub fn invoke_live_with(
+    capsule: &Capsule,
+    args: &[String],
+    policy: crate::managed_exec::ManagedPolicy,
+) -> Result<String, String> {
+    let managed_plan = crate::managed_exec::plan(capsule, policy)?;
     if !crate::sandbox::is_approved(capsule) {
         return Err("capsule effects are not covered by its sandbox".to_string());
     }
@@ -167,15 +181,23 @@ pub fn invoke_live(capsule: &Capsule, args: &[String]) -> Result<String, String>
         .first()
         .map(|o| o.ty.to_agent() == "str")
         .unwrap_or(false);
+    // The capsule body may print; only the tagged line is the result. See
+    // `managed_protocol`.
+    let nonce = crate::managed_protocol::nonce();
     let print = if is_str_out {
         format!(
-            "String _r = {call};\n        System.out.println(\"\\\"\" + _r.replace(\"\\\\\", \"\\\\\\\\\").replace(\"\\\"\", \"\\\\\\\"\") + \"\\\"\");"
+            "String _r = {call};\n        String _json = \"\\\"\" + _r.replace(\"\\\\\", \"\\\\\\\\\").replace(\"\\\"\", \"\\\\\\\"\") + \"\\\"\";\n        {emit}",
+            emit = crate::managed_protocol::jvm_emit(&nonce, "_json")
         )
     } else {
-        format!("System.out.println({call});")
+        format!(
+            "String _json = String.valueOf({call});\n        {emit}",
+            emit = crate::managed_protocol::jvm_emit(&nonce, "_json")
+        )
     };
     let driver = format!(
-        "public class ForgentexDriver {{\n    public static void main(String[] args) {{\n        {print}\n    }}\n}}\n"
+        "public class ForgentexDriver {{\n    public static void main(String[] args) {{\n{prelude}        {print}\n    }}\n}}\n",
+        prelude = crate::managed_protocol::jvm_prelude()
     );
     let class_path = dir.join(format!("{class}.java"));
     let driver_path = dir.join("ForgentexDriver.java");
@@ -198,23 +220,38 @@ pub fn invoke_live(capsule: &Capsule, args: &[String]) -> Result<String, String>
         ));
     }
 
-    let mut command = Command::new(&jdk.java);
-    command.arg("-cp").arg(&dir).arg("ForgentexDriver");
-    for arg in args {
-        command.arg(arg);
-    }
-    let output = command
-        .output()
-        .map_err(|err| format!("failed to spawn java: {err}"))?;
+    let mut argv = vec![
+        jdk.java.clone(),
+        "-cp".to_string(),
+        dir.display().to_string(),
+        "ForgentexDriver".to_string(),
+    ];
+    argv.extend(args.iter().cloned());
+    let output = match crate::managed_exec::execute(&argv, &managed_plan) {
+        Ok(output) => output,
+        Err(err) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(err);
+        }
+    };
     let _ = std::fs::remove_dir_all(&dir);
+    let framed = crate::managed_protocol::split(
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
+        &nonce,
+    );
     if !output.status.success() {
         return Err(format!(
             "jvm capsule '{}' raised: {}",
             capsule.name,
-            String::from_utf8_lossy(&output.stderr).trim()
+            if framed.diagnostics.is_empty() {
+                "no output".to_string()
+            } else {
+                framed.diagnostics.clone()
+            }
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    framed.result_or_error(&capsule.name)
 }
 
 fn arg_value(value: &CapsuleValue) -> String {

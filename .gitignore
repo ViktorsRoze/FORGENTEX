@@ -7,3 +7,6 @@
 # Editor and local tool state
 /.idea
 /.claude/settings.local.json
+
+# Release artifact staging (release-artifacts CI job)
+/dist

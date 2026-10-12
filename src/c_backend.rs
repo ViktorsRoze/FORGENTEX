@@ -101,11 +101,208 @@ pub fn generate_c_for_project(input: &Path) -> Result<(String, String), String> 
     ))
 }
 
+/// Named types a consumer of the header must be able to see.
+///
+/// Visibility is decided per item, so a public function whose signature names a
+/// struct that is not itself public produced a header declaring a prototype for
+/// a type the header never defined — the header did not compile on its own, and
+/// a consumer including it got `unknown type name`. Anything reachable from a
+/// public signature therefore belongs in the header regardless of its own
+/// visibility, and is expanded transitively because a public struct's fields are
+/// just as visible as the struct.
+fn types_required_by_public_api(
+    program: &Program,
+    ir: &BackendIr,
+) -> Result<std::collections::BTreeSet<String>, String> {
+    let mut pending: Vec<String> = Vec::new();
+    for function in program.functions() {
+        if !ir_function_for_ast(ir, function)?.public {
+            continue;
+        }
+        for param in &function.params {
+            collect_named_types(&param.ty, &mut pending);
+        }
+        collect_named_types(&function.ret, &mut pending);
+    }
+
+    let mut required = std::collections::BTreeSet::new();
+    while let Some(name) = pending.pop() {
+        if !required.insert(name.clone()) {
+            continue;
+        }
+        if let Some(decl) = program.structs().find(|decl| decl.name == name) {
+            for field in &decl.fields {
+                collect_named_types(&field.ty, &mut pending);
+            }
+        }
+        if let Some(decl) = program.enums().find(|decl| decl.name == name) {
+            for variant in &decl.variants {
+                if let Some(payload) = &variant.payload {
+                    collect_named_types(payload, &mut pending);
+                }
+            }
+        }
+    }
+    Ok(required)
+}
+
+fn collect_named_types(ty: &Type, out: &mut Vec<String>) {
+    match ty {
+        Type::Named(name) => out.push(name.clone()),
+        Type::Generic { args, .. } => {
+            for arg in args {
+                collect_named_types(arg, out);
+            }
+        }
+        Type::Array { elem, .. } | Type::Slice { elem, .. } | Type::Pointer { elem, .. } => {
+            collect_named_types(elem, out)
+        }
+        _ => {}
+    }
+}
+
+/// The integer types checked arithmetic is emitted for, as
+/// `(Forgentex name, C spelling, C limit macro stem, bit width, signed)`.
+///
+/// `ptrdiff_t`/`size_t` have no fixed width, so their guards are written
+/// against `PTRDIFF_MAX`/`SIZE_MAX` rather than a literal bound, and their
+/// shift bound is computed from `sizeof` at compile time.
+const CHECKED_INT_TYPES: &[(&str, &str, &str, &str, bool)] = &[
+    ("i8", "int8_t", "INT8_MIN", "INT8_MAX", true),
+    ("i16", "int16_t", "INT16_MIN", "INT16_MAX", true),
+    ("i32", "int32_t", "INT32_MIN", "INT32_MAX", true),
+    ("i64", "int64_t", "INT64_MIN", "INT64_MAX", true),
+    (
+        "isize",
+        "ptrdiff_t",
+        "(-PTRDIFF_MAX - 1)",
+        "PTRDIFF_MAX",
+        true,
+    ),
+    ("u8", "uint8_t", "0", "UINT8_MAX", false),
+    ("u16", "uint16_t", "0", "UINT16_MAX", false),
+    ("u32", "uint32_t", "0", "UINT32_MAX", false),
+    ("u64", "uint64_t", "0", "UINT64_MAX", false),
+    ("usize", "size_t", "0", "SIZE_MAX", false),
+];
+
+/// Checked integer arithmetic, one set of helpers per width.
+///
+/// The backend used to emit C's own operators and rely on what the compiler
+/// happened to do with them. That is not a semantics: signed overflow, division
+/// by zero, `MIN / -1`, and a shift amount outside `[0, width)` are all
+/// undefined in C, so the generated program had no defined behaviour in exactly
+/// the cases a numeric language most needs one. Each operation is now checked at
+/// the **declared width** and traps, which is what the interpreter does and what
+/// `docs/numeric_determinism.md` specifies.
+///
+/// Shifts are the one place bits are allowed to leave: the shift *amount* is
+/// checked, and the value shifts as a bit pattern, so `1 << 40` on an `i32`
+/// traps but `0x4000_0000 << 2` yields zero rather than trapping. Signed shifts
+/// go through the unsigned type of the same width, because shifting a negative
+/// value — or off the top of a signed one — is undefined in C, whereas the
+/// unsigned shift is defined and the conversion back is two's complement on
+/// every supported target.
+fn emit_checked_integer_arithmetic() -> String {
+    let mut out = String::new();
+    for (name, ct, min, max, signed) in CHECKED_INT_TYPES {
+        let width = match *name {
+            "isize" | "usize" => format!("(sizeof({ct}) * 8)"),
+            other => other.trim_start_matches(['i', 'u']).to_string(),
+        };
+        let unsigned_ct = match *name {
+            "isize" => "size_t".to_string(),
+            "i8" => "uint8_t".to_string(),
+            "i16" => "uint16_t".to_string(),
+            "i32" => "uint32_t".to_string(),
+            "i64" => "uint64_t".to_string(),
+            other => other.replace('i', "u"),
+        };
+        let unsigned_ct = if *signed { unsigned_ct } else { ct.to_string() };
+
+        if *signed {
+            out.push_str(&format!(
+                "static inline {ct} fgx_checked_{name}_add({ct} a, {ct} b) {{ if ((b > 0 && a > {max} - b) || (b < 0 && a < {min} - b)) fgx_trap(\"integer_overflow\"); return ({ct})(a + b); }}
+"
+            ));
+            out.push_str(&format!(
+                "static inline {ct} fgx_checked_{name}_sub({ct} a, {ct} b) {{ if ((b < 0 && a > {max} + b) || (b > 0 && a < {min} + b)) fgx_trap(\"integer_overflow\"); return ({ct})(a - b); }}
+"
+            ));
+            // Sign-separated, because comparing against `MAX / b` without
+            // splitting the sign pairs rejects ordinary products such as
+            // `2 * -3`, and dividing by -1 is itself undefined at MIN.
+            out.push_str(&format!(
+                "static inline {ct} fgx_checked_{name}_mul({ct} a, {ct} b) {{
+  if (a == 0 || b == 0) return 0;
+  if ((a == -1 && b == {min}) || (b == -1 && a == {min})) fgx_trap(\"integer_overflow\");
+  if (a > 0) {{
+    if (b > 0) {{ if (a > {max} / b) fgx_trap(\"integer_overflow\"); }}
+    else {{ if (b < {min} / a) fgx_trap(\"integer_overflow\"); }}
+  }} else {{
+    if (b > 0) {{ if (a < {min} / b) fgx_trap(\"integer_overflow\"); }}
+    else {{ if (a < {max} / b) fgx_trap(\"integer_overflow\"); }}
+  }}
+  return ({ct})(a * b);
+}}
+"
+            ));
+            out.push_str(&format!(
+                "static inline {ct} fgx_checked_{name}_div({ct} a, {ct} b) {{ if (b == 0) fgx_trap(\"division_by_zero\"); if (a == {min} && b == -1) fgx_trap(\"integer_overflow\"); return ({ct})(a / b); }}
+"
+            ));
+            out.push_str(&format!(
+                "static inline {ct} fgx_checked_{name}_rem({ct} a, {ct} b) {{ if (b == 0) fgx_trap(\"division_by_zero\"); if (a == {min} && b == -1) fgx_trap(\"integer_overflow\"); return ({ct})(a % b); }}
+"
+            ));
+            out.push_str(&format!(
+                "static inline {ct} fgx_checked_{name}_shl({ct} a, int64_t b) {{ if (b < 0 || (uint64_t)b >= {width}) fgx_trap(\"invalid_shift\"); return ({ct})(({unsigned_ct})a << b); }}
+"
+            ));
+            out.push_str(&format!(
+                "static inline {ct} fgx_checked_{name}_shr({ct} a, int64_t b) {{ if (b < 0 || (uint64_t)b >= {width}) fgx_trap(\"invalid_shift\"); return ({ct})(a >> b); }}
+"
+            ));
+        } else {
+            out.push_str(&format!(
+                "static inline {ct} fgx_checked_{name}_add({ct} a, {ct} b) {{ if (a > {max} - b) fgx_trap(\"integer_overflow\"); return ({ct})(a + b); }}
+"
+            ));
+            out.push_str(&format!(
+                "static inline {ct} fgx_checked_{name}_sub({ct} a, {ct} b) {{ if (a < b) fgx_trap(\"integer_overflow\"); return ({ct})(a - b); }}
+"
+            ));
+            out.push_str(&format!(
+                "static inline {ct} fgx_checked_{name}_mul({ct} a, {ct} b) {{ if (a != 0 && b > {max} / a) fgx_trap(\"integer_overflow\"); return ({ct})(a * b); }}
+"
+            ));
+            out.push_str(&format!(
+                "static inline {ct} fgx_checked_{name}_div({ct} a, {ct} b) {{ if (b == 0) fgx_trap(\"division_by_zero\"); return ({ct})(a / b); }}
+"
+            ));
+            out.push_str(&format!(
+                "static inline {ct} fgx_checked_{name}_rem({ct} a, {ct} b) {{ if (b == 0) fgx_trap(\"division_by_zero\"); return ({ct})(a % b); }}
+"
+            ));
+            out.push_str(&format!(
+                "static inline {ct} fgx_checked_{name}_shl({ct} a, int64_t b) {{ if (b < 0 || (uint64_t)b >= {width}) fgx_trap(\"invalid_shift\"); return ({ct})(a << b); }}
+"
+            ));
+            out.push_str(&format!(
+                "static inline {ct} fgx_checked_{name}_shr({ct} a, int64_t b) {{ if (b < 0 || (uint64_t)b >= {width}) fgx_trap(\"invalid_shift\"); return ({ct})(a >> b); }}
+"
+            ));
+        }
+    }
+    out
+}
+
 fn generate_header(project: &Project, header_name: &str, ir: &BackendIr) -> Result<String, String> {
     let guard = header_guard(header_name);
     let program = combined_program(project);
     let mut types = TypeRegistry::default();
     types.collect_program(&program);
+    let required = types_required_by_public_api(&program, ir)?;
 
     let mut out = String::new();
     out.push_str("/* Generated by fgx build --backend c. */\n");
@@ -116,9 +313,7 @@ fn generate_header(project: &Project, header_name: &str, ir: &BackendIr) -> Resu
     );
     out.push_str("static inline void fgx_trap(const char *code) { (void)code; abort(); }\n");
     out.push_str("static inline size_t fgx_bounds_index(size_t index, size_t len) { if (index >= len) fgx_trap(\"index_out_of_bounds\"); return index; }\n");
-    out.push_str("static inline int64_t fgx_checked_i64_add(int64_t a, int64_t b) { if ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b)) fgx_trap(\"integer_overflow\"); return a + b; }\n");
-    out.push_str("static inline int64_t fgx_checked_i64_sub(int64_t a, int64_t b) { if ((b < 0 && a > INT64_MAX + b) || (b > 0 && a < INT64_MIN + b)) fgx_trap(\"integer_overflow\"); return a - b; }\n");
-    out.push_str("static inline int64_t fgx_checked_i64_mul(int64_t a, int64_t b) { if (a != 0 && b != 0 && (a > INT64_MAX / b || a < INT64_MIN / b)) fgx_trap(\"integer_overflow\"); return a * b; }\n");
+    out.push_str(&emit_checked_integer_arithmetic());
     out.push_str("#define FGX_STR_MAX_BYTES ((size_t)16777216)\n");
     out.push_str("static inline size_t fgx_str_len(const char *value) { if (!value) fgx_trap(\"null_string\"); size_t len = 0; while (len < FGX_STR_MAX_BYTES && value[len] != '\\0') ++len; if (len == FGX_STR_MAX_BYTES) fgx_trap(\"string_too_large\"); return len; }\n");
     out.push_str("static inline bool fgx_str_eq(const char *left, const char *right) { size_t left_len = fgx_str_len(left); size_t right_len = fgx_str_len(right); return left_len == right_len && memcmp(left, right, left_len) == 0; }\n");
@@ -188,7 +383,7 @@ fn generate_header(project: &Project, header_name: &str, ir: &BackendIr) -> Resu
 
     for decl in program.structs() {
         let ir_struct = ir_struct_for_ast(ir, decl)?;
-        if ir_struct.public {
+        if ir_struct.public || required.contains(&decl.name) {
             out.push_str(&emit_struct_decl_from_ir(ir_struct)?);
             out.push('\n');
             emit_native_named_array_layouts(&types, &decl.name, &mut out)?;
@@ -197,7 +392,7 @@ fn generate_header(project: &Project, header_name: &str, ir: &BackendIr) -> Resu
 
     for decl in program.structs() {
         let ir_struct = ir_struct_for_ast(ir, decl)?;
-        if ir_struct.public {
+        if ir_struct.public || required.contains(&decl.name) {
             let suffix = ident(&decl.name);
             out.push_str(&emit_native_vec_decl(&suffix, &suffix));
         }
@@ -235,6 +430,9 @@ fn generate_source(project: &Project, header_name: &str, ir: &BackendIr) -> Resu
     let program = combined_program(project);
     let mut types = TypeRegistry::default();
     types.collect_program(&program);
+    // Mirrors the header's rule exactly, so a type is defined in one place
+    // and never in both.
+    let required = types_required_by_public_api(&program, ir)?;
     let mut out = String::new();
     out.push_str("/* Generated by fgx build --backend c. */\n");
     out.push_str(&fir_signature_comment(ir));
@@ -242,7 +440,7 @@ fn generate_source(project: &Project, header_name: &str, ir: &BackendIr) -> Resu
 
     for decl in program.structs() {
         let ir_struct = ir_struct_for_ast(ir, decl)?;
-        if !ir_struct.public {
+        if !ir_struct.public && !required.contains(&decl.name) {
             out.push_str(&emit_struct_decl_from_ir(ir_struct)?);
             out.push('\n');
             emit_native_named_array_layouts(&types, &decl.name, &mut out)?;
@@ -251,7 +449,7 @@ fn generate_source(project: &Project, header_name: &str, ir: &BackendIr) -> Resu
 
     for decl in program.structs() {
         let ir_struct = ir_struct_for_ast(ir, decl)?;
-        if !ir_struct.public {
+        if !ir_struct.public && !required.contains(&decl.name) {
             let suffix = ident(&decl.name);
             out.push_str(&emit_native_vec_decl(&suffix, &suffix));
         }
@@ -853,7 +1051,7 @@ fn emit_fir_instruction(
                 {
                     format!("fgx_vec_{suffix}_new()")
                 }
-                _ => emit_expr(&expr, env, structs)?,
+                _ => emit_expr_in_context(&expr, &ty, env, structs)?,
             };
             out.push_str(&format!(
                 "{pad}{} {} = {value};\n",
@@ -887,7 +1085,7 @@ fn emit_fir_instruction(
                             emit_expr(&args[0], env, structs)?
                         )
                     }
-                    _ => emit_expr(&expr, env, structs)?,
+                    _ => emit_expr_in_context(&expr, &env.return_type, env, structs)?,
                 };
                 if env.owned_vecs.is_empty() {
                     out.push_str(&format!("{pad}return {value};\n"));
@@ -962,7 +1160,13 @@ fn emit_assignment(
     out: &mut String,
 ) -> Result<(), String> {
     let pad = indent(level);
-    let value = emit_expr(expr, env, structs)?;
+    let target_ty = inferred_c_type(target, env, structs);
+    let value = if native_option_suffix(&target_ty).is_some() && is_native_option_constructor(expr)
+    {
+        emit_native_option_constructor(expr, &target_ty, env, structs)?
+    } else {
+        emit_expr(expr, env, structs)?
+    };
     match target {
         Expr::Index { base, index } => {
             let base_text = emit_expr(base, env, structs)?;
@@ -1049,12 +1253,33 @@ fn emit_expr(
                 Ok(format!("(!{equality})"))
             }
         }
-        Expr::Binary { op, left, right } => Ok(format!(
-            "({} {} {})",
-            emit_expr(left, env, structs)?,
-            op,
-            emit_expr(right, env, structs)?
-        )),
+        Expr::Binary { op, left, right } => {
+            // Integer arithmetic goes through a checked helper at the declared
+            // width. C's own operators leave signed overflow, division by zero,
+            // `MIN / -1`, and out-of-range shifts undefined, which is no
+            // semantics at all for the cases a numeric language cares about.
+            if let (Some(helper), Some(ty)) = (
+                checked_arithmetic_helper(op),
+                checked_arithmetic_type(left, right, env, structs),
+            ) {
+                let left = emit_checked_operand(left, &ty, env, structs)?;
+                let right = emit_checked_operand(right, &ty, env, structs)?;
+                // A shift amount is checked against the shifted type's width, so
+                // it is passed in one width regardless of how it was written.
+                let right = if matches!(op.as_str(), "<<" | ">>") {
+                    format!("(int64_t)({right})")
+                } else {
+                    right
+                };
+                return Ok(format!("fgx_checked_{ty}_{helper}({left}, {right})"));
+            }
+            Ok(format!(
+                "({} {} {})",
+                emit_expr(left, env, structs)?,
+                op,
+                emit_expr(right, env, structs)?
+            ))
+        }
         Expr::Call { name, args } => {
             if is_cpu_feature_probe(name) || name == "aligned" {
                 return Ok("false".to_string());
@@ -1429,6 +1654,155 @@ fn enum_is_tagged_union_ir(decl: &IrEnum) -> bool {
         .any(|variant| variant.payload.is_some())
 }
 
+/// How an operand contributes to the width an arithmetic operation is checked
+/// at.
+enum IntKind {
+    /// An untyped integer literal, which takes the width of the other operand.
+    Literal,
+    /// A value of a known integer type, named by its Forgentex spelling.
+    Typed(String),
+    /// Anything else — floats, strings, records, or a type that could not be
+    /// resolved. Arithmetic on these is not checked here.
+    Other,
+}
+
+/// The integer type an expression contributes, for width selection only.
+///
+/// This deliberately does not reuse `inferred_c_type`, which widens an integer
+/// literal to `i64`: that is the right answer for choosing a C declaration, and
+/// the wrong one here, because `x + 1` on an `i32` must be checked at 32 bits
+/// rather than 64.
+fn integer_kind(expr: &Expr, env: &Env, structs: &HashMap<String, StructDecl>) -> IntKind {
+    if let Expr::Int(_) = expr {
+        return IntKind::Literal;
+    }
+    if let Expr::Binary { op, left, right } = expr {
+        // A comparison yields a bool, not an integer, whatever its operands are.
+        if matches!(
+            op.as_str(),
+            "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||"
+        ) {
+            return IntKind::Other;
+        }
+        return match (
+            integer_kind(left, env, structs),
+            integer_kind(right, env, structs),
+        ) {
+            (IntKind::Literal, IntKind::Literal) => IntKind::Literal,
+            (IntKind::Typed(ty), IntKind::Literal) | (IntKind::Literal, IntKind::Typed(ty)) => {
+                IntKind::Typed(ty)
+            }
+            (IntKind::Typed(left), IntKind::Typed(right)) if left == right => IntKind::Typed(left),
+            _ => IntKind::Other,
+        };
+    }
+    if let Expr::Unary { expr, .. } = expr {
+        return integer_kind(expr, env, structs);
+    }
+    match inferred_c_type(expr, env, structs) {
+        Type::Primitive(name) if is_checked_integer(&name) => IntKind::Typed(name),
+        _ => IntKind::Other,
+    }
+}
+
+fn is_checked_integer(name: &str) -> bool {
+    debug_assert_eq!(
+        crate::numeric::is_checked_integer_name(name),
+        CHECKED_INT_TYPES
+            .iter()
+            .any(|(candidate, ..)| *candidate == name),
+        "the emitted helper table and the shared predicate disagree about '{name}'"
+    );
+    crate::numeric::is_checked_integer_name(name)
+}
+
+/// The helper suffix an arithmetic operator should be checked at, or `None`
+/// when the operands are not both integers of one width.
+fn checked_arithmetic_type(
+    left: &Expr,
+    right: &Expr,
+    env: &Env,
+    structs: &HashMap<String, StructDecl>,
+) -> Option<String> {
+    match (
+        integer_kind(left, env, structs),
+        integer_kind(right, env, structs),
+    ) {
+        // Two literals are `i64` constants, which is the width the interpreter
+        // gives them too.
+        (IntKind::Literal, IntKind::Literal) => Some("i64".to_string()),
+        (IntKind::Typed(ty), IntKind::Literal) | (IntKind::Literal, IntKind::Typed(ty)) => Some(ty),
+        (IntKind::Typed(left), IntKind::Typed(right)) if left == right => Some(left),
+        // Mixed widths are a type error the checker rejects before lowering, so
+        // reaching here means the type could not be resolved. Emitting a guard
+        // at a guessed width would trap valid programs, so none is emitted.
+        _ => None,
+    }
+}
+
+/// Emit an expression flowing into a value of known type.
+///
+/// Only literal-only integer arithmetic is affected: it has no width of its own,
+/// so without a context it is checked at `i64`, and `return 21 * 2` from an
+/// `i32` function would be checked at the wrong width. Everything else emits
+/// exactly as it would anywhere else.
+fn emit_expr_in_context(
+    expr: &Expr,
+    expected: &Type,
+    env: &Env,
+    structs: &HashMap<String, StructDecl>,
+) -> Result<String, String> {
+    if let Type::Primitive(name) = expected {
+        if is_checked_integer(name) {
+            return emit_checked_operand(expr, name, env, structs);
+        }
+    }
+    emit_expr(expr, env, structs)
+}
+
+/// Emit one operand of a checked arithmetic call at the operation's width.
+///
+/// A sub-expression built only from literals has no width of its own, so on its
+/// own it is emitted at `i64`. Inside a typed operation that is the wrong
+/// answer: `(2 * 3) + n` on an `i32` must check the multiply at 32 bits too,
+/// not compute it at 64 and narrow silently on the way in.
+fn emit_checked_operand(
+    expr: &Expr,
+    ty: &str,
+    env: &Env,
+    structs: &HashMap<String, StructDecl>,
+) -> Result<String, String> {
+    if let Expr::Binary { op, left, right } = expr {
+        if let Some(helper) = checked_arithmetic_helper(op) {
+            if matches!(integer_kind(expr, env, structs), IntKind::Literal) {
+                let left = emit_checked_operand(left, ty, env, structs)?;
+                let right = emit_checked_operand(right, ty, env, structs)?;
+                let right = if matches!(op.as_str(), "<<" | ">>") {
+                    format!("(int64_t)({right})")
+                } else {
+                    right
+                };
+                return Ok(format!("fgx_checked_{ty}_{helper}({left}, {right})"));
+            }
+        }
+    }
+    emit_expr(expr, env, structs)
+}
+
+/// The checked helper for an operator, if that operator has one.
+fn checked_arithmetic_helper(op: &str) -> Option<&'static str> {
+    match op {
+        "+" => Some("add"),
+        "-" => Some("sub"),
+        "*" => Some("mul"),
+        "/" => Some("div"),
+        "%" => Some("rem"),
+        "<<" => Some("shl"),
+        ">>" => Some("shr"),
+        _ => None,
+    }
+}
+
 fn inferred_c_type(expr: &Expr, env: &Env, structs: &HashMap<String, StructDecl>) -> Type {
     match expr {
         Expr::Lambda { .. } => Type::Unknown,
@@ -1648,6 +2022,8 @@ impl TypeRegistry {
     fn collect_program(&mut self, program: &Program) {
         for item in &program.items {
             match item {
+                // Data, blob, and note sections carry content, not behaviour.
+                Item::Data(_) | Item::Blob(_) | Item::Note(_) => {}
                 Item::Struct(decl) => {
                     for field in &decl.fields {
                         self.collect_type(&field.ty);

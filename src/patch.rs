@@ -1351,7 +1351,19 @@ pub fn node_hash(program: &Program, node: &str) -> Option<String> {
             .to_canonical_json(),
         ));
     }
-    None
+    // Every other item — carried sections included — is hashed whole. Without
+    // this a `NODE_HASH` precondition on `@data.sales` could not be written,
+    // and two agents editing one section would have nothing to collide on.
+    let item = program
+        .items
+        .iter()
+        .find(|item| crate::ast::item_node_id(item) == node)?;
+    Some(hash_text(
+        &Program {
+            items: vec![item.clone()],
+        }
+        .to_canonical_json(),
+    ))
 }
 
 fn stmt_by_path<'a>(body: &'a [Stmt], path: &str) -> Option<&'a Stmt> {

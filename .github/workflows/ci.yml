@@ -26,10 +26,139 @@ jobs:
         run: cargo clippy -- -D warnings
 
       - name: Test
-        run: cargo test
+        # Native capsule fixtures carry real wall/CPU budgets. Serial execution
+        # keeps a high-core Windows runner from turning test-harness contention
+        # into false native timeout failures; dedicated tests still exercise
+        # concurrent AppContainer profile access directly.
+        run: cargo test -- --test-threads=1
 
       - name: Stage 22 scheduled fuzz and differential tests
         if: github.event_name == 'schedule'
         run: |
           cargo run --bin fgx -- fuzz --iterations 128 --json
           cargo run --bin fgx -- diff-test --json
+
+      - name: Scheduled multi-seed borrow safety campaign
+        if: github.event_name == 'schedule'
+        shell: pwsh
+        run: |
+          $failed = 0
+          $seeds = @(
+            "0x736166655f763201",
+            "0x243f6a8885a308d3",
+            "0x13198a2e03707344",
+            "0xa4093822299f31d0",
+            "0x082efa98ec4e6c89",
+            "0x452821e638d01377",
+            "0xbe5466cf34e90c6c",
+            "0xc0ac29b7c97c50dd"
+          )
+          foreach ($seed in $seeds) {
+            $artifactDirectory = "target/borrow-campaign-failures/$seed"
+            cargo run --bin fgx -- borrow-conformance --campaign-seed $seed --campaign-cases 96 --failure-dir $artifactDirectory --json
+            if ($LASTEXITCODE -ne 0) {
+              $failed = 1
+            }
+          }
+          if ($failed -ne 0) {
+            exit 1
+          }
+
+      - name: Retain minimized borrow campaign failures
+        if: always() && github.event_name == 'schedule'
+        uses: actions/upload-artifact@v4
+        with:
+          name: borrow-campaign-failures
+          path: target/borrow-campaign-failures
+          if-no-files-found: ignore
+
+  release-artifacts:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binaries
+        run: cargo build --release --bins
+
+      - name: Compute artifact checksums
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Remove-Item -ErrorAction SilentlyContinue dist/CHECKSUMS.txt
+          foreach ($binary in @("fgx.exe", "forgentex-lsp.exe")) {
+            $path = "target/release/$binary"
+            $hash = (Get-FileHash $path -Algorithm SHA256).Hash.ToLower()
+            "$hash  $binary" | Add-Content -Encoding ascii dist/CHECKSUMS.txt
+          }
+          Get-Content dist/CHECKSUMS.txt
+
+      - name: Verify clean install from release artifacts
+        shell: pwsh
+        run: |
+          $installDir = Join-Path $env:RUNNER_TEMP "fgx-clean-install"
+          New-Item -ItemType Directory -Force $installDir | Out-Null
+          Copy-Item target/release/fgx.exe $installDir/
+          $fgx = Join-Path $installDir "fgx.exe"
+          & $fgx dist-manifest --json | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "clean install manifest check failed" }
+          & $fgx release-evidence --strict
+          if ($LASTEXITCODE -ne 0) { throw "clean install evidence check failed" }
+          & $fgx forgepack evidence --strict --json | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "clean install forgepack workflow failed" }
+
+      # The public 0.1 distribution gate closes on a recorded run
+      # (docs/public_0_1_release_proof.md). Printing the exact lines keeps that
+      # record from being transcribed by hand, and re-checking them whenever the
+      # recorded commit is the one being built keeps a stale or wrong proof from
+      # outliving the artifacts it claims to describe.
+      - name: Release proof
+        shell: pwsh
+        run: |
+          $proofPath = "docs/public_0_1_release_proof.md"
+          $digests = @{}
+          foreach ($pair in @(@("fgx", "fgx.exe"), @("forgentex-lsp", "forgentex-lsp.exe"))) {
+            $digests[$pair[0]] = (Get-FileHash "target/release/$($pair[1])" -Algorithm SHA256).Hash.ToLower()
+          }
+          $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          Write-Host "--- record these lines in $proofPath ---"
+          Write-Host "run_url: $runUrl"
+          Write-Host "commit: $env:GITHUB_SHA"
+          Write-Host "host: x86_64-pc-windows-msvc"
+          foreach ($name in @("fgx", "forgentex-lsp")) {
+            Write-Host "$name`: $($digests[$name])"
+          }
+
+          $recorded = @{}
+          foreach ($line in Get-Content $proofPath) {
+            if ($line -match '^\s*(run_url|commit|host|fgx|forgentex-lsp)\s*:\s*(\S+)\s*$') {
+              $recorded[$Matches[1]] = $Matches[2]
+            }
+          }
+          if ($recorded["commit"] -ne $env:GITHUB_SHA) {
+            Write-Host "proof records commit '$($recorded['commit'])', not this build - nothing to verify"
+            exit 0
+          }
+          foreach ($name in @("fgx", "forgentex-lsp")) {
+            if ($recorded[$name] -ne $digests[$name]) {
+              throw "$proofPath records $name as '$($recorded[$name])' but this build produced '$($digests[$name])'"
+            }
+          }
+          if ($recorded["run_url"] -notlike "*/actions/runs/*") {
+            throw "$proofPath records a run_url that is not a run: $($recorded['run_url'])"
+          }
+          Write-Host "release proof matches the artifacts built from this commit"
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fgx-windows-x86_64
+          path: |
+            target/release/fgx.exe
+            target/release/forgentex-lsp.exe
+            dist/CHECKSUMS.txt
+          if-no-files-found: error

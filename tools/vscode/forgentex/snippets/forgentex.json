@@ -126,5 +126,38 @@
       "}"
     ],
     "description": "Forgentex semantic patch skeleton"
+  },
+  "Data Section": {
+    "prefix": "data",
+    "body": [
+      "data ${1:name} ${2|csv,json,yaml,xml,sql,md,txt|}:",
+      "    created \"${3:2026-01-01T00:00:00Z}\" by \"${4|human:you,agent:claude-opus-5|}\"",
+      "    content:",
+      "        ${0:region,units}"
+    ],
+    "description": "A text payload carried in the project file."
+  },
+  "Blob Section": {
+    "prefix": "blob",
+    "body": [
+      "blob ${1:name} ${2|image/png,image/jpeg,audio/wav,video/mp4,application/octet-stream|}:",
+      "    created \"${3:2026-01-01T00:00:00Z}\" by \"${4|human:you,agent:claude-opus-5|}\"",
+      "    bytes ${5:6}",
+      "    inline:",
+      "        ${0:Zm9vYmFy}"
+    ],
+    "description": "A byte payload: image, audio, video, spreadsheet, or compiled artifact. Prefer `fgx fs add`, which fills in the size and hash."
+  },
+  "Note": {
+    "prefix": "note",
+    "body": [
+      "note ${1:id} on \"${2:@data.name}\":",
+      "    by \"${3|agent:claude-opus-5,human:you|}\"",
+      "    created \"${4:2026-01-01T00:00:00Z}\"",
+      "    status \"${5|open,resolved|}\"",
+      "    text:",
+      "        ${0:What needs attention.}"
+    ],
+    "description": "A remark attached to a node, by an agent or a person."
   }
 }

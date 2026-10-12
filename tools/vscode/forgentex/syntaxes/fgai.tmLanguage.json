@@ -2,19 +2,48 @@
   "name": "Forgentex Agent",
   "scopeName": "source.fgai",
   "patterns": [
-    { "include": "#comments" },
-    { "include": "#strings" },
-    { "include": "#nodeIds" },
-    { "include": "#declarations" },
-    { "include": "#capsule" },
-    { "include": "#pipeline" },
-    { "include": "#effects" },
-    { "include": "#keywords" },
-    { "include": "#constants" },
-    { "include": "#types" },
-    { "include": "#numbers" },
-    { "include": "#paths" },
-    { "include": "#operators" }
+    {
+      "include": "#projectFs"
+    },
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#nodeIds"
+    },
+    {
+      "include": "#declarations"
+    },
+    {
+      "include": "#capsule"
+    },
+    {
+      "include": "#pipeline"
+    },
+    {
+      "include": "#effects"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#constants"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#paths"
+    },
+    {
+      "include": "#operators"
+    }
   ],
   "repository": {
     "comments": {
@@ -53,29 +82,45 @@
         {
           "match": "^\\s*(UF|F)\\s+([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
-            "1": { "name": "keyword.declaration.function.fgai" },
-            "2": { "name": "entity.name.function.fgai" }
+            "1": {
+              "name": "keyword.declaration.function.fgai"
+            },
+            "2": {
+              "name": "entity.name.function.fgai"
+            }
           }
         },
         {
           "match": "^\\s*(EN|S|TR|IM)\\s+([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
-            "1": { "name": "keyword.declaration.type.fgai" },
-            "2": { "name": "entity.name.type.fgai" }
+            "1": {
+              "name": "keyword.declaration.type.fgai"
+            },
+            "2": {
+              "name": "entity.name.type.fgai"
+            }
           }
         },
         {
           "match": "^\\s*(SHARE)\\s+([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
-            "1": { "name": "keyword.declaration.share.fgai" },
-            "2": { "name": "variable.other.share.fgai" }
+            "1": {
+              "name": "keyword.declaration.share.fgai"
+            },
+            "2": {
+              "name": "variable.other.share.fgai"
+            }
           }
         },
         {
           "match": "^\\s*(M|IMPORT|EXPORT)\\s+([A-Za-z_][A-Za-z0-9_.]*)",
           "captures": {
-            "1": { "name": "keyword.control.import.fgai" },
-            "2": { "name": "entity.name.namespace.fgai" }
+            "1": {
+              "name": "keyword.control.import.fgai"
+            },
+            "2": {
+              "name": "entity.name.namespace.fgai"
+            }
           }
         },
         {
@@ -89,9 +134,15 @@
         {
           "match": "^\\s*(CAP)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s+(c|cpp|rust|zig|python|javascript|js)\\b",
           "captures": {
-            "1": { "name": "keyword.declaration.capsule.fgai" },
-            "2": { "name": "entity.name.function.capsule.fgai" },
-            "3": { "name": "support.constant.language.fgai" }
+            "1": {
+              "name": "keyword.declaration.capsule.fgai"
+            },
+            "2": {
+              "name": "entity.name.function.capsule.fgai"
+            },
+            "3": {
+              "name": "support.constant.language.fgai"
+            }
           }
         },
         {
@@ -109,8 +160,12 @@
         {
           "match": "^\\s*(PIPELINE)\\s+([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
-            "1": { "name": "keyword.declaration.pipeline.fgai" },
-            "2": { "name": "entity.name.section.pipeline.fgai" }
+            "1": {
+              "name": "keyword.declaration.pipeline.fgai"
+            },
+            "2": {
+              "name": "entity.name.section.pipeline.fgai"
+            }
           }
         },
         {
@@ -208,9 +263,15 @@
         {
           "match": "\\b([A-Z][A-Za-z0-9_]*)(::)([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
-            "1": { "name": "entity.name.type.fgai" },
-            "2": { "name": "punctuation.separator.path.fgai" },
-            "3": { "name": "variable.other.enummember.fgai" }
+            "1": {
+              "name": "entity.name.type.fgai"
+            },
+            "2": {
+              "name": "punctuation.separator.path.fgai"
+            },
+            "3": {
+              "name": "variable.other.enummember.fgai"
+            }
           }
         }
       ]
@@ -244,6 +305,201 @@
         {
           "name": "keyword.operator.assignment.fgai",
           "match": "="
+        }
+      ]
+    },
+    "projectFs": {
+      "patterns": [
+        {
+          "name": "meta.section.data.fgai",
+          "begin": "^(DATA)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s+([A-Za-z0-9_.+-]+)\\s*$",
+          "end": "^(ENDDATA)\\s*$",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.declaration.section.fgai"
+            },
+            "2": {
+              "name": "entity.name.section.data.fgai"
+            },
+            "3": {
+              "name": "support.constant.shape.fgai"
+            }
+          },
+          "endCaptures": {
+            "1": {
+              "name": "keyword.declaration.section.fgai"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#sectionMeta"
+            },
+            {
+              "begin": "^(BODY)\\s+([0-9]+)\\s*$",
+              "end": "(?=^ENDDATA\\s*$)",
+              "beginCaptures": {
+                "1": {
+                  "name": "keyword.other.section-block.fgai"
+                },
+                "2": {
+                  "name": "constant.numeric.line-count.fgai"
+                }
+              },
+              "contentName": "string.unquoted.payload.fgai"
+            }
+          ]
+        },
+        {
+          "name": "meta.section.blob.fgai",
+          "begin": "^(BLOB)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s+(\"[^\"]*\")\\s*$",
+          "end": "^(ENDBLOB)\\s*$",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.declaration.section.fgai"
+            },
+            "2": {
+              "name": "entity.name.section.blob.fgai"
+            },
+            "3": {
+              "name": "support.type.media.fgai"
+            }
+          },
+          "endCaptures": {
+            "1": {
+              "name": "keyword.declaration.section.fgai"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#sectionMeta"
+            },
+            {
+              "begin": "^(B64)\\s+([0-9]+)\\s*$",
+              "end": "(?=^ENDBLOB\\s*$)",
+              "beginCaptures": {
+                "1": {
+                  "name": "keyword.other.section-block.fgai"
+                },
+                "2": {
+                  "name": "constant.numeric.line-count.fgai"
+                }
+              },
+              "contentName": "comment.block.base64.fgai"
+            }
+          ]
+        },
+        {
+          "name": "meta.section.note.fgai",
+          "begin": "^(NOTE)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s+(ON)\\s+(\"@[^\"]*\")\\s*$",
+          "end": "^(ENDNOTE)\\s*$",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.declaration.note.fgai"
+            },
+            "2": {
+              "name": "entity.name.section.note.fgai"
+            },
+            "3": {
+              "name": "keyword.other.note.fgai"
+            },
+            "4": {
+              "name": "markup.underline.link.node-id.fgai"
+            }
+          },
+          "endCaptures": {
+            "1": {
+              "name": "keyword.declaration.note.fgai"
+            }
+          },
+          "patterns": [
+            {
+              "match": "^(BY)\\s+\"(agent):([^\"]*)\"",
+              "captures": {
+                "1": {
+                  "name": "keyword.other.note.fgai"
+                },
+                "2": {
+                  "name": "markup.bold.author.agent.fgai"
+                },
+                "3": {
+                  "name": "entity.name.tag.author.agent.fgai"
+                }
+              }
+            },
+            {
+              "match": "^(BY|CRT|RE|ST)\\b",
+              "captures": {
+                "1": {
+                  "name": "keyword.other.note.fgai"
+                }
+              }
+            },
+            {
+              "begin": "^(TXT)\\s+([0-9]+)\\s*$",
+              "end": "(?=^ENDNOTE\\s*$)",
+              "beginCaptures": {
+                "1": {
+                  "name": "keyword.other.section-block.fgai"
+                },
+                "2": {
+                  "name": "constant.numeric.line-count.fgai"
+                }
+              },
+              "contentName": "meta.embedded.block.markdown",
+              "patterns": [
+                {
+                  "include": "text.html.markdown"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "keyword.other.section.fgai",
+          "match": "\\b(?:DATA|ENDDATA|BODY|BLOB|ENDBLOB|B64|SIZE|HASH|STORE|NOTE|ENDNOTE|TXT|CRT|MOD|BY|ON|RE|ST)\\b"
+        }
+      ]
+    },
+    "sectionMeta": {
+      "patterns": [
+        {
+          "match": "^(CRT|MOD)\\s+(\"[^\"]*\")(?:\\s+(BY)\\s+(\"[^\"]*\"))?",
+          "captures": {
+            "1": {
+              "name": "keyword.other.section-meta.fgai"
+            },
+            "2": {
+              "name": "constant.other.timestamp.fgai"
+            },
+            "3": {
+              "name": "keyword.other.section-meta.fgai"
+            },
+            "4": {
+              "name": "entity.name.tag.author.fgai"
+            }
+          }
+        },
+        {
+          "match": "^(SIZE)\\s+([0-9]+)",
+          "captures": {
+            "1": {
+              "name": "keyword.other.section-meta.fgai"
+            },
+            "2": {
+              "name": "constant.numeric.bytes.fgai"
+            }
+          }
+        },
+        {
+          "match": "^(HASH|STORE)\\s+(\"[^\"]*\")",
+          "captures": {
+            "1": {
+              "name": "keyword.other.section-meta.fgai"
+            },
+            "2": {
+              "name": "constant.other.digest.fgai"
+            }
+          }
         }
       ]
     }

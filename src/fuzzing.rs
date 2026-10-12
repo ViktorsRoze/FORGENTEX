@@ -48,6 +48,11 @@ pub struct BackendDifferentialReport {
     pub generated_source_bytes: usize,
     pub backend_entry_found: bool,
     pub ir_entry_found: bool,
+    /// What the differential established about the generated C: `matched`,
+    /// `mismatched`, `unsupported`, `unavailable`, or `failed`. A run that
+    /// could not execute the C says so here rather than passing quietly on the
+    /// weaker name-presence evidence.
+    pub native_execution: String,
     pub result: String,
     pub notes: Vec<String>,
 }
@@ -143,6 +148,7 @@ impl BackendDifferentialReport {
             "  interpreter_status={} backend_entry_found={} ir_entry_found={}\n",
             self.interpreter_status, self.backend_entry_found, self.ir_entry_found
         ));
+        out.push_str(&format!("  native_execution={}\n", self.native_execution));
         out.push_str(&format!(
             "  generated_header_bytes={} generated_source_bytes={}\n",
             self.generated_header_bytes, self.generated_source_bytes
@@ -181,6 +187,10 @@ impl BackendDifferentialReport {
         out.push_str(&format!(
             "  \"ir_entry_found\": {},\n",
             bool_json(self.ir_entry_found)
+        ));
+        out.push_str(&format!(
+            "  \"native_execution\": {},\n",
+            quoted(&self.native_execution)
         ));
         out.push_str(&format!("  \"result\": {},\n", quoted(&self.result)));
         out.push_str("  \"notes\": [");
@@ -301,14 +311,47 @@ pub fn run_backend_differential(
             .iter()
             .any(|function| function.name == options.entry)
     });
+
+    // The comparison that gives this command its name: compile the generated C
+    // and run the entry on the same arguments the interpreter received. Finding
+    // the entry's name in the output only shows something was emitted; it
+    // cannot tell correct C from C that computes a different answer.
+    let execution = match program.find_function(&options.entry) {
+        Some(function) if backend_entry_found => {
+            match crate::interp::run_entry_values(&program, &options.entry, &input_text) {
+                Ok((args, return_value, bindings)) => crate::backend_diff::compare_generated_c(
+                    function,
+                    &header,
+                    &source,
+                    &args,
+                    &return_value,
+                    &bindings,
+                ),
+                Err(err) => crate::backend_diff::NativeExecution::Failed(format!(
+                    "the interpreter did not produce comparable values: {err}"
+                )),
+            }
+        }
+        Some(_) => crate::backend_diff::NativeExecution::Unsupported(
+            "the entry symbol is absent from the generated C".to_string(),
+        ),
+        None => crate::backend_diff::NativeExecution::Unsupported(format!(
+            "'{}' is not a function in {}",
+            options.entry,
+            options.source.display()
+        )),
+    };
+
     let pass = matches!(interpreter_status.as_str(), "pass" | "ok")
         && backend_entry_found
-        && ir_entry_found;
+        && ir_entry_found
+        && execution.permits_pass();
 
     let mut notes = vec![
         "interpreter executed the golden JSON input".to_string(),
         "C backend generated reference header/source output".to_string(),
         "FGIR contained the same entry symbol".to_string(),
+        execution.note(),
     ];
     if !backend_entry_found {
         notes.push("C backend output did not contain the entry symbol".to_string());
@@ -329,6 +372,7 @@ pub fn run_backend_differential(
         generated_source_bytes: source.len(),
         backend_entry_found,
         ir_entry_found,
+        native_execution: execution.status().to_string(),
         result: if pass { "pass" } else { "fail" }.to_string(),
         notes,
     })

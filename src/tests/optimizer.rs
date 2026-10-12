@@ -143,8 +143,10 @@ fn optimized_build_folds_into_the_emitted_c() {
 
     // Baseline (unoptimized) emission still carries the source shape.
     let (_, baseline) = crate::c_backend::generate_c_for_project(&dir).unwrap();
+    // Unfolded, and checked at the declared width: C's own `*` leaves signed
+    // overflow undefined, so integer arithmetic is lowered through a helper.
     assert!(
-        baseline.contains("(6 * 7)"),
+        baseline.contains("fgx_checked_i32_mul(6, 7)"),
         "baseline keeps 6 * 7:\n{baseline}"
     );
 
@@ -157,7 +159,7 @@ fn optimized_build_folds_into_the_emitted_c() {
         "folded constant in C:\n{optimized}"
     );
     assert!(
-        !optimized.contains("(6 * 7)"),
+        !optimized.contains("fgx_checked_i32_mul(6, 7)"),
         "no unfolded arithmetic:\n{optimized}"
     );
     assert!(

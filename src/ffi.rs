@@ -2611,7 +2611,18 @@ fn invoke_c_runner(request: LiveRunner<'_>) -> Result<NativeInvocation, String> 
     let stderr_bytes = output.stderr.len();
     let stdout = String::from_utf8(output.stdout)
         .map_err(|err| format!("native_capsule_bad_output: output was not UTF-8: {err}"))?;
-    let mut invocation = parse_native_invocation(&stdout, program, capsule, native_args)?;
+    let mut invocation =
+        parse_native_invocation(&stdout, program, capsule, native_args).map_err(|err| {
+            describe_quiet_runner(
+                err,
+                &stdout,
+                &output.stderr,
+                &output.status,
+                &exe,
+                peak_tree_memory_bytes,
+                peak_tree_processes,
+            )
+        })?;
     invocation.runner_stdout_bytes = stdout_bytes;
     invocation.runner_stderr_bytes = stderr_bytes;
     invocation.runner_peak_tree_memory_bytes = peak_tree_memory_bytes;
@@ -3174,7 +3185,18 @@ fn invoke_zig_runner(request: LiveRunner<'_>) -> Result<NativeInvocation, String
     let stderr_bytes = output.stderr.len();
     let stdout = String::from_utf8(output.stdout)
         .map_err(|err| format!("native_capsule_bad_output: output was not UTF-8: {err}"))?;
-    let mut invocation = parse_native_invocation(&stdout, program, capsule, native_args)?;
+    let mut invocation =
+        parse_native_invocation(&stdout, program, capsule, native_args).map_err(|err| {
+            describe_quiet_runner(
+                err,
+                &stdout,
+                &output.stderr,
+                &output.status,
+                &exe,
+                peak_tree_memory_bytes,
+                peak_tree_processes,
+            )
+        })?;
     invocation.runner_stdout_bytes = stdout_bytes;
     invocation.runner_stderr_bytes = stderr_bytes;
     invocation.runner_peak_tree_memory_bytes = peak_tree_memory_bytes;
@@ -3550,7 +3572,18 @@ fn invoke_rust_runner(request: LiveRunner<'_>) -> Result<NativeInvocation, Strin
     let stderr_bytes = output.stderr.len();
     let stdout = String::from_utf8(output.stdout)
         .map_err(|err| format!("native_capsule_bad_output: output was not UTF-8: {err}"))?;
-    let mut invocation = parse_native_invocation(&stdout, program, capsule, native_args)?;
+    let mut invocation =
+        parse_native_invocation(&stdout, program, capsule, native_args).map_err(|err| {
+            describe_quiet_runner(
+                err,
+                &stdout,
+                &output.stderr,
+                &output.status,
+                &exe,
+                peak_tree_memory_bytes,
+                peak_tree_processes,
+            )
+        })?;
     invocation.runner_stdout_bytes = stdout_bytes;
     invocation.runner_stderr_bytes = stderr_bytes;
     invocation.runner_peak_tree_memory_bytes = peak_tree_memory_bytes;
@@ -3861,6 +3894,51 @@ fn rust_array_initializer(
         .collect::<Result<Vec<_>, String>>()?
         .join(",\n");
     Ok(format!("[\n{values}\n{close_indent}]"))
+}
+
+/// Explain a parse failure that has no reply to blame.
+///
+/// A runner that exits 0 and writes nothing leaves `parse_native_invocation`
+/// looking at an empty string, so it reports a missing envelope -- naming a
+/// malformed reply when the real story is a child that never spoke. Attach what
+/// the child actually produced so the failure identifies its own cause.
+fn describe_quiet_runner(
+    error: String,
+    stdout: &str,
+    stderr: &[u8],
+    status: &std::process::ExitStatus,
+    exe: &Path,
+    peak_memory_bytes: Option<u64>,
+    peak_processes: Option<u32>,
+) -> String {
+    if !stdout.trim().is_empty() {
+        return error;
+    }
+    let code = status
+        .code()
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "signal".to_string());
+    let peak = format!(
+        "peak memory {:?}, peak processes {:?}",
+        peak_memory_bytes, peak_processes
+    );
+    let size = std::fs::metadata(exe)
+        .map(|meta| meta.len().to_string())
+        .unwrap_or_else(|err| format!("unreadable: {err}"));
+    let stderr = String::from_utf8_lossy(stderr);
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        format!(
+            "{error} (runner exit {code}, no output at all; runner {} is {size} bytes; {peak})",
+            exe.display()
+        )
+    } else {
+        let mut detail: String = stderr.chars().take(400).collect();
+        if detail.len() < stderr.len() {
+            detail.push_str("...");
+        }
+        format!("{error} (runner exit {code}, empty stdout, runner {} is {size} bytes; {peak}; stderr: {detail})", exe.display())
+    }
 }
 
 pub(crate) fn parse_native_invocation(

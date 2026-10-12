@@ -856,6 +856,9 @@ fn item_id(item: &Item) -> &str {
         Item::Capsule(capsule) => &capsule.id,
         Item::Share(share) => &share.id,
         Item::Pipeline(pipeline) => &pipeline.id,
+        Item::Data(section) => &section.id,
+        Item::Blob(section) => &section.id,
+        Item::Note(note) => &note.id,
     }
 }
 
@@ -870,6 +873,9 @@ fn item_name(item: &Item) -> &str {
         Item::Capsule(capsule) => &capsule.name,
         Item::Share(share) => &share.name,
         Item::Pipeline(pipeline) => &pipeline.name,
+        Item::Data(section) => &section.name,
+        Item::Blob(section) => &section.name,
+        Item::Note(note) => &note.name,
     }
 }
 
@@ -895,6 +901,8 @@ fn type_slice(project: &Project, item: &Item) -> Vec<Item> {
 
 fn collect_item_type_names(item: &Item, out: &mut BTreeSet<String>) {
     match item {
+        // Carried sections reference no declared types.
+        Item::Data(_) | Item::Blob(_) | Item::Note(_) => {}
         Item::Struct(decl) => {
             for field in &decl.fields {
                 collect_type_name(&field.ty, out);
@@ -985,6 +993,21 @@ fn symbol_map_lines(project: &Project, module: &ProjectModule, item: &Item) -> V
         module.token_cost
     ));
     match item {
+        Item::Data(section) => lines.push(format!(
+            "  DATA {} {} {} lines={}",
+            section.name,
+            section.id,
+            section.kind,
+            section.content.len()
+        )),
+        Item::Blob(section) => lines.push(format!(
+            "  BLOB {} {} {} bytes={}",
+            section.name, section.id, section.media_type, section.bytes
+        )),
+        Item::Note(note) => lines.push(format!(
+            "  NOTE {} {} on {} by {} {}",
+            note.name, note.id, note.target, note.author, note.status
+        )),
         Item::Struct(decl) => lines.push(format!(
             "  S {} {} fields={}",
             decl.name,

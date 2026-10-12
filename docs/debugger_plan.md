@@ -148,7 +148,8 @@ native frames so the boundary is visible in the stack rather than a gap in it.
 *Done when a gutter breakpoint on the media application stops and shows locals
 without a terminal.*
 
-**6. Step into foreign code (delegate, do not reimplement).** Rather than
+**6. Step into foreign code (delegate, do not reimplement).** *(stage A attach
+shipped; DAP-to-DAP multiplexing remains)* Rather than
 building native debuggers, attach the language's own debugger to the capsule
 subprocess in its declared `env`. This follows the same "polyglot, not
 from-scratch" stance the native and audio tracks already take.
@@ -163,7 +164,21 @@ That is far cheaper than per-language debugger integrations.
 - *Stage A — managed languages.* `python` via `debugpy --listen --wait-for-client`,
   `node`/`typescript` via `--inspect-brk`, `go` via `dlv dap`. These are already
   plain subprocesses spawned by `CapsuleWorker` with no AppContainer, job object,
-  or token restriction, so the containment cost is small.
+  or token restriction, so the containment cost is small. **Python attach is
+  shipped**: `foreign_debug::attach_python` starts the capsule under `debugpy` in
+  the interpreter `capsule_env::resolve` picked for the declared `env`, and
+  completes the handshake itself, because debugpy imposes two orderings a caller
+  would otherwise have to rediscover — it withholds the `initialized` *event*
+  until the session is attached, so waiting for that event before sending
+  `attach` deadlocks; and `attach` must carry `connect` naming the adapter's own
+  endpoint. Callers therefore start at configuration. Covered end to end by
+  `tests::foreign_debug::a_python_capsule_runs_under_its_own_debugger_and_stops_at_a_breakpoint`,
+  which sets a breakpoint on the *second* statement of a capsule body so that
+  stopping there proves the breakpoint was honoured rather than the process
+  merely halting at entry, and then reads the local bound by the preceding line.
+  The test resolves its environment from `~/.conda/environments.txt` and skips
+  cleanly on a host without debugpy. `node`, `typescript`, and `go` are admitted
+  by the gate but not yet attached.
 - *Stage B — compiled native.* `gdb`/`lldb` against the generated runner. This
   conflicts far more sharply with containment and should follow stage A.
 
@@ -180,7 +195,9 @@ Three tensions have to be handled explicitly rather than discovered later:
 
 *Done when a breakpoint set inside a Python capsule body stops in that capsule's
 declared conda environment, with Python frames and Forgentex frames in one
-stack.*
+stack.* The first half holds today — the breakpoint stops in the declared conda
+environment and its locals are readable. The single stack awaits the DAP-to-DAP
+multiplexing described above.
 
 **7. Production depth.** *(concurrency visibility shipped; the rest remains)* Async/concurrency (task tree with park/wake causality,
 deadlock detection, per-task stacks — largely a presentation layer over the
@@ -462,10 +479,19 @@ The three tensions are now decided rather than deferred, in
   reproducibility that pipeline cache identity depends on — so a debug run can
   never be mistaken for a governed one.
 
-Still open in phase 6: the attach itself — launching the capsule under its
-debugger and multiplexing that DAP conversation beneath the phase-5 adapter.
-That step needs `debugpy` (or `delve`) present in the target environment; none
-is installed on this host, so it is deliberately not written blind.
+The Python attach primitive is now shipped and verified against debugpy 1.8.21
+on Windows 11. It launches the capsule with the interpreter from its declared
+environment, connects over loopback, performs initialize/attach/configuration,
+stops on a real source breakpoint, resolves the dynamic frame id, and reads the
+capsule's local variables. Connect and socket I/O have hard deadlines, and a
+protocol mismatch reports a bounded tail of unmatched DAP messages rather than
+hanging the test process. DAP fields are parsed as JSON keys rather than compact
+substring spellings, so debugpy's whitespace and a prior value such as
+`"type": "event"` cannot hide the later `"event"` key.
+
+Still open in phase 6: multiplexing this child DAP conversation beneath the
+phase-5 Forgentex adapter, plus equivalent Node and Go launch paths. Compiled
+capsules still require the future `gdb`/`lldb` bridge.
 
 ### Shipped from phase 7 (2026-08-30): concurrency is visible
 

@@ -16,6 +16,184 @@ pub enum Item {
     Capsule(Capsule),
     Share(ShareDecl),
     Pipeline(PipelineDecl),
+    /// A named text payload carried in the project file: CSV, JSON, YAML,
+    /// XML, SQL, Markdown — anything whose bytes are text.
+    Data(DataSection),
+    /// A named byte payload: an image, an audio or video clip, a spreadsheet,
+    /// a columnar file, or a compiled artifact.
+    Blob(BlobSection),
+    /// One node of the annotation graph: a remark attached to another item,
+    /// optionally replying to an earlier one.
+    Note(NoteNode),
+}
+
+/// The canonical node id of any item, in one place.
+///
+/// Tools that walk a program by id — the project map, the workbench, `fgx fs` —
+/// all need this, and each having its own copy is how they drift apart when a
+/// new item kind appears.
+pub fn item_node_id(item: &Item) -> &str {
+    match item {
+        Item::Struct(decl) => &decl.id,
+        Item::Enum(decl) => &decl.id,
+        Item::Trait(decl) => &decl.id,
+        Item::TraitImpl(decl) => &decl.id,
+        Item::Function(function) => &function.id,
+        Item::Test(test) => &test.id,
+        Item::Capsule(capsule) => &capsule.id,
+        Item::Share(share) => &share.id,
+        Item::Pipeline(pipeline) => &pipeline.id,
+        Item::Data(section) => &section.id,
+        Item::Blob(section) => &section.id,
+        Item::Note(note) => &note.id,
+    }
+}
+
+/// What kind of item this is, for messages a person reads.
+pub fn item_kind_name(item: &Item) -> &'static str {
+    match item {
+        Item::Struct(_) => "struct",
+        Item::Enum(_) => "enum",
+        Item::Trait(_) => "trait",
+        Item::TraitImpl(_) => "trait impl",
+        Item::Function(_) => "function",
+        Item::Test(_) => "test",
+        Item::Capsule(_) => "capsule",
+        Item::Share(_) => "share",
+        Item::Pipeline(_) => "pipeline",
+        Item::Data(_) => "data section",
+        Item::Blob(_) => "blob",
+        Item::Note(_) => "note",
+    }
+}
+
+/// Who last touched a section, and when.
+///
+/// Provenance is part of the section rather than a side file because the point
+/// of a single-file project is that an agent picking it up can see, from the
+/// section alone, when it appeared and who changed it last.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SectionMeta {
+    pub created: Option<String>,
+    pub created_by: Option<String>,
+    pub modified: Option<String>,
+    pub modified_by: Option<String>,
+}
+
+/// A text payload: `data sales csv: ...`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DataSection {
+    pub id: String,
+    pub name: String,
+    /// The payload's shape — `csv`, `json`, `yaml`, `xml`, `sql`, `md`, `txt`.
+    /// Free-form on purpose: the format carries what it is, and checking a
+    /// payload against its shape is a separate, opt-in concern.
+    pub kind: String,
+    pub meta: SectionMeta,
+    /// Verbatim lines, exactly as authored.
+    pub content: Vec<String>,
+    pub attrs: Vec<Attribute>,
+}
+
+impl DataSection {
+    pub fn new(name: String, kind: String) -> Self {
+        let id = format!("@data.{}", node_safe_name(&name));
+        Self {
+            id,
+            name,
+            kind,
+            meta: SectionMeta::default(),
+            content: Vec::new(),
+            attrs: Vec::new(),
+        }
+    }
+}
+
+/// Where a blob's bytes actually live.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BlobPayload {
+    /// Base64 in the project file itself, for small payloads.
+    Inline(Vec<String>),
+    /// A path into the content-addressed store, for payloads too large to sit
+    /// in a file people read and diff.
+    Store(String),
+}
+
+/// A byte payload: `blob logo image/png: ...`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BlobSection {
+    pub id: String,
+    pub name: String,
+    pub media_type: String,
+    pub meta: SectionMeta,
+    /// The declared decoded size. Checked against the payload, so a truncated
+    /// or edited blob is caught rather than silently used.
+    pub bytes: u64,
+    pub sha256: Option<String>,
+    pub payload: BlobPayload,
+    pub attrs: Vec<Attribute>,
+}
+
+impl BlobSection {
+    pub fn new(name: String, media_type: String, payload: BlobPayload) -> Self {
+        let id = format!("@blob.{}", node_safe_name(&name));
+        Self {
+            id,
+            name,
+            media_type,
+            meta: SectionMeta::default(),
+            bytes: 0,
+            sha256: None,
+            payload,
+            attrs: Vec::new(),
+        }
+    }
+}
+
+/// One remark in the annotation graph.
+///
+/// A note carries its own name rather than taking a position, because agents
+/// append notes constantly and a positional identity would renumber every
+/// later note — invalidating the very references other notes use to reply.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NoteNode {
+    pub id: String,
+    pub name: String,
+    /// The node this remark is about, for example `@data.sales`.
+    pub target: String,
+    /// `agent:<name>` or `human:<name>`. The prefix is what lets a reader
+    /// filter a file's machine-written remarks from its human ones.
+    pub author: String,
+    pub created: Option<String>,
+    /// The note this one answers, which is what makes the annotations a graph
+    /// rather than a list.
+    pub reply_to: Option<String>,
+    /// `open` or `resolved`.
+    pub status: String,
+    pub text: Vec<String>,
+    pub attrs: Vec<Attribute>,
+}
+
+impl NoteNode {
+    pub fn new(name: String, target: String, author: String) -> Self {
+        let id = format!("@note.{}", node_safe_name(&name));
+        Self {
+            id,
+            name,
+            target,
+            author,
+            created: None,
+            reply_to: None,
+            status: "open".to_string(),
+            text: Vec::new(),
+            attrs: Vec::new(),
+        }
+    }
+
+    /// Whether this remark was written by an agent rather than a person.
+    pub fn is_agent(&self) -> bool {
+        self.author.starts_with("agent:")
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -672,6 +850,27 @@ impl Program {
         })
     }
 
+    pub fn data_sections(&self) -> impl Iterator<Item = &DataSection> {
+        self.items.iter().filter_map(|item| match item {
+            Item::Data(section) => Some(section),
+            _ => None,
+        })
+    }
+
+    pub fn blobs(&self) -> impl Iterator<Item = &BlobSection> {
+        self.items.iter().filter_map(|item| match item {
+            Item::Blob(section) => Some(section),
+            _ => None,
+        })
+    }
+
+    pub fn notes(&self) -> impl Iterator<Item = &NoteNode> {
+        self.items.iter().filter_map(|item| match item {
+            Item::Note(note) => Some(note),
+            _ => None,
+        })
+    }
+
     pub fn capsules(&self) -> impl Iterator<Item = &Capsule> {
         self.items.iter().filter_map(|item| match item {
             Item::Capsule(capsule) => Some(capsule),
@@ -1271,6 +1470,27 @@ fn collect_asm_target_metadata(body: &[Stmt], labels: &mut BTreeSet<String>) {
 fn item_to_json(item: &Item, indent: usize) -> String {
     let pad = " ".repeat(indent);
     match item {
+        Item::Data(section) => format!(
+            "{pad}{{\n{pad}  \"kind\": \"data\",\n{pad}  \"id\": \"{}\",\n{pad}  \"name\": \"{}\",\n{pad}  \"shape\": \"{}\",\n{pad}  \"lines\": {}\n{pad}}}",
+            escape(&section.id),
+            escape(&section.name),
+            escape(&section.kind),
+            section.content.len()
+        ),
+        Item::Blob(section) => format!(
+            "{pad}{{\n{pad}  \"kind\": \"blob\",\n{pad}  \"id\": \"{}\",\n{pad}  \"name\": \"{}\",\n{pad}  \"media_type\": \"{}\",\n{pad}  \"bytes\": {}\n{pad}}}",
+            escape(&section.id),
+            escape(&section.name),
+            escape(&section.media_type),
+            section.bytes
+        ),
+        Item::Note(note) => format!(
+            "{pad}{{\n{pad}  \"kind\": \"note\",\n{pad}  \"id\": \"{}\",\n{pad}  \"target\": \"{}\",\n{pad}  \"author\": \"{}\",\n{pad}  \"status\": \"{}\"\n{pad}}}",
+            escape(&note.id),
+            escape(&note.target),
+            escape(&note.author),
+            escape(&note.status)
+        ),
         Item::Struct(decl) => {
             let mut out = format!(
                 "{pad}{{\n{pad}  \"kind\": \"struct\",\n{pad}  \"id\": \"{}\",\n{pad}  \"name\": \"{}\",\n{pad}  \"fields\": [",
@@ -1488,6 +1708,11 @@ fn item_to_canonical_json(out: &mut String, item: &Item, indent: usize) {
         Item::TraitImpl(decl) => trait_impl_to_canonical_json(out, decl, indent),
         Item::Function(function) => function_to_canonical_json(out, function, indent),
         Item::Test(test) => test_to_canonical_json(out, test, indent),
+        // Carried sections are part of the canonical AST: a round-trip that
+        // dropped one has to fail rather than compare equal without it.
+        Item::Data(section) => data_to_canonical_json(out, section, indent),
+        Item::Blob(section) => blob_to_canonical_json(out, section, indent),
+        Item::Note(note) => note_to_canonical_json(out, note, indent),
         Item::Capsule(capsule) => capsule_to_canonical_json(out, capsule, indent),
         Item::Share(share) => share_to_canonical_json(out, share, indent),
         Item::Pipeline(pipeline) => pipeline_to_canonical_json(out, pipeline, indent),
@@ -1689,6 +1914,123 @@ fn pipeline_to_canonical_json(out: &mut String, pipeline: &PipelineDecl, indent:
     out.push('\n');
     push_line(out, indent + 1, "],");
     push_attributes(out, indent + 1, "annotations", &pipeline.attrs, false);
+    push_line(out, indent, "}");
+}
+
+fn section_meta_to_canonical_json(out: &mut String, meta: &SectionMeta, indent: usize) {
+    push_line(out, indent, "\"meta\": {");
+    for (key, value) in [
+        ("created", &meta.created),
+        ("created_by", &meta.created_by),
+        ("modified", &meta.modified),
+        ("modified_by", &meta.modified_by),
+    ] {
+        push_prop(
+            out,
+            indent + 1,
+            key,
+            &value
+                .as_ref()
+                .map(|value| quoted(value))
+                .unwrap_or_else(|| "null".to_string()),
+            key != "modified_by",
+        );
+    }
+    push_line(out, indent, "},");
+}
+
+fn data_to_canonical_json(out: &mut String, section: &DataSection, indent: usize) {
+    push_line(out, indent, "{");
+    push_prop(out, indent + 1, "kind", &quoted("data"), true);
+    push_prop(out, indent + 1, "id", &quoted(&section.id), true);
+    push_prop(out, indent + 1, "name", &quoted(&section.name), true);
+    push_prop(out, indent + 1, "shape", &quoted(&section.kind), true);
+    section_meta_to_canonical_json(out, &section.meta, indent + 1);
+    push_prop(
+        out,
+        indent + 1,
+        "content",
+        &quoted(&section.content.join("\n")),
+        false,
+    );
+    push_line(out, indent, "}");
+}
+
+fn blob_to_canonical_json(out: &mut String, section: &BlobSection, indent: usize) {
+    push_line(out, indent, "{");
+    push_prop(out, indent + 1, "kind", &quoted("blob"), true);
+    push_prop(out, indent + 1, "id", &quoted(&section.id), true);
+    push_prop(out, indent + 1, "name", &quoted(&section.name), true);
+    push_prop(
+        out,
+        indent + 1,
+        "media_type",
+        &quoted(&section.media_type),
+        true,
+    );
+    push_prop(out, indent + 1, "bytes", &section.bytes.to_string(), true);
+    push_prop(
+        out,
+        indent + 1,
+        "sha256",
+        &section
+            .sha256
+            .as_ref()
+            .map(|hash| quoted(hash))
+            .unwrap_or_else(|| "null".to_string()),
+        true,
+    );
+    section_meta_to_canonical_json(out, &section.meta, indent + 1);
+    match &section.payload {
+        BlobPayload::Inline(lines) => {
+            push_prop(out, indent + 1, "storage", &quoted("inline"), true);
+            push_prop(out, indent + 1, "base64", &quoted(&lines.join("")), false);
+        }
+        BlobPayload::Store(path) => {
+            push_prop(out, indent + 1, "storage", &quoted("store"), true);
+            push_prop(out, indent + 1, "store", &quoted(path), false);
+        }
+    }
+    push_line(out, indent, "}");
+}
+
+fn note_to_canonical_json(out: &mut String, note: &NoteNode, indent: usize) {
+    push_line(out, indent, "{");
+    push_prop(out, indent + 1, "kind", &quoted("note"), true);
+    push_prop(out, indent + 1, "id", &quoted(&note.id), true);
+    push_prop(out, indent + 1, "name", &quoted(&note.name), true);
+    push_prop(out, indent + 1, "target", &quoted(&note.target), true);
+    push_prop(out, indent + 1, "author", &quoted(&note.author), true);
+    push_prop(
+        out,
+        indent + 1,
+        "created",
+        &note
+            .created
+            .as_ref()
+            .map(|value| quoted(value))
+            .unwrap_or_else(|| "null".to_string()),
+        true,
+    );
+    push_prop(
+        out,
+        indent + 1,
+        "reply_to",
+        &note
+            .reply_to
+            .as_ref()
+            .map(|value| quoted(value))
+            .unwrap_or_else(|| "null".to_string()),
+        true,
+    );
+    push_prop(out, indent + 1, "status", &quoted(&note.status), true);
+    push_prop(
+        out,
+        indent + 1,
+        "text",
+        &quoted(&note.text.join("\n")),
+        false,
+    );
     push_line(out, indent, "}");
 }
 

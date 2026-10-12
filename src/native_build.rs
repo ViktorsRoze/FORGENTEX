@@ -482,7 +482,63 @@ pub(crate) fn run_with_path_timeout_limited(
     timeout: Duration,
     limits: ProcessLimits,
 ) -> std::io::Result<Option<ContainedRun>> {
-    run_with_path_containment(argv, path_dir, None, false, None, Some(timeout), limits)
+    run_with_path_containment(
+        argv,
+        path_dir,
+        None,
+        false,
+        None,
+        None,
+        Some(timeout),
+        limits,
+    )
+}
+
+/// Run a child with an **explicit** environment: it sees the listed variables
+/// and nothing else. Managed capsules use this, so a capsule cannot read a
+/// secret its caller happens to be holding.
+pub(crate) fn run_with_environment_timeout_limited(
+    argv: &[String],
+    environment: &[(String, String)],
+    timeout: Duration,
+    limits: ProcessLimits,
+) -> std::io::Result<Option<ContainedRun>> {
+    run_with_path_containment(
+        argv,
+        None,
+        None,
+        false,
+        Some(environment),
+        None,
+        Some(timeout),
+        limits,
+    )
+}
+
+/// Run a managed capsule's runtime with its explicit environment, writing the
+/// request through an inherited stdin pipe.
+///
+/// Managed capsules used argv for their arguments, which caps a payload at the
+/// platform's command-line length — about 32 KB on Windows, reported as an
+/// opaque `The filename or extension is too long`. The request is bounded data,
+/// so it belongs on a pipe, exactly as the native runners' requests do.
+pub(crate) fn run_with_environment_timeout_limited_input(
+    argv: &[String],
+    environment: &[(String, String)],
+    input: &[u8],
+    timeout: Duration,
+    limits: ProcessLimits,
+) -> std::io::Result<Option<ContainedRun>> {
+    run_with_path_containment(
+        argv,
+        None,
+        None,
+        false,
+        Some(environment),
+        Some(input),
+        Some(timeout),
+        limits,
+    )
 }
 
 /// Run a native capsule runner with ambient host authority reduced before the
@@ -504,6 +560,7 @@ pub(crate) fn run_with_path_timeout_limited_isolated(
         path_dir,
         Some(working_directory),
         true,
+        None,
         Some(input),
         Some(timeout),
         limits,
@@ -518,7 +575,7 @@ pub(crate) fn run_with_path_contained_limited(
     path_dir: Option<&Path>,
     limits: ProcessLimits,
 ) -> std::io::Result<std::process::Output> {
-    run_with_path_containment(argv, path_dir, None, false, None, None, limits)?
+    run_with_path_containment(argv, path_dir, None, false, None, None, None, limits)?
         .map(|run| run.output)
         .ok_or_else(|| {
             std::io::Error::new(
@@ -528,11 +585,13 @@ pub(crate) fn run_with_path_contained_limited(
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_with_path_containment(
     argv: &[String],
     path_dir: Option<&Path>,
     working_directory: Option<&Path>,
     clear_environment: bool,
+    environment: Option<&[(String, String)]>,
     input: Option<&[u8]>,
     timeout: Option<Duration>,
     limits: ProcessLimits,
@@ -543,6 +602,7 @@ fn run_with_path_containment(
         path_dir,
         working_directory,
         clear_environment,
+        environment,
         input.is_some(),
         limits,
     )?;
@@ -779,15 +839,17 @@ fn io_limit_error(limit: u64, usage: Option<JobIo>) -> io::Error {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn standard_contained_command(
     argv: &[String],
     path_dir: Option<&Path>,
     working_directory: Option<&Path>,
     clear_environment: bool,
+    environment: Option<&[(String, String)]>,
     pipe_stdin: bool,
     limits: ProcessLimits,
 ) -> io::Result<Command> {
-    let mut command = command_with_path_policy(argv, path_dir, clear_environment);
+    let mut command = command_with_path_policy(argv, path_dir, clear_environment, environment);
     if let Some(directory) = working_directory {
         command.current_dir(directory);
     }
@@ -804,11 +866,13 @@ fn standard_contained_command(
 }
 
 #[cfg(not(windows))]
+#[allow(clippy::too_many_arguments)]
 fn spawn_contained_child(
     argv: &[String],
     path_dir: Option<&Path>,
     working_directory: Option<&Path>,
     clear_environment: bool,
+    environment: Option<&[(String, String)]>,
     pipe_stdin: bool,
     limits: ProcessLimits,
 ) -> io::Result<ContainedChild> {
@@ -817,6 +881,7 @@ fn spawn_contained_child(
         path_dir,
         working_directory,
         clear_environment,
+        environment,
         pipe_stdin,
         limits,
     )?
@@ -825,11 +890,13 @@ fn spawn_contained_child(
 }
 
 #[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
 fn spawn_contained_child(
     argv: &[String],
     path_dir: Option<&Path>,
     working_directory: Option<&Path>,
     clear_environment: bool,
+    environment: Option<&[(String, String)]>,
     pipe_stdin: bool,
     limits: ProcessLimits,
 ) -> io::Result<ContainedChild> {
@@ -840,12 +907,21 @@ fn spawn_contained_child(
                 "restricted native runner requires a private working directory",
             )
         })?;
+        // The restricted path builds its own minimal environment.
         spawn_restricted_windows_child(argv, path_dir, directory, pipe_stdin)
             .map(ContainedChild::Restricted)
     } else {
-        standard_contained_command(argv, path_dir, working_directory, false, pipe_stdin, limits)?
-            .spawn()
-            .map(ContainedChild::Standard)
+        standard_contained_command(
+            argv,
+            path_dir,
+            working_directory,
+            false,
+            environment,
+            pipe_stdin,
+            limits,
+        )?
+        .spawn()
+        .map(ContainedChild::Standard)
     }
 }
 
@@ -1118,6 +1194,68 @@ fn windows_anonymous_pipe(
 pub(crate) const NATIVE_APPCONTAINER_NAME: &str = "Forgentex.NativeRunner.0_1";
 
 #[cfg(windows)]
+pub(crate) const NATIVE_APPCONTAINER_PROFILE_POLICY: &str = "versioned_immutable_no_runtime_delete";
+
+#[cfg(windows)]
+struct WindowsMutexGuard(*mut std::ffi::c_void);
+
+#[cfg(windows)]
+impl Drop for WindowsMutexGuard {
+    fn drop(&mut self) {
+        // SAFETY: the handle is a mutex successfully acquired by this thread.
+        unsafe {
+            let _ = ReleaseMutex(self.0);
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn lock_windows_native_appcontainer_profile() -> io::Result<WindowsMutexGuard> {
+    let name = format!(
+        r"Local\{NATIVE_APPCONTAINER_NAME}.{NATIVE_APPCONTAINER_PROFILE_POLICY}.ProfileLock"
+    )
+    .encode_utf16()
+    .chain(std::iter::once(0))
+    .collect::<Vec<_>>();
+    // SAFETY: the name is null-terminated; the returned handle is checked and
+    // owned by the guard. A Local named mutex coordinates every fgx process in
+    // this Windows session without requiring a global-object privilege.
+    let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+    if handle.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    const WAIT_OBJECT_0: u32 = 0;
+    const WAIT_ABANDONED: u32 = 0x80;
+    const WAIT_TIMEOUT: u32 = 0x102;
+    const WAIT_FAILED: u32 = u32::MAX;
+    // Profile creation should take milliseconds. A finite ceiling prevents a
+    // wedged external process from hanging every future native invocation.
+    let waited = unsafe { WaitForSingleObject(handle, 30_000) };
+    match waited {
+        WAIT_OBJECT_0 | WAIT_ABANDONED => Ok(WindowsMutexGuard(handle)),
+        WAIT_TIMEOUT => {
+            unsafe { CloseHandle(handle) };
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "timed out waiting for the native AppContainer profile lock",
+            ))
+        }
+        WAIT_FAILED => {
+            let error = io::Error::last_os_error();
+            unsafe { CloseHandle(handle) };
+            Err(error)
+        }
+        other => {
+            unsafe { CloseHandle(handle) };
+            Err(io::Error::other(format!(
+                "unexpected AppContainer profile lock result 0x{other:08x}"
+            )))
+        }
+    }
+}
+
+#[cfg(windows)]
 struct OwnedWindowsSid(*mut std::ffi::c_void);
 
 #[cfg(windows)]
@@ -1135,6 +1273,11 @@ impl Drop for OwnedWindowsSid {
 fn windows_native_appcontainer_sid() -> io::Result<OwnedWindowsSid> {
     use std::os::windows::ffi::OsStrExt;
 
+    // CreateAppContainerProfile is not concurrency-safe even when the stable
+    // profile already exists: parallel callers can receive sharing violations,
+    // ERROR_BAD_ENVIRONMENT, or an unmapped HRESULT. Serialize lookup/creation
+    // across threads and fgx processes, then derive the existing SID normally.
+    let _profile_lock = lock_windows_native_appcontainer_profile()?;
     let name = std::ffi::OsStr::new(NATIVE_APPCONTAINER_NAME)
         .encode_wide()
         .chain(std::iter::once(0))
@@ -2353,6 +2496,12 @@ struct TokenAppContainerInformation {
 #[cfg(windows)]
 #[link(name = "kernel32")]
 unsafe extern "system" {
+    fn CreateMutexW(
+        mutex_attributes: *const std::ffi::c_void,
+        initial_owner: i32,
+        name: *const u16,
+    ) -> *mut std::ffi::c_void;
+    fn ReleaseMutex(mutex: *mut std::ffi::c_void) -> i32;
     fn CreateJobObjectW(
         job_attributes: *const std::ffi::c_void,
         name: *const u16,
@@ -2536,23 +2685,33 @@ impl ProcessTree {
 }
 
 fn command_with_path(argv: &[String], path_dir: Option<&Path>) -> Command {
-    command_with_path_policy(argv, path_dir, false)
+    command_with_path_policy(argv, path_dir, false, None)
 }
 
 fn command_with_path_policy(
     argv: &[String],
     path_dir: Option<&Path>,
     clear_environment: bool,
+    environment: Option<&[(String, String)]>,
 ) -> Command {
     let mut command = Command::new(&argv[0]);
     command.args(&argv[1..]);
     if clear_environment {
         command.env_clear();
     }
+    // An explicit environment replaces the inherited one outright: the child
+    // sees these variables and nothing else. Managed capsules use this so a
+    // capsule cannot read a secret the parent happens to be holding.
+    if let Some(environment) = environment {
+        command.env_clear();
+        for (name, value) in environment {
+            command.env(name, value);
+        }
+    }
     if let Some(dir) = path_dir {
         if !dir.as_os_str().is_empty() {
             let mut paths = vec![dir.to_path_buf()];
-            if !clear_environment {
+            if !clear_environment && environment.is_none() {
                 let existing = std::env::var_os("PATH").unwrap_or_default();
                 paths.extend(std::env::split_paths(&existing));
             }

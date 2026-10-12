@@ -269,12 +269,44 @@ fn os_version() -> String {
     #[cfg(windows)]
     {
         command_version(Path::new("cmd.exe"), &["/C", "ver"])
+            .map(|version| classify_windows_version(&version))
             .unwrap_or_else(|| "windows (version unavailable)".to_string())
     }
     #[cfg(not(windows))]
     {
         command_version(Path::new("uname"), &["-sr"]).unwrap_or_else(|| env::consts::OS.to_string())
     }
+}
+
+/// Turn Windows' NT compatibility version into the product generation users
+/// expect. Windows 11 deliberately still reports major/minor `10.0`; build
+/// 22000 is the stable boundary between Windows 10 and Windows 11.
+pub(crate) fn classify_windows_version(raw: &str) -> String {
+    let version = raw
+        .split(|character: char| !(character.is_ascii_digit() || character == '.'))
+        .find_map(|candidate| {
+            let parts = candidate
+                .split('.')
+                .filter_map(|part| part.parse::<u32>().ok())
+                .collect::<Vec<_>>();
+            (parts.len() >= 3).then_some(parts)
+        });
+    let Some(parts) = version else {
+        return raw.trim().to_string();
+    };
+    let (major, minor, build) = (parts[0], parts[1], parts[2]);
+    let revision = parts
+        .get(3)
+        .map(|revision| format!(".{revision}"))
+        .unwrap_or_default();
+    let release = if major == 10 && build >= 22_000 {
+        "Windows 11"
+    } else if major == 10 && build >= 10_240 {
+        "Windows 10"
+    } else {
+        "Windows"
+    };
+    format!("{release} build {build}{revision} (NT {major}.{minor})")
 }
 
 fn executable_on_path(current: &Path, name: &str) -> bool {

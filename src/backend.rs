@@ -1128,6 +1128,8 @@ fn lower_program_module_to_ir(
     let mut functions = Vec::new();
     for item in &program.items {
         match item {
+            // Data, blob, and note sections carry content, not behaviour.
+            Item::Data(_) | Item::Blob(_) | Item::Note(_) => {}
             Item::Enum(decl) => enums.push(IrEnum {
                 id: decl.id.clone(),
                 name: decl.name.clone(),
@@ -1427,7 +1429,9 @@ fn backend_blockers(
                 collect_generic_type_blockers(&function.ret, &mut blockers);
             }
             for param in &function.params {
-                collect_generic_type_blockers(&param.ty, &mut blockers);
+                if !is_native_value_option(&param.ty, native_vec_element_names) {
+                    collect_generic_type_blockers(&param.ty, &mut blockers);
+                }
             }
             collect_stmt_type_blockers(
                 &function.body,
@@ -1589,9 +1593,15 @@ fn function_returns_native_option(
         return false;
     }
     let mut saw_return = false;
+    let option_params = function
+        .params
+        .iter()
+        .filter(|param| param.ty == function.ret)
+        .map(|param| param.name.clone())
+        .collect::<BTreeSet<_>>();
     body_returns_only_native_options(
         &function.body,
-        &BTreeSet::new(),
+        &option_params,
         &function.ret,
         &mut saw_return,
     ) && saw_return
@@ -1652,8 +1662,12 @@ fn body_returns_only_native_options(
             }
             Stmt::Assign {
                 target: Expr::Var(name),
-                ..
-            } if options.contains(name) => return false,
+                expr,
+            } if options.contains(name) => {
+                if !is_native_option_constructor(expr) {
+                    return false;
+                }
+            }
             Stmt::Let { name, .. } => {
                 options.remove(name);
             }
@@ -2043,6 +2057,10 @@ fn collect_source_expr_blockers(
                     );
                 }
             }
+            Stmt::Assign { target, expr } if is_native_option_constructor(expr) => {
+                collect_expr_source_blockers(target, capsule_names, trait_names, blockers);
+                collect_native_option_constructor_args(expr, capsule_names, trait_names, blockers);
+            }
             Stmt::Assign { target, expr } => {
                 collect_expr_source_blockers(target, capsule_names, trait_names, blockers);
                 collect_expr_source_blockers(expr, capsule_names, trait_names, blockers);
@@ -2179,6 +2197,12 @@ fn is_interpreter_only_intrinsic(name: &str) -> bool {
             | "str_find"
             | "str_split"
             | "alloc"
+            // A carried payload lives in the source file. Lowering it would
+            // mean emitting it as a static constant, which is a sound idea and
+            // not yet built; until then this is an explicit blocker rather
+            // than a silent omission.
+            | "section_text"
+            | "section_bytes"
             | "alloc_buffer"
             | "realloc"
             | "free"

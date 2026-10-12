@@ -1,12 +1,12 @@
 use std::path::Path;
 
 use crate::ast::{
-    is_primitive_name, AsmBinding, AsmBlock, Attribute, Capsule, CapsuleBinding, CapsuleDep,
-    CapsuleFixture, CapsuleShareBinding, CapsuleValue, EnumDecl, EnumVariant, Expr, Field,
-    FunctionDecl, Item, MatchArm, Param, Pattern, PipelineDecl, PipelineEdgeDecl, Program,
-    ShareDecl, ShareMode, Stmt, StructDecl, TestDecl, TestExpectation, TraitConstDecl,
-    TraitConstImpl, TraitDecl, TraitImplDecl, TraitMethodDecl, TraitMethodImpl, TraitTypeDecl,
-    TraitTypeImpl, Type, TypeParamBound,
+    is_primitive_name, AsmBinding, AsmBlock, Attribute, BlobPayload, BlobSection, Capsule,
+    CapsuleBinding, CapsuleDep, CapsuleFixture, CapsuleShareBinding, CapsuleValue, DataSection,
+    EnumDecl, EnumVariant, Expr, Field, FunctionDecl, Item, MatchArm, NoteNode, Param, Pattern,
+    PipelineDecl, PipelineEdgeDecl, Program, SectionMeta, ShareDecl, ShareMode, Stmt, StructDecl,
+    TestDecl, TestExpectation, TraitConstDecl, TraitConstImpl, TraitDecl, TraitImplDecl,
+    TraitMethodDecl, TraitMethodImpl, TraitTypeDecl, TraitTypeImpl, Type, TypeParamBound,
 };
 use crate::lexer::{lex, Comment, Token};
 use crate::span::{ParseDiagnostic, SourceMap, SourceSpan};
@@ -336,6 +336,24 @@ pub fn parse_human(source: &str) -> Result<Program, String> {
                 .push(Item::Test(TestDecl::new(name, xfail, expectations)));
             continue;
         }
+        if item_text.starts_with("data ") && item_text.ends_with(':') {
+            let mut section = parse_data_human(item_text, &lines, &mut index)?;
+            section.attrs = std::mem::take(&mut pending_attrs);
+            program.items.push(Item::Data(section));
+            continue;
+        }
+        if item_text.starts_with("blob ") && item_text.ends_with(':') {
+            let mut section = parse_blob_human(item_text, &lines, &mut index)?;
+            section.attrs = std::mem::take(&mut pending_attrs);
+            program.items.push(Item::Blob(section));
+            continue;
+        }
+        if item_text.starts_with("note ") && item_text.ends_with(':') {
+            let mut note = parse_note_human(item_text, &lines, &mut index)?;
+            note.attrs = std::mem::take(&mut pending_attrs);
+            program.items.push(Item::Note(note));
+            continue;
+        }
         if item_text.starts_with("foreign ") {
             let mut capsule = parse_capsule_human(item_text, &lines, &mut index)?;
             capsule.attrs = std::mem::take(&mut pending_attrs);
@@ -373,6 +391,233 @@ pub fn parse_human(source: &str) -> Result<Program, String> {
         return Err(format!("unknown top-level item: {}", item_text));
     }
     Ok(program)
+}
+
+// ---- Carried sections: data, blobs, and the note graph --------------------
+//
+// Payload blocks are read from raw source, exactly as capsule bodies are: a
+// CSV, YAML, or SQL payload may contain `#`, which the line comment-stripper
+// would otherwise truncate.
+
+/// Read an indented verbatim block introduced by `<label>:`.
+fn parse_section_block(
+    lines: &[SourceLine],
+    index: &mut usize,
+    label: &str,
+) -> Result<Vec<String>, String> {
+    let header = lines[*index].text.trim();
+    if header != format!("{label}:") {
+        return Err(format!("expected '{label}:' block, found: {header}"));
+    }
+    *index += 1;
+    let mut block = Vec::new();
+    while *index < lines.len() {
+        let line = &lines[*index];
+        if line.raw.trim().is_empty() {
+            block.push(String::new());
+            *index += 1;
+            continue;
+        }
+        if line.indent < 8 {
+            break;
+        }
+        block.push(strip_leading_spaces(&line.raw, 8));
+        *index += 1;
+    }
+    while block.last().map(|line| line.is_empty()).unwrap_or(false) {
+        block.pop();
+    }
+    Ok(block)
+}
+
+/// `created "<when>" by "<who>"` / `modified "<when>" by "<who>"`.
+fn parse_meta_line(meta: &mut SectionMeta, keyword: &str, rest: &str) -> Result<(), String> {
+    let (when, rest) = take_quoted(rest.trim())?;
+    let by = match rest.trim().strip_prefix("by ") {
+        Some(author) => Some(take_quoted(author.trim())?.0),
+        None if rest.trim().is_empty() => None,
+        None => return Err(format!("unknown {keyword} detail: {rest}")),
+    };
+    if keyword == "created" {
+        meta.created = Some(when);
+        meta.created_by = by;
+    } else {
+        meta.modified = Some(when);
+        meta.modified_by = by;
+    }
+    Ok(())
+}
+
+fn parse_data_human(
+    header: &str,
+    lines: &[SourceLine],
+    index: &mut usize,
+) -> Result<DataSection, String> {
+    let header = header.trim().trim_end_matches(':');
+    let rest = header
+        .strip_prefix("data ")
+        .ok_or_else(|| format!("data section header must start with 'data ': {header}"))?;
+    let (name, rest) = take_word(rest)?;
+    let kind = rest.trim();
+    if kind.is_empty() {
+        return Err(format!(
+            "data section '{name}' must declare a shape, for example 'data {name} csv:'"
+        ));
+    }
+    let mut section = DataSection::new(name, kind.to_string());
+    *index += 1;
+    let mut saw_content = false;
+    while *index < lines.len() {
+        let line = &lines[*index];
+        if line.raw.trim().is_empty() {
+            *index += 1;
+            continue;
+        }
+        if line.indent == 0 {
+            break;
+        }
+        let text = line.text.trim().to_string();
+        if let Some(rest) = text.strip_prefix("created ") {
+            parse_meta_line(&mut section.meta, "created", rest)?;
+        } else if let Some(rest) = text.strip_prefix("modified ") {
+            parse_meta_line(&mut section.meta, "modified", rest)?;
+        } else if text == "content:" {
+            section.content = parse_section_block(lines, index, "content")?;
+            saw_content = true;
+            continue;
+        } else {
+            return Err(format!("unknown data section line: {text}"));
+        }
+        *index += 1;
+    }
+    if !saw_content {
+        return Err(format!(
+            "data section '{}' is missing its 'content:' block",
+            section.name
+        ));
+    }
+    Ok(section)
+}
+
+fn parse_blob_human(
+    header: &str,
+    lines: &[SourceLine],
+    index: &mut usize,
+) -> Result<BlobSection, String> {
+    let header = header.trim().trim_end_matches(':');
+    let rest = header
+        .strip_prefix("blob ")
+        .ok_or_else(|| format!("blob section header must start with 'blob ': {header}"))?;
+    let (name, rest) = take_word(rest)?;
+    let media_type = rest.trim();
+    if media_type.is_empty() {
+        return Err(format!(
+            "blob section '{name}' must declare a media type, for example 'blob {name} image/png:'"
+        ));
+    }
+    let mut section = BlobSection::new(
+        name,
+        media_type.to_string(),
+        BlobPayload::Inline(Vec::new()),
+    );
+    let mut payload = None;
+    *index += 1;
+    while *index < lines.len() {
+        let line = &lines[*index];
+        if line.raw.trim().is_empty() {
+            *index += 1;
+            continue;
+        }
+        if line.indent == 0 {
+            break;
+        }
+        let text = line.text.trim().to_string();
+        if let Some(rest) = text.strip_prefix("created ") {
+            parse_meta_line(&mut section.meta, "created", rest)?;
+        } else if let Some(rest) = text.strip_prefix("modified ") {
+            parse_meta_line(&mut section.meta, "modified", rest)?;
+        } else if let Some(rest) = text.strip_prefix("bytes ") {
+            section.bytes = rest
+                .trim()
+                .parse()
+                .map_err(|_| format!("invalid blob byte count: {rest}"))?;
+        } else if let Some(rest) = text.strip_prefix("sha256 ") {
+            section.sha256 = Some(take_quoted(rest.trim())?.0);
+        } else if let Some(rest) = text.strip_prefix("store ") {
+            payload = Some(BlobPayload::Store(take_quoted(rest.trim())?.0));
+        } else if text == "inline:" {
+            payload = Some(BlobPayload::Inline(parse_section_block(
+                lines, index, "inline",
+            )?));
+            continue;
+        } else {
+            return Err(format!("unknown blob section line: {text}"));
+        }
+        *index += 1;
+    }
+    section.payload = payload.ok_or_else(|| {
+        format!(
+            "blob section '{}' must carry its bytes with 'inline:' or name a 'store'",
+            section.name
+        )
+    })?;
+    Ok(section)
+}
+
+fn parse_note_human(
+    header: &str,
+    lines: &[SourceLine],
+    index: &mut usize,
+) -> Result<NoteNode, String> {
+    let header = header.trim().trim_end_matches(':');
+    let rest = header
+        .strip_prefix("note ")
+        .ok_or_else(|| format!("note header must start with 'note ': {header}"))?;
+    let (name, rest) = take_word(rest)?;
+    let target = rest.trim().strip_prefix("on ").ok_or_else(|| {
+        format!("note '{name}' must name what it is on: note {name} on \"@...\":")
+    })?;
+    let (target, _) = take_quoted(target.trim())?;
+    let mut note = NoteNode::new(name, target, String::new());
+    *index += 1;
+    let mut saw_text = false;
+    while *index < lines.len() {
+        let line = &lines[*index];
+        if line.raw.trim().is_empty() {
+            *index += 1;
+            continue;
+        }
+        if line.indent == 0 {
+            break;
+        }
+        let text = line.text.trim().to_string();
+        if let Some(rest) = text.strip_prefix("by ") {
+            note.author = take_quoted(rest.trim())?.0;
+        } else if let Some(rest) = text.strip_prefix("created ") {
+            note.created = Some(take_quoted(rest.trim())?.0);
+        } else if let Some(rest) = text.strip_prefix("reply-to ") {
+            note.reply_to = Some(take_quoted(rest.trim())?.0);
+        } else if let Some(rest) = text.strip_prefix("status ") {
+            note.status = take_quoted(rest.trim())?.0;
+        } else if text == "text:" {
+            note.text = parse_section_block(lines, index, "text")?;
+            saw_text = true;
+            continue;
+        } else {
+            return Err(format!("unknown note line: {text}"));
+        }
+        *index += 1;
+    }
+    if note.author.is_empty() {
+        return Err(format!(
+            "note '{}' must record who wrote it: by \"agent:<name>\" or by \"human:<name>\"",
+            note.name
+        ));
+    }
+    if !saw_text {
+        return Err(format!("note '{}' is missing its 'text:' block", note.name));
+    }
+    Ok(note)
 }
 
 // ---- Foreign capsule parsing (v2.0) -------------------------------------
@@ -523,6 +768,206 @@ fn extract_agent_capsules(source: &str) -> Result<(String, Vec<Capsule>), String
         capsules.push(capsule);
     }
     Ok((out_lines.join("\n"), capsules))
+}
+
+/// One carried section lifted out of agent source before the line-oriented
+/// parser runs, in the same way capsules are.
+enum AgentSection {
+    Data(DataSection),
+    Blob(BlobSection),
+    Note(NoteNode),
+}
+
+/// Read a `<LABEL> <count>` block: the count comes first so a reader can skip a
+/// payload without scanning it, which is the whole point of the dense view.
+fn take_counted_block(
+    raw: &[&str],
+    i: &mut usize,
+    label: &str,
+    count: &str,
+) -> Result<Vec<String>, String> {
+    let count: usize = count
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid {label} line count: {count}"))?;
+    *i += 1;
+    let mut block = Vec::new();
+    for _ in 0..count {
+        if *i >= raw.len() {
+            return Err(format!("{label} block ends before its line count"));
+        }
+        block.push(raw[*i].to_string());
+        *i += 1;
+    }
+    Ok(block)
+}
+
+fn parse_agent_meta(meta: &mut SectionMeta, keyword: &str, rest: &str) -> Result<(), String> {
+    let (when, rest) = take_quoted(rest.trim())?;
+    let by = match rest.trim().strip_prefix("BY ") {
+        Some(author) => Some(take_quoted(author.trim())?.0),
+        None if rest.trim().is_empty() => None,
+        None => return Err(format!("unknown {keyword} detail: {rest}")),
+    };
+    if keyword == "CRT" {
+        meta.created = Some(when);
+        meta.created_by = by;
+    } else {
+        meta.modified = Some(when);
+        meta.modified_by = by;
+    }
+    Ok(())
+}
+
+/// Pull every `DATA`/`BLOB`/`NOTE` block out of agent source, replacing each
+/// with a `SECREF <index>` marker so ordering survives.
+fn extract_agent_sections(source: &str) -> Result<(String, Vec<AgentSection>), String> {
+    let raw: Vec<&str> = source.lines().collect();
+    let mut out_lines: Vec<String> = Vec::new();
+    let mut sections: Vec<AgentSection> = Vec::new();
+    let mut i = 0;
+    while i < raw.len() {
+        let trimmed = raw[i].trim();
+        let kind = if trimmed.starts_with("DATA ") {
+            "DATA"
+        } else if trimmed.starts_with("BLOB ") {
+            "BLOB"
+        } else if trimmed.starts_with("NOTE ") {
+            "NOTE"
+        } else {
+            out_lines.push(raw[i].to_string());
+            i += 1;
+            continue;
+        };
+        let header = trimmed[kind.len() + 1..].trim();
+        let section = match kind {
+            "DATA" => {
+                let (name, rest) = take_word(header)?;
+                let mut section = DataSection::new(name, rest.trim().to_string());
+                i += 1;
+                loop {
+                    if i >= raw.len() {
+                        return Err("data section is missing 'ENDDATA'".to_string());
+                    }
+                    let line = raw[i].trim();
+                    if line == "ENDDATA" {
+                        i += 1;
+                        break;
+                    }
+                    if let Some(rest) = line.strip_prefix("CRT ") {
+                        parse_agent_meta(&mut section.meta, "CRT", rest)?;
+                    } else if let Some(rest) = line.strip_prefix("MOD ") {
+                        parse_agent_meta(&mut section.meta, "MOD", rest)?;
+                    } else if let Some(count) = line.strip_prefix("BODY ") {
+                        section.content = take_counted_block(&raw, &mut i, "BODY", count)?;
+                        continue;
+                    } else if line.is_empty() {
+                        i += 1;
+                        continue;
+                    } else {
+                        return Err(format!("unknown data section line: {line}"));
+                    }
+                    i += 1;
+                }
+                AgentSection::Data(section)
+            }
+            "BLOB" => {
+                let (name, rest) = take_word(header)?;
+                let (media_type, _) = take_quoted(rest.trim())?;
+                let mut section =
+                    BlobSection::new(name, media_type, BlobPayload::Inline(Vec::new()));
+                let mut payload = None;
+                i += 1;
+                loop {
+                    if i >= raw.len() {
+                        return Err("blob section is missing 'ENDBLOB'".to_string());
+                    }
+                    let line = raw[i].trim();
+                    if line == "ENDBLOB" {
+                        i += 1;
+                        break;
+                    }
+                    if let Some(rest) = line.strip_prefix("CRT ") {
+                        parse_agent_meta(&mut section.meta, "CRT", rest)?;
+                    } else if let Some(rest) = line.strip_prefix("MOD ") {
+                        parse_agent_meta(&mut section.meta, "MOD", rest)?;
+                    } else if let Some(rest) = line.strip_prefix("SIZE ") {
+                        section.bytes = rest
+                            .trim()
+                            .parse()
+                            .map_err(|_| format!("invalid blob byte count: {rest}"))?;
+                    } else if let Some(rest) = line.strip_prefix("HASH ") {
+                        section.sha256 = Some(take_quoted(rest.trim())?.0);
+                    } else if let Some(rest) = line.strip_prefix("STORE ") {
+                        payload = Some(BlobPayload::Store(take_quoted(rest.trim())?.0));
+                    } else if let Some(count) = line.strip_prefix("B64 ") {
+                        payload = Some(BlobPayload::Inline(take_counted_block(
+                            &raw, &mut i, "B64", count,
+                        )?));
+                        continue;
+                    } else if line.is_empty() {
+                        i += 1;
+                        continue;
+                    } else {
+                        return Err(format!("unknown blob section line: {line}"));
+                    }
+                    i += 1;
+                }
+                section.payload = payload.ok_or_else(|| {
+                    format!(
+                        "blob section '{}' must carry its bytes with 'B64' or name a 'STORE'",
+                        section.name
+                    )
+                })?;
+                AgentSection::Blob(section)
+            }
+            _ => {
+                let (name, rest) = take_word(header)?;
+                let target = rest
+                    .trim()
+                    .strip_prefix("ON ")
+                    .ok_or_else(|| format!("note '{name}' must name what it is on"))?;
+                let (target, _) = take_quoted(target.trim())?;
+                let mut note = NoteNode::new(name, target, String::new());
+                i += 1;
+                loop {
+                    if i >= raw.len() {
+                        return Err("note is missing 'ENDNOTE'".to_string());
+                    }
+                    let line = raw[i].trim();
+                    if line == "ENDNOTE" {
+                        i += 1;
+                        break;
+                    }
+                    if let Some(rest) = line.strip_prefix("BY ") {
+                        note.author = take_quoted(rest.trim())?.0;
+                    } else if let Some(rest) = line.strip_prefix("CRT ") {
+                        note.created = Some(take_quoted(rest.trim())?.0);
+                    } else if let Some(rest) = line.strip_prefix("RE ") {
+                        note.reply_to = Some(take_quoted(rest.trim())?.0);
+                    } else if let Some(rest) = line.strip_prefix("ST ") {
+                        note.status = take_quoted(rest.trim())?.0;
+                    } else if let Some(count) = line.strip_prefix("TXT ") {
+                        note.text = take_counted_block(&raw, &mut i, "TXT", count)?;
+                        continue;
+                    } else if line.is_empty() {
+                        i += 1;
+                        continue;
+                    } else {
+                        return Err(format!("unknown note line: {line}"));
+                    }
+                    i += 1;
+                }
+                if note.author.is_empty() {
+                    return Err(format!("note '{}' must record who wrote it", note.name));
+                }
+                AgentSection::Note(note)
+            }
+        };
+        out_lines.push(format!("SECREF {}", sections.len()));
+        sections.push(section);
+    }
+    Ok((out_lines.join("\n"), sections))
 }
 
 fn parse_capsule_header(rest: &str, expect_version_keyword: bool) -> Result<Capsule, String> {
@@ -765,6 +1210,9 @@ fn strip_leading_spaces(line: &str, count: usize) -> String {
 
 pub fn parse_agent(source: &str) -> Result<Program, String> {
     let (clean_source, capsules) = extract_agent_capsules(source)?;
+    // Carried sections come out the same way, so their payloads never reach the
+    // line-oriented parser.
+    let (clean_source, sections) = extract_agent_sections(&clean_source)?;
     let source = clean_source.as_str();
     let lines: Vec<String> = source
         .lines()
@@ -933,6 +1381,35 @@ pub fn parse_agent(source: &str) -> Result<Program, String> {
             program
                 .items
                 .push(Item::Test(TestDecl::new(name, xfail, expectations)));
+            continue;
+        }
+        if let Some(reference) = line.strip_prefix("SECREF ") {
+            let section_index: usize = reference
+                .trim()
+                .parse()
+                .map_err(|_| format!("invalid section reference: {line}"))?;
+            let attrs = std::mem::take(&mut pending_attrs);
+            match sections
+                .get(section_index)
+                .ok_or_else(|| format!("section reference out of range: {line}"))?
+            {
+                AgentSection::Data(section) => {
+                    let mut section = section.clone();
+                    section.attrs = attrs;
+                    program.items.push(Item::Data(section));
+                }
+                AgentSection::Blob(section) => {
+                    let mut section = section.clone();
+                    section.attrs = attrs;
+                    program.items.push(Item::Blob(section));
+                }
+                AgentSection::Note(note) => {
+                    let mut note = note.clone();
+                    note.attrs = attrs;
+                    program.items.push(Item::Note(note));
+                }
+            }
+            index += 1;
             continue;
         }
         if let Some(reference) = line.strip_prefix("CAPREF ") {
@@ -1139,6 +1616,32 @@ fn map_human_source(file: &str, source: &str, program: &Program, map: &mut Sourc
                     map.add(&capsule.id, line_span(file, &lines[header_idx]));
                 }
             }
+            // A carried section is addressed by its header line: that is where
+            // an editor or an agent should land when it opens the id.
+            Item::Data(section) => {
+                if let Some(header_idx) = find_line_from(&lines, index, |line| {
+                    line.text.starts_with(&format!("data {} ", section.name))
+                }) {
+                    index = header_idx + 1;
+                    map.add(&section.id, line_span(file, &lines[header_idx]));
+                }
+            }
+            Item::Blob(section) => {
+                if let Some(header_idx) = find_line_from(&lines, index, |line| {
+                    line.text.starts_with(&format!("blob {} ", section.name))
+                }) {
+                    index = header_idx + 1;
+                    map.add(&section.id, line_span(file, &lines[header_idx]));
+                }
+            }
+            Item::Note(note) => {
+                if let Some(header_idx) = find_line_from(&lines, index, |line| {
+                    line.text.starts_with(&format!("note {} on ", note.name))
+                }) {
+                    index = header_idx + 1;
+                    map.add(&note.id, line_span(file, &lines[header_idx]));
+                }
+            }
             Item::Share(share) => {
                 if let Some(line_idx) = find_line_from(&lines, index, |line| {
                     line.text.starts_with(&format!("share {}:", share.name))
@@ -1326,6 +1829,30 @@ fn map_agent_source(file: &str, source: &str, program: &Program, map: &mut Sourc
     let mut index = 0;
     for item in &program.items {
         match item {
+            Item::Data(section) => {
+                if let Some(header_idx) = find_line_from(&lines, index, |line| {
+                    line.text.starts_with(&format!("DATA {} ", section.name))
+                }) {
+                    index = header_idx + 1;
+                    map.add(&section.id, line_span(file, &lines[header_idx]));
+                }
+            }
+            Item::Blob(section) => {
+                if let Some(header_idx) = find_line_from(&lines, index, |line| {
+                    line.text.starts_with(&format!("BLOB {} ", section.name))
+                }) {
+                    index = header_idx + 1;
+                    map.add(&section.id, line_span(file, &lines[header_idx]));
+                }
+            }
+            Item::Note(note) => {
+                if let Some(header_idx) = find_line_from(&lines, index, |line| {
+                    line.text.starts_with(&format!("NOTE {} ON ", note.name))
+                }) {
+                    index = header_idx + 1;
+                    map.add(&note.id, line_span(file, &lines[header_idx]));
+                }
+            }
             Item::Struct(decl) => {
                 let Some(line_idx) = find_line_from(&lines, index, |line| {
                     strip_agent_visibility_marker(&line.text)

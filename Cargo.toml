@@ -2,8 +2,11 @@
 name = "forgentex"
 version = "0.1.0"
 edition = "2021"
-description = "Forgentex first demo CLI: dual syntax, shared AST, patching, diagnostics, and tiny interpreter."
+description = "Forgentex: a dual-syntax language and toolchain for agentic development - one canonical AST read as human .fgx or dense .fgai, with semantic patching, effects, borrow checking, and a C backend."
 license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["language", "compiler", "agents", "transpiler", "toolchain"]
+categories = ["development-tools", "compilers"]
 
 [lib]
 name = "forgentex"

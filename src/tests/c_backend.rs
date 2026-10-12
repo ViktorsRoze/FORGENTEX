@@ -129,3 +129,119 @@ fn c_backend_rejects_review_only_assembly() {
 
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn checked_multiplication_traps_exactly_when_the_product_overflows() {
+    // The emitted guard previously compared `a` against `INT64_MAX / b`
+    // without accounting for the sign of `b`. That trapped on ordinary
+    // products — `2 * -3`, `-2 * -3`, `1000 * -1000` — and could divide by -1,
+    // which is undefined for INT64_MIN. The helper is currently emitted but
+    // unreferenced, so this is a latent defect; the test exists so it stays
+    // correct before anything wires it up.
+    //
+    // Every sign pairing and integer boundary is compared against a 128-bit
+    // reference product, so the guard is checked against the real answer
+    // rather than against a restatement of its own arithmetic.
+    let Some(toolchain) = crate::native_build::detect_toolchain() else {
+        eprintln!("skipping: no host C toolchain");
+        return;
+    };
+
+    let (header, _source) = generate_c_for_project(&manifest_path("examples/packages/codec_app"))
+        .expect("C generation should succeed");
+    assert!(
+        header.contains("fgx_checked_i64_mul"),
+        "the guard should be emitted into the header"
+    );
+
+    let root = std::env::temp_dir().join(format!("forgentex_mulguard_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    // Extract just the guard. The generated header also defines `fgx_trap`
+    // itself, so the whole header cannot be included alongside a stub that
+    // records whether a trap fired.
+    let start = header
+        .find("static inline int64_t fgx_checked_i64_mul")
+        .expect("guard present");
+    let end = header[start..]
+        .find(
+            "
+}
+",
+        )
+        .map(|offset| start + offset + 3)
+        .expect("guard body terminates");
+    fs::write(root.join("guard.h"), &header[start..end]).unwrap();
+
+    // `__int128` is available on the gcc/clang toolchains this suite uses; a
+    // compiler without it simply fails to build and the test reports that.
+    let harness = root.join("mulguard.c");
+    fs::write(
+        &harness,
+        r#"#include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
+static int trapped;
+static void fgx_trap(const char *w) { (void)w; trapped = 1; }
+#include "guard.h"
+static void check(int64_t a, int64_t b) {
+    trapped = 0;
+    __int128 exact = (__int128)a * (__int128)b;
+    int overflows = exact > (__int128)INT64_MAX || exact < (__int128)INT64_MIN;
+    int64_t got = fgx_checked_i64_mul(a, b);
+    if (trapped != overflows) {
+        printf("MISMATCH a=%lld b=%lld trapped=%d expected=%d\n",
+               (long long)a, (long long)b, trapped, overflows);
+        exit(1);
+    }
+    if (!overflows && got != (int64_t)exact) {
+        printf("WRONG a=%lld b=%lld got=%lld\n",
+               (long long)a, (long long)b, (long long)got);
+        exit(1);
+    }
+}
+int main(void) {
+    int64_t vals[] = {0,1,-1,2,-2,3,-3,1000,-1000,
+                      INT64_MAX, INT64_MIN, INT64_MAX/2, INT64_MIN/2,
+                      3037000499LL,-3037000499LL,3037000500LL,-3037000500LL};
+    unsigned n = sizeof(vals)/sizeof(vals[0]);
+    for (unsigned i=0;i<n;i++) for (unsigned j=0;j<n;j++) check(vals[i], vals[j]);
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+
+    let executable = root.join(if cfg!(windows) {
+        "mulguard.exe"
+    } else {
+        "mulguard"
+    });
+    let argv = vec![
+        toolchain.name.clone(),
+        "-std=c11".to_string(),
+        "-O2".to_string(),
+        harness.display().to_string(),
+        "-I".to_string(),
+        root.display().to_string(),
+        "-o".to_string(),
+        executable.display().to_string(),
+    ];
+    let compile =
+        crate::native_build::run_with_path(&argv, std::path::Path::new(&toolchain.name).parent())
+            .expect("failed to invoke the host C compiler");
+    assert!(
+        compile.status.success(),
+        "guard harness failed to compile: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = std::process::Command::new(&executable)
+        .output()
+        .expect("failed to run the guard harness");
+    assert!(
+        run.status.success(),
+        "checked multiplication disagrees with the 128-bit reference:\n{}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+    let _ = fs::remove_dir_all(root);
+}
