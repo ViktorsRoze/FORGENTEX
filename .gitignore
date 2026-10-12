@@ -10,3 +10,8 @@
 
 # Release artifact staging (release-artifacts CI job)
 /dist
+
+# Large media and vendored third-party files are not distributed here.
+# See THIRD-PARTY.md for how to supply them locally.
+/miniaudio.h
+examples/apps/wav_waveform/input/*.wav
