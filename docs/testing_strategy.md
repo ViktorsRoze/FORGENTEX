@@ -21,6 +21,19 @@ If the current shell does not see Cargo on `PATH`, use:
 & "$env:USERPROFILE\.cargo\bin\cargo.exe" test
 ```
 
+On Linux and macOS, the same checks in bash:
+
+```sh
+cargo fmt --check
+cargo clippy -- -D warnings
+cargo test -- --test-threads=1
+scripts/demo.sh
+```
+
+`scripts/check.sh` runs all of these plus `scripts/fuzz.sh`, stopping at the
+first failure. Setting up an Ubuntu host is covered in
+[linux_support.md](linux_support.md).
+
 ## Test Areas
 
 Parser tests:

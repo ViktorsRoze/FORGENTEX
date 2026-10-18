@@ -109,7 +109,7 @@ FIR-blocked until source lowering gains signature and escape-aware ownership.
 capsule ABI now returns the reviewed numeric vector set (`Vec[u8]`, `Vec[i8]`,
 `Vec[u16]`, `Vec[i16]`, `Vec[u32]`, `Vec[i32]`, full-range `Vec[u64]`, `Vec[i64]`,
 `Vec[isize]`, host-range `Vec[usize]`, `Vec[f32]`, `Vec[f64]`) and owned UTF-8
-`str` across C, C++, Rust, and pinned Zig 0.14. One `Vec[Record]` output is also
+`str` across C, C++, Rust, and pinned Zig 0.17. One `Vec[Record]` output is also
 accepted when the named record passes the recursively composed pointer-free
 scalar-leaf `@repr(C)` review. C++ preflight requires explicit
 C linkage for both the return and deallocator symbols. Typed

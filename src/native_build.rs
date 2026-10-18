@@ -15,7 +15,7 @@
 //! pretending the artifact is reproducible across machines.
 
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -91,13 +91,20 @@ pub(crate) const DEFAULT_NATIVE_RUNNER_PROCESS_LIMIT: u32 = 1;
 /// Complete `JOBOBJECT_BASIC_UI_RESTRICTIONS` mask installed on Windows Jobs:
 /// external USER handles, clipboard read/write, system/display settings,
 /// global atoms, desktops, and window-station shutdown are denied.
-#[cfg(windows)]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) const WINDOWS_JOB_UI_RESTRICTIONS: u32 = 0x0000_00ff;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ProcessLimits {
     pub cpu_ms: Option<u64>,
     pub memory_bytes: Option<u64>,
+    /// A Unix data-segment ceiling (`RLIMIT_DATA`), used in place of the
+    /// address-space limit for runners whose runtime reserves far more address
+    /// space than it uses. The CUDA driver reserves tens of GB of virtual
+    /// address space at context creation, so `RLIMIT_AS` would stop every CUDA
+    /// runner before its first kernel; `RLIMIT_DATA` counts only the
+    /// heap and private writable mappings, and so still bounds host memory.
+    pub data_bytes: Option<u64>,
     pub active_processes: Option<u32>,
     pub io_bytes: Option<u64>,
     pub output_bytes: usize,
@@ -108,6 +115,7 @@ impl Default for ProcessLimits {
         Self {
             cpu_ms: None,
             memory_bytes: None,
+            data_bytes: None,
             active_processes: cfg!(windows).then_some(DEFAULT_CONTAINED_PROCESS_LIMIT),
             io_bytes: None,
             output_bytes: MAX_CONTAINED_OUTPUT_BYTES,
@@ -222,6 +230,396 @@ pub fn detect_zig_toolchain() -> Option<Toolchain> {
         }
     }
     None
+}
+
+/// The user's home directory, where well-known toolchain managers live.
+pub(crate) fn user_home() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("USERPROFILE").map(PathBuf::from)
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
+}
+
+fn zig_toolchain_at(name: &str) -> Option<Toolchain> {
+    probe_zig_version(name).map(|version| Toolchain {
+        name: name.to_string(),
+        version,
+    })
+}
+
+fn rust_toolchain_at(name: &str) -> Option<Toolchain> {
+    probe_version(name).map(|version| Toolchain {
+        name: name.to_string(),
+        version,
+    })
+}
+
+/// Zig install locations beyond `PATH`: the snap wrapper, and version-named
+/// tarball directories (`zig-*`) under `/opt` and the user's local prefixes.
+/// This is the Phase 2 discovery surface documented in
+/// `docs/toolchain_versioning.md`; it is scanned only when a `PATH` Zig does
+/// not already satisfy the request.
+fn zig_well_known_paths() -> Vec<String> {
+    let mut paths = vec!["/snap/bin/zig".to_string()];
+    let mut roots = vec![PathBuf::from("/opt")];
+    if let Some(home) = user_home() {
+        roots.push(home.join(".local").join("opt"));
+        roots.push(home);
+    }
+    for root in roots {
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if !entry.file_name().to_string_lossy().starts_with("zig") {
+                continue;
+            }
+            let candidate = entry.path().join("zig");
+            if candidate.is_file() {
+                paths.push(candidate.display().to_string());
+            }
+        }
+    }
+    paths
+}
+
+/// Rust toolchains beyond `PATH`: the rustup-managed toolchains and the
+/// `~/.cargo/bin` default. Scanned only when a `PATH` `rustc` is missing or
+/// below the minimum supported version.
+fn rust_well_known_paths() -> Vec<String> {
+    let mut paths = Vec::new();
+    if let Some(home) = user_home() {
+        if let Ok(entries) = std::fs::read_dir(home.join(".rustup").join("toolchains")) {
+            for entry in entries.flatten() {
+                let rustc = entry.path().join("bin").join("rustc");
+                if rustc.is_file() {
+                    paths.push(rustc.display().to_string());
+                }
+            }
+        }
+        let cargo_rustc = home.join(".cargo").join("bin").join("rustc");
+        if cargo_rustc.is_file() {
+            paths.push(cargo_rustc.display().to_string());
+        }
+    }
+    paths
+}
+
+/// Pick the highest-version candidate from `candidates` that satisfies `want`,
+/// or, when none do, the first candidate seen so the caller can report what it
+/// found against what it needed.
+pub(crate) fn choose_toolchain(
+    candidates: Vec<Toolchain>,
+    want: &crate::toolchain_version::VersionConstraint,
+) -> Option<Toolchain> {
+    use crate::toolchain_version::{select_highest, Version};
+    let versions: Vec<Version> = candidates
+        .iter()
+        .map(|toolchain| Version::extract(&toolchain.version).unwrap_or(Version::new(0, 0, 0)))
+        .collect();
+    if let Some(index) = select_highest(&versions, want) {
+        return candidates.into_iter().nth(index);
+    }
+    candidates.into_iter().next()
+}
+
+/// Resolve a Zig toolchain satisfying `want` — a capsule's declared series, so
+/// that several Zigs can be installed side by side and each capsule gets one
+/// of its own series. `$ZIG` and then the `PATH` `zig` are preferred and used
+/// without scanning when they satisfy the request; otherwise the well-known
+/// locations are searched for the newest satisfying version. When nothing
+/// satisfies it, the preferred toolchain is returned so validation reports
+/// `found X, need Y`.
+pub fn resolve_zig_toolchain(
+    want: &crate::toolchain_version::VersionConstraint,
+) -> Option<Toolchain> {
+    use crate::toolchain_version::Version;
+    let satisfies = |toolchain: &Toolchain| {
+        Version::extract(&toolchain.version).is_some_and(|version| want.matches(&version))
+    };
+    let explicit = std::env::var("ZIG")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .and_then(|value| zig_toolchain_at(value.trim()));
+    if let Some(found) = explicit.as_ref().filter(|found| satisfies(found)) {
+        return Some(found.clone());
+    }
+    let path_zig = zig_toolchain_at("zig");
+    if let Some(found) = path_zig.as_ref().filter(|found| satisfies(found)) {
+        return Some(found.clone());
+    }
+    let mut candidates: Vec<Toolchain> = explicit.into_iter().chain(path_zig).collect();
+    for name in zig_well_known_paths() {
+        if let Some(toolchain) = zig_toolchain_at(&name) {
+            candidates.push(toolchain);
+        }
+    }
+    choose_toolchain(candidates, want)
+}
+
+/// Resolve a Rust toolchain satisfying `want` (the minimum supported version).
+/// `$RUSTC` and a satisfying `PATH` `rustc` win without scanning; only a
+/// too-old or missing default searches the rustup toolchains.
+pub fn resolve_rust_toolchain(
+    want: &crate::toolchain_version::VersionConstraint,
+) -> Option<Toolchain> {
+    use crate::toolchain_version::Version;
+    if let Ok(explicit) = std::env::var("RUSTC") {
+        if !explicit.trim().is_empty() {
+            return rust_toolchain_at(explicit.trim());
+        }
+    }
+    let path_rustc = rust_toolchain_at("rustc");
+    if let Some(found) = &path_rustc {
+        if Version::extract(&found.version).is_some_and(|version| want.matches(&version)) {
+            return path_rustc;
+        }
+    }
+    let mut candidates: Vec<Toolchain> = path_rustc.into_iter().collect();
+    for name in rust_well_known_paths() {
+        if let Some(toolchain) = rust_toolchain_at(&name) {
+            candidates.push(toolchain);
+        }
+    }
+    choose_toolchain(candidates, want)
+}
+
+pub(crate) fn dedup_toolchains(list: Vec<Toolchain>) -> Vec<Toolchain> {
+    let mut out: Vec<Toolchain> = Vec::new();
+    for toolchain in list {
+        if !out
+            .iter()
+            .any(|existing| existing.version == toolchain.version)
+        {
+            out.push(toolchain);
+        }
+    }
+    out
+}
+
+/// Every Zig toolchain discoverable on this host — `$ZIG`, `PATH`, and the
+/// well-known locations — deduplicated by version. Used by `fgx doctor` to show
+/// the full discovery surface rather than only the one that would be selected.
+pub fn discover_zig_toolchains() -> Vec<Toolchain> {
+    let mut names = Vec::new();
+    if let Ok(explicit) = std::env::var("ZIG") {
+        if !explicit.trim().is_empty() {
+            names.push(explicit.trim().to_string());
+        }
+    }
+    names.push("zig".to_string());
+    names.extend(zig_well_known_paths());
+    dedup_toolchains(
+        names
+            .iter()
+            .filter_map(|name| zig_toolchain_at(name))
+            .collect(),
+    )
+}
+
+/// Every Rust toolchain discoverable on this host, deduplicated by version.
+pub fn discover_rust_toolchains() -> Vec<Toolchain> {
+    let mut names = Vec::new();
+    if let Ok(explicit) = std::env::var("RUSTC") {
+        if !explicit.trim().is_empty() {
+            names.push(explicit.trim().to_string());
+        }
+    }
+    names.push("rustc".to_string());
+    names.extend(rust_well_known_paths());
+    dedup_toolchains(
+        names
+            .iter()
+            .filter_map(|name| rust_toolchain_at(name))
+            .collect(),
+    )
+}
+
+/// Read an nvcc banner's exact release (`Cuda compilation tools, release 13.2,
+/// V13.2.51` -> `13.2.51`). nvcc's first line names no version, so the generic
+/// first-line probe would lose it.
+fn probe_nvcc_version(name: &str) -> Option<String> {
+    let output = Command::new(name).arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let release = text.lines().find(|line| line.contains("release"))?;
+    let exact = release
+        .split(", V")
+        .nth(1)
+        .map(|rest| rest.split_whitespace().next().unwrap_or(rest).to_string());
+    exact.or_else(|| {
+        crate::toolchain_version::Version::extract(release).map(|version| version.to_string())
+    })
+}
+
+fn cuda_toolchain_at(name: &str) -> Option<Toolchain> {
+    probe_nvcc_version(name).map(|version| Toolchain {
+        name: name.to_string(),
+        version,
+    })
+}
+
+/// CUDA toolkits beyond `PATH`: `$CUDA_HOME` and `$CUDA_PATH`, NVIDIA's
+/// versioned installs (`/usr/local/cuda-*`, newest first) and the
+/// `/usr/local/cuda` alias, `/opt/cuda`, and Debian/Ubuntu's
+/// `nvidia-cuda-toolkit`. That package is used through its `/usr/bin/nvcc`
+/// wrapper: its real nvcc's directory lacks `ptxas` and the other companion
+/// tools, which live in `/usr/bin`, and an NVIDIA toolkit earlier on `PATH`
+/// would otherwise supply mismatched ones. Compiling with `/usr/bin` first
+/// keeps the package's own tools, and the wrapper picks a host g++ the package
+/// supports.
+fn cuda_well_known_paths() -> Vec<String> {
+    let mut paths = Vec::new();
+    for variable in ["CUDA_HOME", "CUDA_PATH"] {
+        if let Some(root) = std::env::var_os(variable).filter(|value| !value.is_empty()) {
+            paths.push(PathBuf::from(root).join("bin").join("nvcc"));
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir("/usr/local") {
+        let mut versioned: Vec<PathBuf> = entries
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("cuda-"))
+            .map(|entry| entry.path().join("bin").join("nvcc"))
+            .collect();
+        versioned.sort();
+        versioned.reverse();
+        paths.extend(versioned);
+    }
+    for root in ["/usr/local/cuda", "/opt/cuda"] {
+        paths.push(Path::new(root).join("bin").join("nvcc"));
+    }
+    paths.push(PathBuf::from("/usr/bin/nvcc"));
+    paths
+        .into_iter()
+        .filter(|path| path.is_file())
+        .map(|path| path.display().to_string())
+        .collect()
+}
+
+/// Resolve a CUDA toolkit (its `nvcc`) satisfying `want` — a capsule's
+/// declared toolkit, so that several toolkits can be installed side by side
+/// and each capsule compiles with one it was written for. `$NVCC` and then the
+/// `PATH` `nvcc` are preferred and used without scanning when they satisfy the
+/// request; otherwise the well-known install locations are searched for the
+/// newest satisfying release.
+pub fn resolve_cuda_toolchain(
+    want: &crate::toolchain_version::VersionConstraint,
+) -> Option<Toolchain> {
+    use crate::toolchain_version::Version;
+    let satisfies = |toolchain: &Toolchain| {
+        Version::extract(&toolchain.version).is_some_and(|version| want.matches(&version))
+    };
+    let explicit = std::env::var("NVCC")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .and_then(|value| cuda_toolchain_at(value.trim()));
+    if let Some(found) = explicit.as_ref().filter(|found| satisfies(found)) {
+        return Some(found.clone());
+    }
+    let path_nvcc = cuda_toolchain_at("nvcc");
+    if let Some(found) = path_nvcc.as_ref().filter(|found| satisfies(found)) {
+        return Some(found.clone());
+    }
+    let mut candidates: Vec<Toolchain> = explicit.into_iter().chain(path_nvcc).collect();
+    for name in cuda_well_known_paths() {
+        if let Some(toolchain) = cuda_toolchain_at(&name) {
+            candidates.push(toolchain);
+        }
+    }
+    // A toolkit older than the host's compiler or C library cannot build at
+    // all (CUDA 12.8's math headers conflict with glibc 2.43), so among the
+    // satisfying toolkits, newest first, take the first that builds here.
+    let mut satisfying: Vec<&Toolchain> =
+        candidates.iter().filter(|found| satisfies(found)).collect();
+    satisfying.sort_by_key(|found| std::cmp::Reverse(Version::extract(&found.version)));
+    if let Some(found) = satisfying
+        .iter()
+        .find(|found| cuda_toolkit_builds_here(&found.name))
+    {
+        return Some((*found).clone());
+    }
+    choose_toolchain(candidates, want)
+}
+
+/// Whether the CUDA toolkit at `nvcc` can compile CUDA C++ against this host's
+/// C++ compiler and C library. Checked once per toolkit and process by
+/// compiling a kernel that pulls in the CUDA runtime and math headers, which
+/// is where toolkit/host mismatches surface. A probe that cannot run counts as
+/// a pass, so the real build reports the problem.
+pub fn cuda_toolkit_builds_here(nvcc: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static RESULTS: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    let results = RESULTS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(known) = results.lock().ok().and_then(|map| map.get(nvcc).copied()) {
+        return known;
+    }
+    let builds = probe_cuda_host_build(nvcc);
+    if let Ok(mut map) = results.lock() {
+        map.insert(nvcc.to_string(), builds);
+    }
+    builds
+}
+
+fn probe_cuda_host_build(nvcc: &str) -> bool {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static PROBES: AtomicUsize = AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "forgentex-cuda-probe-{}-{}",
+        std::process::id(),
+        PROBES.fetch_add(1, Ordering::Relaxed)
+    ));
+    if std::fs::create_dir_all(&dir).is_err() {
+        return true;
+    }
+    let source = dir.join("probe.cu");
+    let written = std::fs::write(
+        &source,
+        "#include <cuda_runtime.h>\n#include <cmath>\n__global__ void probe(float *x) { x[0] = sinf(x[0]); }\n",
+    );
+    let builds = written.is_err()
+        || run_with_path_timeout_limited(
+            &[
+                nvcc.to_string(),
+                "-std=c++17".to_string(),
+                "-c".to_string(),
+                source.display().to_string(),
+                "-o".to_string(),
+                dir.join("probe.o").display().to_string(),
+            ],
+            Path::new(nvcc).parent(),
+            Duration::from_secs(60),
+            ProcessLimits::default(),
+        )
+        .map_or(true, |run| {
+            run.is_some_and(|run| run.output.status.success())
+        });
+    let _ = std::fs::remove_dir_all(&dir);
+    builds
+}
+
+/// Every CUDA toolkit discoverable on this host, deduplicated by release.
+pub fn discover_cuda_toolchains() -> Vec<Toolchain> {
+    let mut names = Vec::new();
+    if let Ok(explicit) = std::env::var("NVCC") {
+        if !explicit.trim().is_empty() {
+            names.push(explicit.trim().to_string());
+        }
+    }
+    names.push("nvcc".to_string());
+    names.extend(cuda_well_known_paths());
+    dedup_toolchains(
+        names
+            .iter()
+            .filter_map(|name| cuda_toolchain_at(name))
+            .collect(),
+    )
 }
 
 /// Run a tool, optionally prepending `path_dir` to the child's PATH. This is
@@ -561,6 +959,31 @@ pub(crate) fn run_with_path_timeout_limited_isolated(
         Some(working_directory),
         true,
         None,
+        Some(input),
+        Some(timeout),
+        limits,
+    )
+}
+
+/// Run a native capsule runner like [`run_with_path_timeout_limited_isolated`],
+/// but with an explicit environment instead of an empty one: the child sees
+/// exactly `environment` plus `path_dir` as PATH. CUDA runners use this to pass
+/// the device selection and JIT-cache policy the CUDA driver reads.
+pub(crate) fn run_with_path_timeout_limited_isolated_env(
+    argv: &[String],
+    path_dir: Option<&Path>,
+    working_directory: &Path,
+    environment: &[(String, String)],
+    input: &[u8],
+    timeout: Duration,
+    limits: ProcessLimits,
+) -> std::io::Result<Option<ContainedRun>> {
+    run_with_path_containment(
+        argv,
+        path_dir,
+        Some(working_directory),
+        true,
+        Some(environment),
         Some(input),
         Some(timeout),
         limits,
@@ -1190,7 +1613,7 @@ fn windows_anonymous_pipe(
     })
 }
 
-#[cfg(windows)]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) const NATIVE_APPCONTAINER_NAME: &str = "Forgentex.NativeRunner.0_1";
 
 #[cfg(windows)]
@@ -1968,7 +2391,7 @@ impl Drop for ProcThreadAttributeListGuard {
 fn configure_process_tree(command: &mut Command, limits: ProcessLimits) -> std::io::Result<()> {
     use std::os::unix::process::CommandExt;
     command.process_group(0);
-    if limits.cpu_ms.is_some() || limits.memory_bytes.is_some() {
+    if limits.cpu_ms.is_some() || limits.memory_bytes.is_some() || limits.data_bytes.is_some() {
         // SAFETY: the closure calls only async-signal-safe setrlimit between
         // fork and exec and captures plain integer values.
         unsafe {
@@ -1989,6 +2412,7 @@ fn apply_unix_limits(limits: ProcessLimits) -> std::io::Result<()> {
         fn setrlimit(resource: i32, limit: *const RLimit) -> i32;
     }
     const RLIMIT_CPU: i32 = 0;
+    const RLIMIT_DATA: i32 = 2;
     #[cfg(target_os = "macos")]
     const RLIMIT_AS: i32 = 5;
     #[cfg(not(target_os = "macos"))]
@@ -2016,6 +2440,12 @@ fn apply_unix_limits(limits: ProcessLimits) -> std::io::Result<()> {
         set(
             RLIMIT_AS,
             usize::try_from(memory_bytes).unwrap_or(usize::MAX),
+        )?;
+    }
+    if let Some(data_bytes) = limits.data_bytes {
+        set(
+            RLIMIT_DATA,
+            usize::try_from(data_bytes).unwrap_or(usize::MAX),
         )?;
     }
     Ok(())

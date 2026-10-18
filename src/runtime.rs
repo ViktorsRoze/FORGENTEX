@@ -66,6 +66,20 @@ pub fn catalog() -> Vec<RuntimeSpec> {
             ecosystems: &["go"],
             lock_files: &["go.sum"],
         },
+        RuntimeSpec {
+            language: "julia",
+            display: "Julia",
+            class: "managed",
+            ecosystems: &["julia"],
+            lock_files: &["Manifest.toml"],
+        },
+        RuntimeSpec {
+            language: "moonbit",
+            display: "MoonBit (WebAssembly, sandboxed)",
+            class: "managed",
+            ecosystems: &["mooncakes"],
+            lock_files: &[],
+        },
     ]
 }
 

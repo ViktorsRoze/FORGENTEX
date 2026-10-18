@@ -20,11 +20,25 @@ fn doctor_report_has_stable_machine_and_human_shapes() {
     assert!(json.starts_with("{\n  \"schema\": \"forgentex.doctor.v1\""));
     assert!(json.contains("\"installed_on_path\":"));
     assert!(json.contains("\"native_c_ready\":"));
+    assert!(json.contains("\"discovered_toolchains\": ["));
+    assert!(json.contains("\"gpus\": ["));
     assert!(json.ends_with("}\n"));
+    // Every discovered toolchain carries a version and a consistent reviewed
+    // flag (languages limited to the native ones Phase 2 discovers).
+    for toolchain in &report.discovered_toolchains {
+        assert!(!toolchain.version.is_empty());
+        assert!(matches!(
+            toolchain.language.as_str(),
+            "zig" | "rust" | "cuda" | "julia" | "moonbit"
+        ));
+    }
 
     let text = report.to_text();
     assert!(text.starts_with("Forgentex doctor\n"));
     assert!(text.contains("interpreter=ready"));
+    for gpu in &report.gpus {
+        assert!(text.contains(&format!("gpu: {} {}", gpu.index, gpu.name)));
+    }
 }
 
 #[test]

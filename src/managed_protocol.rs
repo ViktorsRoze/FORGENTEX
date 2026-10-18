@@ -294,3 +294,268 @@ pub fn dotnet_prelude() -> &'static str {
 pub fn dotnet_emit(nonce: &str, expression: &str) -> String {
     format!("_fgxResult.WriteLine(\"{nonce} R \" + {expression}); _fgxResult.Flush();")
 }
+
+/// The Julia prelude, at top level before the body. `redirect_stdout` rebinds
+/// what `print` and `println` write to, so the body's printing — including at
+/// definition time — becomes stderr diagnostics.
+pub fn julia_prelude() -> &'static str {
+    "const _fgx_result = stdout\nredirect_stdout(stderr)\n"
+}
+
+pub fn julia_emit(nonce: &str, expression: &str) -> String {
+    format!(
+        "print(_fgx_result, \"{nonce} R \", FgxWire.json({expression}), \"\\n\"); flush(_fgx_result)"
+    )
+}
+
+/// MoonBit has one output channel inside its Wasm sandbox, so the body's
+/// `println` lines stay untagged and `split` files them as diagnostics. The
+/// nonce reaches the program as the first request line, which keeps the
+/// compiled module identical across calls (and cacheable).
+pub fn moonbit_emit(nonce_variable: &str, expression: &str) -> String {
+    format!("println({nonce_variable} + \" R \" + {expression})")
+}
+
+/// One fixture case of a managed capsule run.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ManagedCase {
+    pub inputs: Vec<String>,
+    pub output: String,
+    pub expected: String,
+    pub pass: bool,
+}
+
+/// The fixture-run report the newer managed bridges share (`fgx capsule-run
+/// --julia` / `--moonbit`): the same fields and JSON shape as the Python
+/// bridge's `forgentex.python_run.v1`, under each language's own schema.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ManagedCapsuleRun {
+    pub schema: String,
+    /// Display name for the text report, e.g. `julia`.
+    pub language: String,
+    pub file: String,
+    pub capsule: String,
+    pub runtime: Option<String>,
+    pub entry: Option<String>,
+    pub inputs: Vec<(String, String)>,
+    pub outputs: Vec<(String, String)>,
+    pub deps: Vec<String>,
+    pub effects: Vec<String>,
+    pub sandbox_decision: String,
+    pub body_tokens: usize,
+    pub boundary_tokens: usize,
+    pub status: String,
+    pub cases: Vec<ManagedCase>,
+    pub passed: usize,
+    pub total: usize,
+    pub message: Option<String>,
+}
+
+impl ManagedCapsuleRun {
+    /// A report for `capsule` before anything has run.
+    pub fn new(schema: &str, language: &str, file: &str, capsule: &crate::ast::Capsule) -> Self {
+        let bindings = |list: &[crate::ast::CapsuleBinding]| {
+            list.iter()
+                .map(|binding| (binding.name.clone(), binding.ty.to_agent()))
+                .collect()
+        };
+        ManagedCapsuleRun {
+            schema: schema.to_string(),
+            language: language.to_string(),
+            file: file.to_string(),
+            capsule: capsule.name.clone(),
+            runtime: None,
+            entry: None,
+            inputs: bindings(&capsule.inputs),
+            outputs: bindings(&capsule.outputs),
+            deps: capsule.deps.iter().map(|dep| dep.source.clone()).collect(),
+            effects: capsule.effects.clone(),
+            sandbox_decision: if crate::sandbox::is_approved(capsule) {
+                "allow"
+            } else {
+                "deny"
+            }
+            .to_string(),
+            body_tokens: crate::tokens::estimate(&capsule.code.join("\n")),
+            boundary_tokens: crate::tokens::estimate(&crate::capsule_tokens::boundary_card(
+                capsule,
+            )),
+            status: "ok".to_string(),
+            cases: Vec::new(),
+            passed: 0,
+            total: capsule.fixtures.len(),
+            message: None,
+        }
+    }
+
+    /// Stop with `status` and an explanatory message.
+    pub fn stop(mut self, status: &str, message: impl Into<String>) -> Self {
+        self.status = status.to_string();
+        self.message = Some(message.into());
+        self
+    }
+
+    /// Record one fixture's tagged result against its expectation.
+    pub fn record(&mut self, fixture: &crate::ast::CapsuleFixture, got: String) {
+        let expected = fixture.outputs.first();
+        let pass = expected.is_some_and(|value| fixture_matches(value, &got));
+        if pass {
+            self.passed += 1;
+        }
+        self.cases.push(ManagedCase {
+            inputs: fixture
+                .inputs
+                .iter()
+                .map(|value| value.to_literal())
+                .collect(),
+            output: got,
+            expected: expected.map(|value| value.to_literal()).unwrap_or_default(),
+            pass,
+        });
+    }
+
+    /// `mismatch` when every fixture ran but not all matched.
+    pub fn finish(mut self) -> Self {
+        if self.status == "ok" && self.passed != self.total {
+            self.status = "mismatch".to_string();
+        }
+        self
+    }
+
+    pub fn is_success(&self) -> bool {
+        self.status == "ok" || self.status == "runtime_unavailable"
+    }
+
+    pub fn to_text(&self) -> String {
+        let line = |label: &str, bindings: &[(String, String)]| {
+            let rendered = bindings
+                .iter()
+                .map(|(name, ty)| format!("{name}:{ty}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("  {label}: [{rendered}]\n")
+        };
+        let mut out = format!(
+            "Forgentex {} capsule run\nschema={} file={} capsule={} status={}\n",
+            self.language, self.schema, self.file, self.capsule, self.status
+        );
+        if let Some(runtime) = &self.runtime {
+            out.push_str(&format!("  runtime: {runtime}\n"));
+        }
+        if let Some(entry) = &self.entry {
+            out.push_str(&format!("  entry: {entry}()\n"));
+        }
+        out.push_str(&line("inputs", &self.inputs));
+        out.push_str(&line("outputs", &self.outputs));
+        out.push_str(&format!(
+            "  effects=[{}] sandbox={} deps={}\n",
+            self.effects.join(", "),
+            self.sandbox_decision,
+            self.deps.len()
+        ));
+        out.push_str(&format!(
+            "  tokens: body={} boundary={} (agent pays the boundary, not the body)\n",
+            self.body_tokens, self.boundary_tokens
+        ));
+        for case in &self.cases {
+            out.push_str(&format!(
+                "  {} {}({}) -> {} (expected {})\n",
+                if case.pass { "pass" } else { "FAIL" },
+                self.entry.as_deref().unwrap_or("f"),
+                case.inputs.join(", "),
+                case.output,
+                case.expected
+            ));
+        }
+        out.push_str(&format!(
+            "  {}/{} fixtures passed\n",
+            self.passed, self.total
+        ));
+        if let Some(message) = &self.message {
+            out.push_str(&format!("  note: {message}\n"));
+        }
+        out
+    }
+
+    pub fn to_json(&self) -> String {
+        use crate::json;
+        let cases = self
+            .cases
+            .iter()
+            .map(|case| {
+                format!(
+                    "{{ \"inputs\": [{}], \"output\": {}, \"expected\": {}, \"pass\": {} }}",
+                    case.inputs
+                        .iter()
+                        .map(|value| json::string(value))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    json::string(&case.output),
+                    json::string(&case.expected),
+                    case.pass
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",\n    ");
+        format!(
+            "{{\n  \"schema\": {},\n  \"file\": {},\n  \"capsule\": {},\n  \"runtime\": {},\n  \"entry\": {},\n  \"effects\": {},\n  \"sandbox_decision\": {},\n  \"deps\": {},\n  \"body_tokens\": {},\n  \"boundary_tokens\": {},\n  \"status\": {},\n  \"cases\": [\n    {}\n  ],\n  \"passed\": {},\n  \"total\": {},\n  \"message\": {}\n}}",
+            json::string(&self.schema),
+            json::string(&self.file),
+            json::string(&self.capsule),
+            json::opt_string(self.runtime.as_deref()),
+            json::opt_string(self.entry.as_deref()),
+            json::string_array(&self.effects),
+            json::string(&self.sandbox_decision),
+            self.deps.len(),
+            self.body_tokens,
+            self.boundary_tokens,
+            json::string(&self.status),
+            cases,
+            self.passed,
+            self.total,
+            json::opt_string(self.message.as_deref()),
+        )
+    }
+}
+
+/// Whether a capsule's JSON result matches a fixture's expected value, with
+/// the same tolerances as the Python bridge: integers within 0.5, floats
+/// within 1e-9, booleans exactly, strings with their JSON quotes dropped.
+pub fn fixture_matches(expected: &crate::ast::CapsuleValue, got: &str) -> bool {
+    use crate::ast::CapsuleValue;
+    let got = got.trim();
+    match expected {
+        CapsuleValue::Int(value) => got
+            .parse::<f64>()
+            .is_ok_and(|parsed| (parsed - *value as f64).abs() < 0.5),
+        CapsuleValue::UInt(value) => got.parse::<u64>().is_ok_and(|parsed| parsed == *value),
+        CapsuleValue::Float(value) => got
+            .parse::<f64>()
+            .is_ok_and(|parsed| (parsed - *value).abs() < 1e-9),
+        CapsuleValue::Bool(value) => got == if *value { "true" } else { "false" },
+        CapsuleValue::Str(value) => got.trim_matches('"') == value,
+    }
+}
+
+/// A fixture's inputs as the JSON argument array the live path also sends.
+pub fn fixture_request(values: &[crate::ast::CapsuleValue]) -> String {
+    format!(
+        "[{}]",
+        values
+            .iter()
+            .map(|value| value.to_literal())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// The entry function a body defines: the one named like the capsule when the
+/// body defines it, otherwise the first one `find` reports. Helper functions
+/// may then come before the boundary function.
+pub fn choose_entry(capsule: &str, defined: &[String]) -> Option<String> {
+    defined
+        .iter()
+        .find(|name| name.as_str() == capsule)
+        .or_else(|| defined.first())
+        .cloned()
+}

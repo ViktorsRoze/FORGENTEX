@@ -1,0 +1,36 @@
+# Julia for numerical work: a typed function run for real on the host Julia.
+#
+#   fgx capsule-run examples/julia/norm.fgx --julia
+#
+# Forgentex generates a driver around this body: it decodes the JSON
+# arguments, converts each to its declared type (so `x::Vector{Float64}`
+# dispatches), calls the function named like the capsule, and returns the
+# result as JSON. `version "1.10"` follows Julia's [compat] rules: Julia 1.10
+# or any later 1.x. The fixtures below are scalar; the live call takes a slice.
+
+foreign rms_norm julia version "1.10" effects [alloc]:
+    input x: &[f64]
+    input eps: f64
+    output norm: f64
+    sandbox "fs.none"
+    code:
+        using LinearAlgebra
+
+        square(v) = v * v
+
+        function rms_norm(x::Vector{Float64}, eps::Float64)::Float64
+            sqrt(sum(square, x) / length(x) + eps)
+        end
+
+foreign fahrenheit julia version "1.10" effects [alloc]:
+    input celsius: f64
+    output fahrenheit: f64
+    sandbox "fs.none"
+    mock 100.0 -> 212.0
+    mock 0.0 -> 32.0
+    mock -40.0 -> -40.0
+    code:
+        fahrenheit(c::Float64) = c * 9 / 5 + 32
+
+fn signal_level(samples: &[f64]) -> f64 effects [alloc]:
+    return rms_norm(samples, 0.0)

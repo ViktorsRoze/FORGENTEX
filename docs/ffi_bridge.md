@@ -33,7 +33,7 @@ Forgentex-owned scalar slices or immutable/mutable reviewed-record slices are ca
 by a running Forgentex program. Rust scalar, scalar-slice, immutable
 or mutable record-slice, and restricted struct boundaries are live through a
 public, no-mangle `extern "C"` function. Numeric scalar, scalar-slice, and
-reviewed-record-slice or restricted struct Zig 0.14 boundaries are live through an explicit
+reviewed-record-slice or restricted struct Zig 0.17 boundaries are live through an explicit
 `pub export fn`:
 
 ```text
@@ -510,7 +510,7 @@ or runs. This moves the effects/sandbox/lock spine from review-time to
 
 - **Language:** C directly, C++ with an explicit `extern "C"` export, Rust
   scalar/slice/struct live calls with an explicit public no-mangle C ABI export,
-  and pinned Zig 0.14 numeric scalar/slice/struct/owned-vector calls through `pub export fn`.
+  and pinned Zig 0.17 numeric scalar/slice/struct/owned-vector calls through `pub export fn`.
   Another native capsule still produces the plan and reports
   `execution_unsupported_in_slice`.
 - **Boundary:** C/C++/Rust/Zig scalar inputs/outputs, borrowed UTF-8 `str`,

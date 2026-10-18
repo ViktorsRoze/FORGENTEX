@@ -656,10 +656,20 @@ fn capsule_calls_json(calls: &[CapsuleCall]) -> String {
                 .as_ref()
                 .map(|receipt| {
                     format!(
-                        ", \"native\": {{\"schema\": {}, \"boundary_hash\": {}, \"toolchain\": {}, \"duration_ms\": {}, \"wall_limit_ms\": {}, \"wall_limit_source\": {}, \"compile_wall_limit_ms\": {}, \"compile_containment\": {}, \"borrowed_input_bytes\": {}, \"owned_output_bytes\": {}, \"artifact\": {}, \"containment\": {}, \"cpu_limit_ms\": {}, \"cpu_limit_source\": {}, \"memory_limit_bytes\": {}, \"memory_limit_source\": {}, \"peak_tree_memory_bytes\": {}, \"process_limit\": {}, \"process_limit_source\": {}, \"peak_tree_processes\": {}, \"output_limit_bytes\": {}, \"output_limit_source\": {}, \"stdout_bytes\": {}, \"stderr_bytes\": {}, \"runner_reused\": {}, \"runner_artifact_sha256\": {}, \"runner_cache_status\": {}, \"runner_input_transport\": {}, \"runner_execution_model\": {}, \"runner_environment_policy\": {}, \"runner_working_directory_policy\": {}, \"runner_scratch_access_policy\": {}, \"windows_ui_restrictions\": {}, \"ui_isolation_source\": {}, \"windows_restricted_token\": {}, \"windows_restricting_sid_count\": {}, \"windows_integrity_level\": {}, \"windows_appcontainer\": {}, \"windows_appcontainer_capability_count\": {}, \"windows_appcontainer_profile\": {}, \"runner_process_identity_policy\": {}, \"runner_capability_profile\": {}, \"filesystem_isolation\": {}, \"network_isolation\": {}, \"io_limit_bytes\": {}, \"io_limit_source\": {}, \"job_read_transfer_bytes\": {}, \"job_write_transfer_bytes\": {}, \"job_other_transfer_bytes\": {}}}",
+                        ", \"native\": {{\"schema\": {}, \"boundary_hash\": {}, \"toolchain\": {}, \"toolchain_semver\": {}, \"toolchain_requirement\": {}, \"duration_ms\": {}, \"wall_limit_ms\": {}, \"wall_limit_source\": {}, \"compile_wall_limit_ms\": {}, \"compile_containment\": {}, \"borrowed_input_bytes\": {}, \"owned_output_bytes\": {}, \"artifact\": {}, \"containment\": {}, \"cpu_limit_ms\": {}, \"cpu_limit_source\": {}, \"memory_limit_bytes\": {}, \"memory_limit_source\": {}, \"peak_tree_memory_bytes\": {}, \"process_limit\": {}, \"process_limit_source\": {}, \"peak_tree_processes\": {}, \"output_limit_bytes\": {}, \"output_limit_source\": {}, \"stdout_bytes\": {}, \"stderr_bytes\": {}, \"runner_reused\": {}, \"runner_artifact_sha256\": {}, \"runner_cache_status\": {}, \"runner_input_transport\": {}, \"runner_execution_model\": {}, \"runner_environment_policy\": {}, \"runner_working_directory_policy\": {}, \"runner_scratch_access_policy\": {}, \"windows_ui_restrictions\": {}, \"ui_isolation_source\": {}, \"windows_restricted_token\": {}, \"windows_restricting_sid_count\": {}, \"windows_integrity_level\": {}, \"windows_appcontainer\": {}, \"windows_appcontainer_capability_count\": {}, \"windows_appcontainer_profile\": {}, \"runner_process_identity_policy\": {}, \"runner_capability_profile\": {}, \"filesystem_isolation\": {}, \"network_isolation\": {}, \"io_limit_bytes\": {}, \"io_limit_source\": {}, \"job_read_transfer_bytes\": {}, \"job_write_transfer_bytes\": {}, \"job_other_transfer_bytes\": {}, \"gpu\": {}}}",
                         quoted_json(&receipt.schema),
                         quoted_json(&receipt.boundary_hash),
                         quoted_json(&receipt.toolchain),
+                        receipt
+                            .toolchain_semver
+                            .as_deref()
+                            .map(quoted_json)
+                            .unwrap_or_else(|| "null".to_string()),
+                        receipt
+                            .toolchain_requirement
+                            .as_deref()
+                            .map(quoted_json)
+                            .unwrap_or_else(|| "null".to_string()),
                         receipt.duration_ms,
                         receipt
                             .wall_limit_ms
@@ -721,7 +731,18 @@ fn capsule_calls_json(calls: &[CapsuleCall]) -> String {
                         quoted_json(&receipt.io_limit_source),
                         receipt.job_read_transfer_bytes.map(|value| value.to_string()).unwrap_or_else(|| "null".to_string()),
                         receipt.job_write_transfer_bytes.map(|value| value.to_string()).unwrap_or_else(|| "null".to_string()),
-                        receipt.job_other_transfer_bytes.map(|value| value.to_string()).unwrap_or_else(|| "null".to_string())
+                        receipt.job_other_transfer_bytes.map(|value| value.to_string()).unwrap_or_else(|| "null".to_string()),
+                        receipt.gpu.as_ref().map(|gpu| format!(
+                            "{{\"target\": {}, \"device_index\": {}, \"device_name\": {}, \"compute_capability\": {}, \"driver_version\": {}, \"visible_devices\": {}, \"host_memory_limit\": {}, \"jit_cache\": {}}}",
+                            quoted_json(&gpu.target),
+                            gpu.device_index,
+                            quoted_json(&gpu.device_name),
+                            quoted_json(&gpu.compute_capability),
+                            quoted_json(&gpu.driver_version),
+                            quoted_json(&gpu.visible_devices),
+                            quoted_json(&gpu.host_memory_limit),
+                            quoted_json(&gpu.jit_cache)
+                        )).unwrap_or_else(|| "null".to_string())
                     )
                 })
                 .unwrap_or_default();
@@ -882,7 +903,7 @@ impl Default for CapsulePolicy {
 fn is_managed_language(language: &str) -> bool {
     matches!(
         language,
-        "python" | "node" | "typescript" | "go" | "java" | "csharp"
+        "python" | "node" | "typescript" | "go" | "java" | "csharp" | "julia" | "moonbit"
     )
 }
 
@@ -3745,7 +3766,7 @@ impl<'a> Interpreter<'a> {
         }
         if matches!(
             capsule.language.as_str(),
-            "c" | "cpp" | "c++" | "rust" | "zig"
+            "c" | "cpp" | "c++" | "rust" | "zig" | "cuda"
         ) {
             return self.call_native_capsule(host, capsule, source_args, args, env, &audit);
         }
@@ -3754,6 +3775,8 @@ impl<'a> Interpreter<'a> {
             "python" => crate::python_run::invoke_live_with(capsule, &inputs, policy),
             "node" | "typescript" => crate::node_run::invoke_live_with(capsule, &inputs, policy),
             "go" => crate::go_run::invoke_live_with(capsule, &inputs, policy),
+            "julia" => crate::julia_run::invoke_live_with(capsule, &inputs, policy),
+            "moonbit" => crate::moonbit_run::invoke_live_with(capsule, &inputs, policy),
             "java" => {
                 let plain = args.iter().map(value_to_arg).collect::<Vec<_>>();
                 crate::jvm_run::invoke_live_with(capsule, &plain, policy)

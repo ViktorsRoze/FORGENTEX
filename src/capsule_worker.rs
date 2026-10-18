@@ -66,7 +66,7 @@ const WARM_CALL_DEADLINE: Duration =
 
 /// The languages a warm worker exists for.
 pub fn supports_language(language: &str) -> bool {
-    matches!(language, "python" | "node" | "typescript" | "go")
+    matches!(language, "python" | "node" | "typescript" | "go" | "julia")
 }
 
 impl CapsuleWorker {
@@ -80,6 +80,7 @@ impl CapsuleWorker {
             "python" => Self::spawn_python(capsule),
             "node" | "typescript" => Self::spawn_node(capsule),
             "go" => Self::spawn_go(capsule),
+            "julia" => Self::spawn_julia(capsule),
             other => Err(format!("no warm worker for '{other}' capsules yet")),
         }
     }
@@ -114,9 +115,16 @@ impl CapsuleWorker {
         let body = crate::node_run::dedent(&capsule.code);
         let entry = crate::node_run::find_entry(&body)
             .ok_or_else(|| "no top-level function found in capsule body".to_string())?;
-        let (node_name, _version) = crate::node_run::detect_node()
+        let (node_name, version) = crate::node_run::detect_node()
             .ok_or_else(|| "no host node found (looked for $NODE, node)".to_string())?;
         let is_ts = capsule.language == "typescript";
+        if is_ts {
+            if let Some(reason) =
+                crate::node_run::typescript_unsupported_reason(&node_name, &version)
+            {
+                return Err(reason);
+            }
+        }
         // ESM driver (matching the cold .mjs/.ts path); errors are caught per
         // line so the worker survives a raising call.
         let nonce = crate::managed_protocol::nonce();
@@ -173,6 +181,31 @@ impl CapsuleWorker {
             Command::new(&go).arg("run").arg(&driver_path),
             scratch,
             "go",
+            nonce,
+        )
+    }
+
+    fn spawn_julia(capsule: &Capsule) -> Result<Self, String> {
+        let body = crate::python_run::dedent(&capsule.code);
+        let entry = crate::julia_run::find_entry(capsule, &body)
+            .ok_or_else(|| "no top-level function found in capsule body".to_string())?;
+        let julia = crate::julia_run::detect_julia_for(capsule)?;
+        // Julia compiles each method on first use, so a worker pays that once
+        // and later calls run already-compiled code.
+        let nonce = crate::managed_protocol::nonce();
+        let scratch = worker_scratch("jl")?;
+        let driver_path = scratch.join("worker.jl");
+        std::fs::write(
+            &driver_path,
+            crate::julia_run::worker_source(capsule, &body, &entry, &nonce),
+        )
+        .map_err(|err| format!("failed to write worker driver: {err}"))?;
+        let argv = crate::julia_run::julia_command(&julia.name, &driver_path);
+        Self::launch(
+            capsule,
+            Command::new(&argv[0]).args(&argv[1..]),
+            scratch,
+            "julia",
             nonce,
         )
     }

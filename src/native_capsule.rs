@@ -22,7 +22,7 @@ fn is_native_or_gpu(capsule: &Capsule) -> bool {
 
 /// Extract a GPU architecture token (`sm_NN` or `compute_NN`) from the
 /// capsule target environment, if present.
-fn gpu_arch(env: Option<&str>) -> Option<String> {
+pub(crate) fn gpu_arch(env: Option<&str>) -> Option<String> {
     let env = env?;
     for token in env.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_') {
         if (token.starts_with("sm_") || token.starts_with("compute_"))

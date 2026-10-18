@@ -24,6 +24,7 @@ mod contract;
 mod control_flow;
 mod crypto;
 mod crypto_agent;
+mod cuda;
 mod debugger;
 mod diagnostic_catalog;
 mod diagnostics_doc;
@@ -47,10 +48,12 @@ mod interpreter;
 mod io_network;
 mod io_run;
 mod json;
+mod julia_run;
 mod jvm_run;
 mod lsp;
 mod managed_limits;
 mod managed_protocol;
+mod moonbit_run;
 mod native_build;
 mod native_capsule;
 mod net_run;
@@ -179,6 +182,8 @@ fn fixture(relative: &str) -> &'static str {
         "examples/jvm/tax.fgx" => include_str!("../../examples/jvm/tax.fgx"),
         "examples/dotnet/discount.fgx" => include_str!("../../examples/dotnet/discount.fgx"),
         "examples/go/scale.fgx" => include_str!("../../examples/go/scale.fgx"),
+        "examples/julia/norm.fgx" => include_str!("../../examples/julia/norm.fgx"),
+        "examples/moonbit/checksum.fgx" => include_str!("../../examples/moonbit/checksum.fgx"),
         "examples/capsule/web_session.fgx" => {
             include_str!("../../examples/capsule/web_session.fgx")
         }

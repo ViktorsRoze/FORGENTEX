@@ -248,7 +248,16 @@ fn live_c_capsule_call_returns_a_real_result() {
         .expect("native C calls must record a receipt");
     assert_eq!(receipt.schema, crate::ffi::NATIVE_RECEIPT_SCHEMA);
     assert_eq!(receipt.boundary_hash.len(), 16);
-    assert!(receipt.toolchain.contains("gcc") || receipt.toolchain.contains("clang"));
+    // The receipt names the C compiler detection actually chose (`cc` on a
+    // stock Ubuntu, `gcc`/`clang`/`$CC` elsewhere) and records a real version
+    // read from its banner, rather than assuming a particular driver name.
+    let detected = crate::native_build::detect_toolchain().expect("checked above");
+    assert!(
+        receipt.toolchain.starts_with(&detected.name),
+        "{}",
+        receipt.toolchain
+    );
+    assert!(receipt.toolchain_semver.is_some(), "{}", receipt.toolchain);
     assert_eq!(
         receipt.wall_limit_ms,
         Some(u128::from(crate::ffi::DEFAULT_NATIVE_WALL_MS))
@@ -904,7 +913,7 @@ fn unsigned_runtime_carrier_roundtrips_json_and_a_live_scalar_boundary() {
             crate::native_build::detect_rust_toolchain().is_some(),
         ),
         (
-            "foreign echo_u64_zig zig version \"0.14\":\n    input value: u64\n    output result: u64\n    sandbox \"fs.none\"\n    code:\n        pub export fn echo_u64_zig(value: u64) u64 { return value; }\n\nfn echo_u64_zig_live(value: u64) -> u64:\n    return echo_u64_zig(value)\n",
+            "foreign echo_u64_zig zig version \"0.17\":\n    input value: u64\n    output result: u64\n    sandbox \"fs.none\"\n    code:\n        pub export fn echo_u64_zig(value: u64) u64 { return value; }\n\nfn echo_u64_zig_live(value: u64) -> u64:\n    return echo_u64_zig(value)\n",
             "echo_u64_zig_live",
             crate::native_build::detect_zig_toolchain().is_some(),
         ),

@@ -86,6 +86,7 @@ pub fn is_known_effect(effect: &str) -> bool {
             | "concurrency.channel"
             | "concurrency.timer"
             | "gpu.render"
+            | "gpu.compute"
             | "media.encode"
             | "memory.raw"
             | "cpu.simd"

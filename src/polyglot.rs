@@ -60,6 +60,8 @@ fn backend_for(language: &str) -> &'static str {
         "java" => "jvm",
         "csharp" => "dotnet",
         "go" => "go",
+        "julia" => "julia",
+        "moonbit" => "moonbit",
         _ => "not_wired",
     }
 }
@@ -129,6 +131,24 @@ pub fn run(file: &str, program: &Program, out_dir: &Path) -> PolyglotReport {
                 ),
                 Err(err) => ("deny".into(), "error".into(), 0, 0, false, Some(err)),
             },
+            "julia" | "moonbit" => {
+                let report = if backend == "julia" {
+                    crate::julia_run::run(file, program, Some(&capsule.name))
+                } else {
+                    crate::moonbit_run::run(file, program, Some(&capsule.name))
+                };
+                match report {
+                    Ok(report) => (
+                        report.sandbox_decision.clone(),
+                        report.status.clone(),
+                        report.passed,
+                        report.total,
+                        report.is_success(),
+                        report.message.clone(),
+                    ),
+                    Err(err) => ("deny".into(), "error".into(), 0, 0, false, Some(err)),
+                }
+            }
             "go" => match crate::go_run::run(file, program, Some(&capsule.name)) {
                 Ok(report) => (
                     report.sandbox_decision.clone(),

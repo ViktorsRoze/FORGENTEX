@@ -66,15 +66,15 @@ fn every_managed_call_gets_a_deadline_and_budgets_even_when_none_is_declared() {
 
 #[test]
 fn declared_limits_replace_the_defaults_and_say_so() {
-    let program = python_capsule(
-        &[
-            "fs.none",
-            "limit.wall_ms 1500",
-            "limit.cpu_ms 700",
-            "limit.mem_mb 64",
-        ],
-        &["def probe(value):", "    return value"],
-    );
+    // `mem_mb` is only enforceable where a managed runtime can bound memory
+    // (Windows job objects). On Unix it is refused at planning time, so the
+    // declared-limit replacement is exercised with wall and cpu there, and with
+    // memory additionally on Windows.
+    let mut sandbox = vec!["fs.none", "limit.wall_ms 1500", "limit.cpu_ms 700"];
+    if cfg!(windows) {
+        sandbox.push("limit.mem_mb 64");
+    }
+    let program = python_capsule(&sandbox, &["def probe(value):", "    return value"]);
     let planned = plan(program.capsules().next().unwrap(), ManagedPolicy::default()).unwrap();
     assert_eq!(planned.wall, Duration::from_millis(1500));
     assert_eq!(planned.limits.cpu_ms, Some(700));

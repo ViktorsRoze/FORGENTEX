@@ -1660,7 +1660,7 @@ fn live_zig_scalar_boundary_compiles_runs_and_records_zig() {
 #[test]
 fn live_zig_requires_explicit_export_before_toolchain_lookup() {
     let program = parse_human(
-        "foreign hidden zig version \"0.14\":\n    input value: i32\n    output result: i32\n    sandbox \"fs.none\"\n    code:\n        pub fn hidden(value: i32) i32 { return value; }\n",
+        "foreign hidden zig version \"0.17\":\n    input value: i32\n    output result: i32\n    sandbox \"fs.none\"\n    code:\n        pub fn hidden(value: i32) i32 { return value; }\n",
     )
     .unwrap();
     let capsule = program.capsules().next().unwrap();
@@ -1676,7 +1676,7 @@ fn live_zig_requires_explicit_export_before_toolchain_lookup() {
 #[test]
 fn live_zig_rejects_non_numeric_slice_elements_before_toolchain_lookup() {
     let program = parse_human(
-        "foreign any_zig zig version \"0.14\":\n    input values: &[bool]\n    output result: i32\n    sandbox \"fs.none\"\n    code:\n        pub export fn any_zig(values: [*]const bool, len: usize) i32 { _ = values; return @intCast(len); }\n",
+        "foreign any_zig zig version \"0.17\":\n    input values: &[bool]\n    output result: i32\n    sandbox \"fs.none\"\n    code:\n        pub export fn any_zig(values: [*]const bool, len: usize) i32 { _ = values; return @intCast(len); }\n",
     )
     .unwrap();
     let capsule = program.capsules().next().unwrap();
@@ -1755,7 +1755,7 @@ fn live_zig_struct_boundary_compiles_and_validates_both_directions() {
 #[test]
 fn zig_struct_requires_matching_extern_source_before_toolchain_lookup() {
     let program = parse_human(
-        "@repr(C)\nstruct Pair:\n    left: i32\n    right: i32\n\nforeign score_zig zig version \"0.14\":\n    input value: Pair\n    output result: i32\n    sandbox \"fs.none\"\n    code:\n        pub const Pair = struct { left: i32, right: i32, };\n        pub export fn score_zig(value: Pair) i32 { return value.left + value.right; }\n",
+        "@repr(C)\nstruct Pair:\n    left: i32\n    right: i32\n\nforeign score_zig zig version \"0.17\":\n    input value: Pair\n    output result: i32\n    sandbox \"fs.none\"\n    code:\n        pub const Pair = struct { left: i32, right: i32, };\n        pub export fn score_zig(value: Pair) i32 { return value.left + value.right; }\n",
     )
     .unwrap();
     let capsule = program.capsules().next().unwrap();
@@ -1774,7 +1774,7 @@ fn zig_struct_requires_matching_extern_source_before_toolchain_lookup() {
 #[test]
 fn zig_struct_rejects_a_mismatched_field_layout_before_toolchain_lookup() {
     let program = parse_human(
-        "@repr(C)\nstruct Pair:\n    left: i32\n    right: i64\n\nforeign score_zig zig version \"0.14\":\n    input value: Pair\n    output result: i32\n    sandbox \"fs.none\"\n    code:\n        pub const Pair = extern struct { right: i64, left: i32, };\n        pub export fn score_zig(value: Pair) i32 { return value.left; }\n",
+        "@repr(C)\nstruct Pair:\n    left: i32\n    right: i64\n\nforeign score_zig zig version \"0.17\":\n    input value: Pair\n    output result: i32\n    sandbox \"fs.none\"\n    code:\n        pub const Pair = extern struct { right: i64, left: i32, };\n        pub export fn score_zig(value: Pair) i32 { return value.left; }\n",
     )
     .unwrap();
     let capsule = program.capsules().next().unwrap();
@@ -1828,7 +1828,7 @@ fn zig_slice_runner_emits_pointer_length_and_mutation_envelope() {
 #[test]
 fn live_zig_pins_the_reviewed_language_version() {
     let program = parse_human(
-        "foreign identity_zig zig version \"0.15\":\n    input value: i32\n    output result: i32\n    sandbox \"fs.none\"\n    code:\n        pub export fn identity_zig(value: i32) i32 { return value; }\n",
+        "foreign identity_zig zig version \"0.13\":\n    input value: i32\n    output result: i32\n    sandbox \"fs.none\"\n    code:\n        pub export fn identity_zig(value: i32) i32 { return value; }\n",
     )
     .unwrap();
     let capsule = program.capsules().next().unwrap();
@@ -1838,7 +1838,9 @@ fn live_zig_pins_the_reviewed_language_version() {
         &[NativeValue::Scalar(CapsuleValue::Int(7))],
     )
     .unwrap_err();
-    assert!(error.contains("pins Zig 0.14"), "got: {error}");
+    // 0.13 predates every reviewed Zig series and is refused, naming them.
+    assert!(error.contains("0.13"), "got: {error}");
+    assert!(error.contains("0.14.x–0.17.x"), "got: {error}");
 }
 
 #[test]
@@ -1857,11 +1859,206 @@ fn live_zig_rejects_an_unpinned_host_toolchain_version() {
 }
 
 #[test]
+fn rust_capsule_requires_a_minimum_supported_compiler() {
+    let program = parse_human(
+        "foreign greet rust version \"2021\":\n    input value: i32\n    output result: i32\n    sandbox \"fs.none\"\n    code:\n        #[unsafe(no_mangle)]\n        pub extern \"C\" fn greet(value: i32) -> i32 { value }\n",
+    )
+    .unwrap();
+    let capsule = program.capsules().next().unwrap();
+    // A modern rustc satisfies the minimum supported version.
+    assert!(validate_native_toolchain_version(
+        capsule,
+        &Toolchain {
+            name: "rustc".to_string(),
+            version: "rustc 1.99.0 (b940084d7 2026-09-28)".to_string(),
+        },
+    )
+    .is_ok());
+    // A compiler below the floor (generated runners use `unsafe extern`, which
+    // lands in 1.82) is refused with an actionable message.
+    let error = validate_native_toolchain_version(
+        capsule,
+        &Toolchain {
+            name: "rustc".to_string(),
+            version: "rustc 1.75.0 (82e1608df 2024-02-13)".to_string(),
+        },
+    )
+    .unwrap_err();
+    assert!(error.contains("rustc"), "got: {error}");
+    assert!(error.contains(">=1.82"), "got: {error}");
+}
+
+#[test]
+fn live_zig_receipt_records_toolchain_provenance() {
+    if crate::native_build::detect_zig_toolchain().is_none() {
+        return;
+    }
+    let program = parse_fixture("examples/capsule/clamp_zig.fgx");
+    let capsule = program.capsules().next().unwrap();
+    let receipt = invoke_live(
+        &program,
+        capsule,
+        &[NativeValue::Scalar(CapsuleValue::Float(40_000.0))],
+    )
+    .unwrap()
+    .receipt
+    .unwrap();
+    // The reviewed series this call was admitted under, and the exact host
+    // version resolved, are both recorded for the audit trail.
+    assert_eq!(receipt.toolchain_requirement.as_deref(), Some("0.17.x"));
+    assert!(
+        receipt
+            .toolchain_semver
+            .as_deref()
+            .is_some_and(|version| version.starts_with("0.17")),
+        "{receipt:?}"
+    );
+}
+
+#[test]
+fn zig_resolution_finds_a_reviewed_host_and_reports_misses() {
+    use crate::toolchain_version::{zig_reviewed, Version, VersionConstraint};
+    if crate::native_build::detect_zig_toolchain().is_none() {
+        return;
+    }
+    // A reviewed-series request resolves to a host that satisfies it.
+    let resolved = crate::native_build::resolve_zig_toolchain(&zig_reviewed()).unwrap();
+    assert!(
+        Version::extract(&resolved.version).is_some_and(|version| zig_reviewed().matches(&version)),
+        "{resolved:?}"
+    );
+    // A request no installed Zig can satisfy still returns a toolchain, so the
+    // caller reports "found X, need Y" rather than "no Zig at all".
+    let impossible = VersionConstraint::parse("0.99").unwrap();
+    assert!(crate::native_build::resolve_zig_toolchain(&impossible).is_some());
+}
+
+#[test]
+fn rust_resolution_finds_a_supported_compiler() {
+    use crate::toolchain_version::{rust_min_supported, Version};
+    if crate::native_build::detect_rust_toolchain().is_none() {
+        return;
+    }
+    let resolved = crate::native_build::resolve_rust_toolchain(&rust_min_supported()).unwrap();
+    assert!(
+        Version::extract(&resolved.version)
+            .is_some_and(|version| rust_min_supported().matches(&version)),
+        "{resolved:?}"
+    );
+}
+
+#[test]
+fn zig_runner_profiles_cover_each_reviewed_series() {
+    use super::super::ffi::ZigRunnerProfile;
+    use crate::toolchain_version::Version;
+    let profile = |minor, patch| ZigRunnerProfile::for_version(&Version::new(0, minor, patch));
+    assert_eq!(profile(14, 1), Some(ZigRunnerProfile::Classic));
+    assert_eq!(profile(15, 2), Some(ZigRunnerProfile::Buffered));
+    assert_eq!(profile(16, 0), Some(ZigRunnerProfile::Io));
+    assert_eq!(profile(17, 0), Some(ZigRunnerProfile::Io));
+    assert_eq!(profile(13, 0), None);
+    assert_eq!(profile(18, 0), None);
+}
+
+#[test]
+fn zig_runner_is_generated_for_each_api_family() {
+    use super::super::ffi::{generate_zig_live_runner_for, ZigRunnerProfile};
+    let program = parse_fixture("examples/capsule/clamp_zig.fgx");
+    let capsule = program.capsules().next().unwrap();
+    let classic =
+        generate_zig_live_runner_for(&program, capsule, ZigRunnerProfile::Classic).unwrap();
+    assert!(classic.contains("pub fn main() !void"));
+    assert!(classic.contains("std.io.getStdIn().reader().readAllAlloc"));
+    assert!(classic.contains("std.mem.trimRight"));
+    assert!(!classic.contains("flush()"));
+    let buffered =
+        generate_zig_live_runner_for(&program, capsule, ZigRunnerProfile::Buffered).unwrap();
+    assert!(buffered.contains("pub fn main() !void"));
+    assert!(buffered.contains("std.fs.File.stdin().reader(&stdin_buffer)"));
+    assert!(buffered.contains("std.fs.File.stdout().writer(&stdout_buffer)"));
+    assert!(buffered.contains("try stdout.flush();"));
+    let io = generate_zig_live_runner_for(&program, capsule, ZigRunnerProfile::Io).unwrap();
+    assert!(io.contains("pub fn main(init: std.process.Init) !void"));
+    assert!(io.contains("std.Io.File.stdout().writer(io, &stdout_buffer)"));
+    // Argument parsing and the capsule call are shared by every family.
+    for runner in [&classic, &buffered, &io] {
+        assert!(runner.contains("parseArg(f32"));
+        assert!(runner.contains("capsule.clamp_zig(x)"));
+        assert!(!runner.contains("argsAlloc"));
+    }
+}
+
+#[test]
+fn older_zig_refuses_small_by_value_structs_that_mix_scalars_and_arrays() {
+    use super::super::ffi::refuse_zig_struct_abi_hazard;
+    use crate::toolchain_version::Version;
+    if !cfg!(all(target_arch = "x86_64", not(windows))) {
+        return;
+    }
+    // SampleWindow { id: i32, samples: [i16; 4] } is 12 bytes and mixed.
+    let mixed = parse_human(include_str!("../../examples/capsule/fixed_samples_zig.fgx")).unwrap();
+    let mixed_capsule = mixed.capsules().next().unwrap();
+    for host in [
+        Version::new(0, 14, 1),
+        Version::new(0, 15, 2),
+        Version::new(0, 16, 0),
+    ] {
+        let error = refuse_zig_struct_abi_hazard(&mixed, mixed_capsule, &host).unwrap_err();
+        assert!(
+            error.contains("native_capsule_boundary_unsupported"),
+            "{error}"
+        );
+        assert!(error.contains("SampleWindow"), "{error}");
+    }
+    assert!(refuse_zig_struct_abi_hazard(&mixed, mixed_capsule, &Version::new(0, 17, 0)).is_ok());
+    // PointBatch (an i32 and three 4-byte points) is exactly 16 bytes: unaffected.
+    let large = parse_human(include_str!("../../examples/capsule/struct_array_zig.fgx")).unwrap();
+    let large_capsule = large.capsules().next().unwrap();
+    assert!(refuse_zig_struct_abi_hazard(&large, large_capsule, &Version::new(0, 16, 0)).is_ok());
+}
+
+#[test]
+fn live_zig_runs_on_every_installed_reviewed_series() {
+    use crate::toolchain_version::{zig_reviewed, Version};
+    // Several Zigs may be installed side by side; a capsule declaring a series
+    // must run on a compiler of exactly that series.
+    let mut series: Vec<(u64, u64)> = crate::native_build::discover_zig_toolchains()
+        .iter()
+        .filter_map(|toolchain| Version::extract(&toolchain.version))
+        .filter(|version| zig_reviewed().matches(version))
+        .map(|version| (version.major, version.minor))
+        .collect();
+    series.sort();
+    series.dedup();
+    for (major, minor) in series {
+        let source = include_str!("../../examples/capsule/clamp_zig.fgx").replace(
+            "zig version \"0.17\"",
+            &format!("zig version \"{major}.{minor}\""),
+        );
+        let program = parse_human(&source).unwrap();
+        let capsule = program.capsules().next().unwrap();
+        let invocation = invoke_live(
+            &program,
+            capsule,
+            &[NativeValue::Scalar(CapsuleValue::Float(40_000.0))],
+        )
+        .unwrap();
+        assert_eq!(invocation.output, "32767", "Zig {major}.{minor}");
+        let semver = invocation.receipt.unwrap().toolchain_semver.unwrap();
+        assert!(
+            semver.starts_with(&format!("{major}.{minor}.")),
+            "a Zig {major}.{minor} capsule ran on {semver}"
+        );
+    }
+}
+
+#[test]
 fn zig_runner_uses_private_request_transport_and_typed_parse() {
     let program = parse_fixture("examples/capsule/clamp_zig.fgx");
     let capsule = program.capsules().next().unwrap();
     let runner = super::super::ffi::generate_zig_live_runner(&program, capsule).unwrap();
-    assert!(runner.contains("getStdIn().reader().readAllAlloc"));
+    assert!(runner.contains("std.Io.File.stdin().reader(io,"));
+    assert!(runner.contains("stdin_reader.interface.allocRemaining"));
     assert!(!runner.contains("readFileAlloc"));
     assert!(!runner.contains("argsAlloc"));
     assert!(runner.contains("parseArg(f32"));
@@ -3254,7 +3451,7 @@ fn zig_owned_string_runner_uses_byte_limit_and_copy_before_free() {
 #[test]
 fn zig_owned_output_requires_exact_descriptor_before_toolchain_lookup() {
     let program = parse_human(
-        "foreign bad_zig_owned zig version \"0.14\" effects [alloc]:\n    output bytes: Vec[u8]\n    sandbox \"fs.none\"\n    code:\n        pub export fn bad_zig_owned() i32 { return 0; }\n",
+        "foreign bad_zig_owned zig version \"0.17\" effects [alloc]:\n    output bytes: Vec[u8]\n    sandbox \"fs.none\"\n    code:\n        pub export fn bad_zig_owned() i32 { return 0; }\n",
     )
     .unwrap();
     let error = invoke_live(&program, program.capsules().next().unwrap(), &[]).unwrap_err();
@@ -3264,7 +3461,7 @@ fn zig_owned_output_requires_exact_descriptor_before_toolchain_lookup() {
 #[test]
 fn zig_typed_owned_output_rejects_a_mismatched_descriptor() {
     let program = parse_human(
-        "foreign bad_zig_samples zig version \"0.14\" effects [alloc]:\n    output samples: Vec[i16]\n    sandbox \"fs.none\"\n    code:\n        pub const FgxOwnedI16 = extern struct { ptr: ?[*]u8, len: usize, capacity: usize, };\n        pub export fn bad_zig_samples() FgxOwnedI16 { return .{ .ptr = null, .len = 0, .capacity = 0 }; }\n        pub export fn bad_zig_samples_free(ptr: ?[*]u8, len: usize, capacity: usize) void { _ = ptr; _ = len; _ = capacity; }\n",
+        "foreign bad_zig_samples zig version \"0.17\" effects [alloc]:\n    output samples: Vec[i16]\n    sandbox \"fs.none\"\n    code:\n        pub const FgxOwnedI16 = extern struct { ptr: ?[*]u8, len: usize, capacity: usize, };\n        pub export fn bad_zig_samples() FgxOwnedI16 { return .{ .ptr = null, .len = 0, .capacity = 0 }; }\n        pub export fn bad_zig_samples_free(ptr: ?[*]u8, len: usize, capacity: usize) void { _ = ptr; _ = len; _ = capacity; }\n",
     )
     .unwrap();
     let error = invoke_live(&program, program.capsules().next().unwrap(), &[]).unwrap_err();
@@ -3275,7 +3472,7 @@ fn zig_typed_owned_output_rejects_a_mismatched_descriptor() {
 #[test]
 fn zig_owned_isize_output_rejects_a_mismatched_descriptor() {
     let program = parse_human(
-        "foreign bad_zig_offsets zig version \"0.14\" effects [alloc]:\n    output offsets: Vec[isize]\n    sandbox \"fs.none\"\n    code:\n        pub const FgxOwnedIsize = extern struct { ptr: ?[*]i64, len: usize, capacity: usize, };\n        pub export fn bad_zig_offsets() FgxOwnedIsize { return .{ .ptr = null, .len = 0, .capacity = 0 }; }\n        pub export fn bad_zig_offsets_free(ptr: ?[*]i64, len: usize, capacity: usize) void { _ = ptr; _ = len; _ = capacity; }\n",
+        "foreign bad_zig_offsets zig version \"0.17\" effects [alloc]:\n    output offsets: Vec[isize]\n    sandbox \"fs.none\"\n    code:\n        pub const FgxOwnedIsize = extern struct { ptr: ?[*]i64, len: usize, capacity: usize, };\n        pub export fn bad_zig_offsets() FgxOwnedIsize { return .{ .ptr = null, .len = 0, .capacity = 0 }; }\n        pub export fn bad_zig_offsets_free(ptr: ?[*]i64, len: usize, capacity: usize) void { _ = ptr; _ = len; _ = capacity; }\n",
     )
     .unwrap();
     let error = invoke_live(&program, program.capsules().next().unwrap(), &[]).unwrap_err();
@@ -3286,7 +3483,7 @@ fn zig_owned_isize_output_rejects_a_mismatched_descriptor() {
 #[test]
 fn zig_owned_usize_output_rejects_a_mismatched_descriptor() {
     let program = parse_human(
-        "foreign bad_zig_sizes zig version \"0.14\" effects [alloc]:\n    output sizes: Vec[usize]\n    sandbox \"fs.none\"\n    code:\n        pub const FgxOwnedUsize = extern struct { ptr: ?[*]isize, len: usize, capacity: usize, };\n        pub export fn bad_zig_sizes() FgxOwnedUsize { return .{ .ptr = null, .len = 0, .capacity = 0 }; }\n        pub export fn bad_zig_sizes_free(ptr: ?[*]isize, len: usize, capacity: usize) void { _ = ptr; _ = len; _ = capacity; }\n",
+        "foreign bad_zig_sizes zig version \"0.17\" effects [alloc]:\n    output sizes: Vec[usize]\n    sandbox \"fs.none\"\n    code:\n        pub const FgxOwnedUsize = extern struct { ptr: ?[*]isize, len: usize, capacity: usize, };\n        pub export fn bad_zig_sizes() FgxOwnedUsize { return .{ .ptr = null, .len = 0, .capacity = 0 }; }\n        pub export fn bad_zig_sizes_free(ptr: ?[*]isize, len: usize, capacity: usize) void { _ = ptr; _ = len; _ = capacity; }\n",
     )
     .unwrap();
     let error = invoke_live(&program, program.capsules().next().unwrap(), &[]).unwrap_err();
@@ -3297,7 +3494,7 @@ fn zig_owned_usize_output_rejects_a_mismatched_descriptor() {
 #[test]
 fn zig_owned_u64_output_rejects_a_mismatched_descriptor() {
     let program = parse_human(
-        "foreign bad_zig_ids zig version \"0.14\" effects [alloc]:\n    output ids: Vec[u64]\n    sandbox \"fs.none\"\n    code:\n        pub const FgxOwnedU64 = extern struct { ptr: ?[*]i64, len: usize, capacity: usize, };\n        pub export fn bad_zig_ids() FgxOwnedU64 { return .{ .ptr = null, .len = 0, .capacity = 0 }; }\n        pub export fn bad_zig_ids_free(ptr: ?[*]i64, len: usize, capacity: usize) void { _ = ptr; _ = len; _ = capacity; }\n",
+        "foreign bad_zig_ids zig version \"0.17\" effects [alloc]:\n    output ids: Vec[u64]\n    sandbox \"fs.none\"\n    code:\n        pub const FgxOwnedU64 = extern struct { ptr: ?[*]i64, len: usize, capacity: usize, };\n        pub export fn bad_zig_ids() FgxOwnedU64 { return .{ .ptr = null, .len = 0, .capacity = 0 }; }\n        pub export fn bad_zig_ids_free(ptr: ?[*]i64, len: usize, capacity: usize) void { _ = ptr; _ = len; _ = capacity; }\n",
     )
     .unwrap();
     let error = invoke_live(&program, program.capsules().next().unwrap(), &[]).unwrap_err();
@@ -3308,7 +3505,7 @@ fn zig_owned_u64_output_rejects_a_mismatched_descriptor() {
 #[test]
 fn zig_owned_string_rejects_a_mismatched_descriptor() {
     let program = parse_human(
-        "foreign bad_zig_text zig version \"0.14\" effects [alloc]:\n    output text: str\n    sandbox \"fs.none\"\n    code:\n        pub const FgxOwnedStr = extern struct { ptr: ?[*]i16, len: usize, capacity: usize, };\n        pub export fn bad_zig_text() FgxOwnedStr { return .{ .ptr = null, .len = 0, .capacity = 0 }; }\n        pub export fn bad_zig_text_free(ptr: ?[*]i16, len: usize, capacity: usize) void { _ = ptr; _ = len; _ = capacity; }\n",
+        "foreign bad_zig_text zig version \"0.17\" effects [alloc]:\n    output text: str\n    sandbox \"fs.none\"\n    code:\n        pub const FgxOwnedStr = extern struct { ptr: ?[*]i16, len: usize, capacity: usize, };\n        pub export fn bad_zig_text() FgxOwnedStr { return .{ .ptr = null, .len = 0, .capacity = 0 }; }\n        pub export fn bad_zig_text_free(ptr: ?[*]i16, len: usize, capacity: usize) void { _ = ptr; _ = len; _ = capacity; }\n",
     )
     .unwrap();
     let error = invoke_live(&program, program.capsules().next().unwrap(), &[]).unwrap_err();
@@ -3661,7 +3858,7 @@ fn aggregate_descriptor_source_is_validated_before_toolchain_lookup() {
     assert!(error.contains("FgxOwnedItem"), "got: {error}");
 
     let zig = parse_human(
-        "@repr(C)\nstruct Item:\n    value: i32\n\nforeign bad_zig zig version \"0.14\" effects [alloc]:\n    output items: Vec[Item]\n    sandbox \"fs.none\"\n    code:\n        pub const Item = extern struct { value: i32, };\n        pub export fn bad_zig() i32 { return 0; }\n",
+        "@repr(C)\nstruct Item:\n    value: i32\n\nforeign bad_zig zig version \"0.17\" effects [alloc]:\n    output items: Vec[Item]\n    sandbox \"fs.none\"\n    code:\n        pub const Item = extern struct { value: i32, };\n        pub export fn bad_zig() i32 { return 0; }\n",
     )
     .unwrap();
     let error = invoke_live(&zig, zig.capsules().next().unwrap(), &[]).unwrap_err();
@@ -4220,7 +4417,7 @@ fn live_zig_nested_struct_array_field_round_trips_by_value() {
 #[test]
 fn zig_nested_struct_array_requires_the_exact_foreign_dimensions() {
     let program = parse_human(
-        "@repr(C)\nstruct Point:\n    x: i16\n@repr(C)\nstruct Grid:\n    points: [[Point; 2]; 2]\n\nforeign bad zig version \"0.14\":\n    input grid: Grid\n    output result: i32\n    sandbox \"fs.none\"\n    code:\n        pub const Point = extern struct { x: i16, };\n        pub const Grid = extern struct { points: [2][3]Point, };\n        pub export fn bad(grid: Grid) i32 { return grid.points[0][0].x; }\n",
+        "@repr(C)\nstruct Point:\n    x: i16\n@repr(C)\nstruct Grid:\n    points: [[Point; 2]; 2]\n\nforeign bad zig version \"0.17\":\n    input grid: Grid\n    output result: i32\n    sandbox \"fs.none\"\n    code:\n        pub const Point = extern struct { x: i16, };\n        pub const Grid = extern struct { points: [2][3]Point, };\n        pub export fn bad(grid: Grid) i32 { return grid.points[0][0].x; }\n",
     )
     .unwrap();
     let capsule = program.capsules().next().unwrap();
@@ -4270,7 +4467,7 @@ fn rust_struct_array_requires_the_exact_foreign_array_layout() {
 #[test]
 fn zig_struct_array_requires_the_exact_foreign_array_layout() {
     let program = parse_human(
-        "@repr(C)\nstruct Point:\n    x: i16\n    y: i16\n@repr(C)\nstruct Batch:\n    points: [Point; 3]\n\nforeign bad zig version \"0.14\":\n    input batch: Batch\n    output result: i32\n    sandbox \"fs.none\"\n    code:\n        pub const Point = extern struct { x: i16, y: i16, };\n        pub const Batch = extern struct { points: [2]Point, };\n        pub export fn bad(batch: Batch) i32 { return batch.points[0].x; }\n",
+        "@repr(C)\nstruct Point:\n    x: i16\n    y: i16\n@repr(C)\nstruct Batch:\n    points: [Point; 3]\n\nforeign bad zig version \"0.17\":\n    input batch: Batch\n    output result: i32\n    sandbox \"fs.none\"\n    code:\n        pub const Point = extern struct { x: i16, y: i16, };\n        pub const Batch = extern struct { points: [2]Point, };\n        pub export fn bad(batch: Batch) i32 { return batch.points[0].x; }\n",
     )
     .unwrap();
     let capsule = program.capsules().next().unwrap();
@@ -4307,7 +4504,7 @@ fn recursively_array_embedded_native_struct_is_rejected_without_recursing_foreve
 #[test]
 fn zig_fixed_array_struct_requires_the_exact_foreign_array_layout() {
     let program = parse_human(
-        "@repr(C)\nstruct Window:\n    samples: [i16; 4]\n\nforeign bad zig version \"0.14\":\n    input window: Window\n    output result: i32\n    sandbox \"fs.none\"\n    code:\n        pub const Window = extern struct { samples: [3]i16, };\n        pub export fn bad(window: Window) i32 { return window.samples[0]; }\n",
+        "@repr(C)\nstruct Window:\n    samples: [i16; 4]\n\nforeign bad zig version \"0.17\":\n    input window: Window\n    output result: i32\n    sandbox \"fs.none\"\n    code:\n        pub const Window = extern struct { samples: [3]i16, };\n        pub export fn bad(window: Window) i32 { return window.samples[0]; }\n",
     )
     .unwrap();
     let capsule = program.capsules().next().unwrap();

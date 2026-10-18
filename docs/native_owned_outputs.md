@@ -1,6 +1,6 @@
 # Native owned outputs (current pre-0.1 contract)
 
-Forgentex C, C++, Rust, and pinned Zig 0.14 capsules may return one newly allocated
+Forgentex C, C++, Rust, and pinned Zig 0.17 capsules may return one newly allocated
 numeric or pointer-free record vector through a reviewed descriptor. Numeric layouts
 are `u8`, `i8`, `u16`, `i16`, `u32`, `i32`, `u64`, `i64`, `isize`, `usize`,
 `f32`, and `f64`. A record element must be a named `@repr(C)` struct accepted by
@@ -79,7 +79,7 @@ use the corresponding exact element pointer, including `float *` or
 explicit `extern "C"` linkage; preflight tokenizes the source and does not
 accept claims hidden in comments or string literals. Rust uses the equivalent
 public `#[repr(C)]` type and public
-no-mangle free export. Zig 0.14 uses the exact public `extern struct` with the
+no-mangle free export. Zig 0.17 uses the exact public `extern struct` with the
 matching nullable pointer type and a matching `pub export fn render_free`.
 Allocation and deallocation must stay in the same capsule/toolchain domain.
 Record vectors use `FgxOwned<StructName>` and a matching

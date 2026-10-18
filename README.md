@@ -445,6 +445,14 @@ regression-tested behavior:
   unless the operator passes `--trusted`, which records the waiver in a receipt.
   What is enforced where is tabulated per runtime and platform in
   [the enforcement matrix](docs/enforcement_matrix.md), including what is *not*.
+- **Julia and MoonBit capsules:** Julia capsules run on the host Julia, with
+  several versions side by side chosen by Julia's own `[compat]` rules.
+  MoonBit capsules compile to WebAssembly and run sandboxed, with no file,
+  network, or environment access. See
+  [Julia and MoonBit capsules](docs/julia_and_moonbit_capsules.md).
+- **Live CUDA capsules:** CUDA capsules run on an NVIDIA GPU on Linux, each
+  with a toolkit of the release it declares. See
+  [native and GPU capsules](docs/native_gpu_capsules.md).
 - **Integer semantics specified per width:** the interpreter and the C backend
   now agree on overflow, division, and shift behaviour at every declared width,
   through explicit guards rather than C's undefined behaviour.
@@ -476,7 +484,8 @@ Prerequisites:
 | --- | --- | --- |
 | `rust-stable` | yes | build the `fgx` and `forgentex-lsp` binaries |
 | `host-c-compiler` | optional | run the C backend and native/capsule demonstrations |
-| `zig-0.14` | optional | run the Zig backend |
+| `zig` | optional | run the Zig backend and Zig capsules (any release in the 0.14–0.17 series) |
+| `cuda-toolkit` | optional | run CUDA capsules on an NVIDIA GPU, on Linux (CUDA 11 or later; several toolkits can sit side by side) |
 
 0.1 verifies **one** host: `x86_64-pc-windows-msvc` on Windows 10 and
 Windows 11. CI builds, checksums, and clean-installs it, and the run is recorded
@@ -666,6 +675,7 @@ Argument notation used below:
 | `fgx capsule <file> [--json] [--strict]` | Inspect and validate the foreign capsules declared in a source file. |
 | `fgx capsule-run <file> [--capsule <name>] [--input <values>] [--sandbox] [--json] [--strict]` | Run a selected capsule through its governed host-runtime bridge. |
 | `fgx capsule-run <file> --native [--capsule <name>] [--out <dir>] [--json]` | Build or run a native capsule path and optionally retain its artifacts. |
+| `fgx capsule-run <file> --julia\|--moonbit [--capsule <name>] [--json]` | Run a Julia capsule's fixtures on the host Julia, or a MoonBit capsule's in its WebAssembly sandbox. |
 | `fgx capsule-lock <file> [--json]` | Resolve capsule dependencies into deterministic lock information. |
 | `fgx capsule-audit <file> [--json] [--strict]` | Audit capsule types, effects, capabilities, hashes, dependencies, and policy findings. |
 | `fgx namespace <file> [--json] [--strict]` | Review shared names and cross-language namespace collisions. |

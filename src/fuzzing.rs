@@ -595,7 +595,7 @@ fn mutate_source(source: &str, seed: u64) -> String {
     }
     let mut bytes = source.as_bytes().to_vec();
     let index = (seed as usize) % bytes.len();
-    let replacements = [b'@', b'{', b'}', b':', b'\n', b'_', b'0', b'F'];
+    let replacements = *b"@{}:\n_0F";
     bytes[index] = replacements[(seed as usize / 7) % replacements.len()];
     String::from_utf8_lossy(&bytes).to_string()
 }

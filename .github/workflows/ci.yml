@@ -12,11 +12,17 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        # Pinned rather than `stable`: each new Rust release adds clippy lints,
+        # and with `-D warnings` a release CI did not choose turned the gate red
+        # (it failed on every run from 2026-07-12 to 2026-10-12). 1.95.0 is the
+        # version the Windows gate was verified on; Ubuntu also passes on 1.93
+        # and 1.99. Bump it deliberately, after `cargo clippy` is clean on it.
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.95.0
           components: rustfmt, clippy
 
       - name: Format
@@ -66,7 +72,7 @@ jobs:
 
       - name: Retain minimized borrow campaign failures
         if: always() && github.event_name == 'schedule'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: borrow-campaign-failures
           path: target/borrow-campaign-failures
@@ -77,10 +83,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
 
       - name: Build release binaries
         run: cargo build --release --bins
@@ -154,7 +162,7 @@ jobs:
           Write-Host "release proof matches the artifacts built from this commit"
 
       - name: Upload release artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: fgx-windows-x86_64
           path: |

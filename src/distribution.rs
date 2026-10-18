@@ -119,7 +119,7 @@ pub const DIST_BACKENDS: &[DistBackend] = &[
     },
     DistBackend {
         name: "zig",
-        requirement: "optional Zig 0.14 toolchain for native builds",
+        requirement: "optional Zig toolchain from a reviewed series (0.14-0.17) for native builds",
     },
 ];
 
@@ -135,8 +135,13 @@ pub const DIST_PREREQUISITES: &[DistPrerequisite] = &[
         required: false,
     },
     DistPrerequisite {
-        name: "zig-0.14",
+        name: "zig",
         purpose: "run the Zig backend",
+        required: false,
+    },
+    DistPrerequisite {
+        name: "cuda-toolkit",
+        purpose: "run CUDA capsules on an NVIDIA GPU (Linux)",
         required: false,
     },
 ];

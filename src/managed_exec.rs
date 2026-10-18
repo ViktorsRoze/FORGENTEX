@@ -133,7 +133,18 @@ fn runtime_environment(language: &str) -> &'static [&'static str] {
             "LOCALAPPDATA",
             "APPDATA",
         ],
-        // Python and Node need nothing beyond the base. `PYTHONPATH`,
+        // Julia's depot holds installed packages and compiled caches, and
+        // defaults to the home directory. `JULIA_LOAD_PATH` and
+        // `JULIA_PROJECT` are absent for the same reason as `PYTHONPATH`.
+        "julia" => &[
+            "JULIA_DEPOT_PATH",
+            "HOME",
+            "USERPROFILE",
+            "LOCALAPPDATA",
+            "APPDATA",
+        ],
+        // Python and Node need nothing beyond the base, and neither does
+        // MoonBit's `moonrun`, whose sandbox exposes no host environment. `PYTHONPATH`,
         // `PYTHONHOME`, and `NODE_OPTIONS` are deliberately absent: they change
         // what the runtime loads, so inheriting them would let the caller's
         // environment redirect a capsule's execution.

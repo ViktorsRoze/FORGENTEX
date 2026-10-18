@@ -179,7 +179,7 @@ fn assert_stored_rgb8_png(bytes: &[u8], expected: ExpectedRgb8Png) {
     assert_eq!(raw.len(), height as usize * row_bytes);
     for (y, row) in raw.chunks_exact(row_bytes).enumerate() {
         assert_eq!(row[0], 0, "fixture uses PNG filter type 0");
-        for (x, pixel) in row[1..].chunks_exact(3).enumerate() {
+        for (x, pixel) in row[1..].as_chunks::<3>().0.iter().enumerate() {
             assert_eq!(
                 pixel,
                 &[
@@ -1865,6 +1865,7 @@ fn process_local_cache_restores_pathless_artifacts_and_excludes_side_effectful_s
     if crate::native_build::detect_toolchain().is_none() {
         return;
     }
+    let _artifact_guard = render_artifact_guard();
     let mut cache = PipelineCache::default();
     let mut run_twice = |source: &str, allow: Option<Vec<String>>| {
         let program = parse_human(source).unwrap();
@@ -2295,6 +2296,7 @@ fn governed_preview_pipeline_persists_image_and_emits_render_receipt() {
     if crate::native_build::detect_toolchain().is_none() {
         return;
     }
+    let _artifact_guard = render_artifact_guard();
     let path = std::path::Path::new("target/render-previews/visualizer-preview.ppm");
     let _ = std::fs::remove_file(path);
     let program = parse_human(RENDER_PIPELINE).unwrap();
@@ -2359,6 +2361,7 @@ fn governed_renderer_hands_raw_frame_to_encoder_with_linked_receipts() {
     if crate::native_build::detect_toolchain().is_none() {
         return;
     }
+    let _artifact_guard = render_artifact_guard();
     let path = std::path::Path::new("target/render-previews/visualizer-encoded.ppm");
     let _ = std::fs::remove_file(path);
     let program = parse_human(RENDER_ENCODE_PIPELINE).unwrap();
@@ -2450,6 +2453,7 @@ fn governed_final_profile_runs_with_4k_bounds_and_linked_receipts() {
     if crate::native_build::detect_toolchain().is_none() {
         return;
     }
+    let _artifact_guard = render_artifact_guard();
     let path = std::path::Path::new("target/render-final/visualizer-final.ppm");
     let _ = std::fs::remove_file(path);
     let program = parse_human(RENDER_ENCODE_FINAL_PIPELINE).unwrap();
@@ -2940,6 +2944,7 @@ fn renderer_cannot_commit_raw_rgb_dimensions_that_disagree_with_the_scene() {
     if crate::native_build::detect_toolchain().is_none() {
         return;
     }
+    let _artifact_guard = render_artifact_guard();
     let path = std::path::Path::new("target/render-previews/visualizer-encoded.ppm");
     let _ = std::fs::remove_file(path);
     let source = RENDER_ENCODE_PIPELINE.replacen(
@@ -2975,6 +2980,7 @@ fn encoder_rejects_a_malformed_declared_raw_rgb_frame_before_dispatch() {
     if crate::native_build::detect_toolchain().is_none() {
         return;
     }
+    let _artifact_guard = render_artifact_guard();
     let path = std::path::Path::new("target/render-previews/visualizer-encoded.ppm");
     let _ = std::fs::remove_file(path);
     let source = RENDER_ENCODE_PIPELINE
@@ -3017,6 +3023,7 @@ fn encoder_effect_denial_persists_nothing_and_issues_no_encode_receipt() {
     if crate::native_build::detect_toolchain().is_none() {
         return;
     }
+    let _artifact_guard = render_artifact_guard();
     let path = std::path::Path::new("target/render-previews/visualizer-encoded-denied.ppm");
     let _ = std::fs::remove_file(path);
     let source = RENDER_ENCODE_PIPELINE.replace(
@@ -3048,6 +3055,7 @@ fn encoder_statically_rejects_a_non_raw_frame_producer() {
     if crate::native_build::detect_toolchain().is_none() {
         return;
     }
+    let _artifact_guard = render_artifact_guard();
     let path = std::path::Path::new("target/render-previews/bad-encoded-source.ppm");
     let _ = std::fs::remove_file(path);
     let source = RENDER_ENCODE_PIPELINE
@@ -3087,6 +3095,7 @@ fn preview_dimensions_are_rejected_before_renderer_dispatch() {
     if crate::native_build::detect_toolchain().is_none() {
         return;
     }
+    let _artifact_guard = render_artifact_guard();
     let source = RENDER_PIPELINE.replacen("scene.width = 16", "scene.width = 4000", 1);
     let report = run(
         "oversized_render_preview.fgx",
@@ -3113,6 +3122,7 @@ fn final_dimensions_are_rejected_beyond_4k_before_renderer_dispatch() {
     if crate::native_build::detect_toolchain().is_none() {
         return;
     }
+    let _artifact_guard = render_artifact_guard();
     let source = RENDER_ENCODE_FINAL_PIPELINE.replacen("scene.width = 64", "scene.width = 3841", 1);
     let report = run(
         "oversized_render_final.fgx",
@@ -3140,6 +3150,7 @@ fn preview_render_effect_denial_writes_nothing_and_issues_no_receipt() {
     if crate::native_build::detect_toolchain().is_none() {
         return;
     }
+    let _artifact_guard = render_artifact_guard();
     let path = std::path::Path::new("target/render-previews/visualizer-preview-denied.ppm");
     let _ = std::fs::remove_file(path);
     let source = RENDER_PIPELINE.replace(

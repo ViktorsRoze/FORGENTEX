@@ -2571,6 +2571,27 @@ fn cmd_capsule_run(args: &[String]) -> Result<(), String> {
             Err(format!("dotnet run: {}", report.status))
         };
     }
+    // Julia and MoonBit capsules: fixtures run on the host Julia, or built to
+    // WebAssembly and run in moonrun's deny-all sandbox.
+    for (flag, language) in [("--julia", "julia"), ("--moonbit", "moonbit")] {
+        if args.iter().any(|arg| arg == flag) {
+            let report = if language == "julia" {
+                crate::julia_run::run(file, &program, name)?
+            } else {
+                crate::moonbit_run::run(file, &program, name)?
+            };
+            if json_mode {
+                println!("{}", report.to_json());
+            } else {
+                print!("{}", report.to_text());
+            }
+            return if report.is_success() {
+                Ok(())
+            } else {
+                Err(format!("{language} run: {}", report.status))
+            };
+        }
+    }
     // Real Go execution (v2.24): assemble and run the go capsule on host Go.
     if args.iter().any(|arg| arg == "--go") {
         let report = crate::go_run::run(file, &program, name)?;

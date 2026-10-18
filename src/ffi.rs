@@ -8,7 +8,7 @@
 //! is gated: the capsule must pass `check` (effects covered by sandbox grants,
 //! dependencies pinned) or it is denied.
 //!
-//! Current live scope (honest): C/C++/Rust and pinned Zig 0.14 scalar,
+//! Current live scope (honest): C/C++/Rust and reviewed Zig 0.14-0.17 scalar,
 //! scalar-slice, immutable reviewed-record-slice, and restricted `@repr(C)`
 //! struct values. C++ and Rust must
 //! expose explicit C ABI boundaries; Rust additionally requires a public
@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use crate::ast::{Capsule, CapsuleValue, Field, Program, StructDecl, Type};
 use crate::json;
 use crate::native_build::{
-    detect_cpp_toolchain, detect_rust_toolchain, detect_toolchain, detect_zig_toolchain,
+    detect_cpp_toolchain, detect_toolchain, resolve_rust_toolchain, resolve_zig_toolchain,
     run_with_path, run_with_path_timeout_limited, run_with_path_timeout_limited_isolated, JobIo,
     ProcessLimits, Toolchain, DEFAULT_NATIVE_RUNNER_PROCESS_LIMIT, MAX_CONTAINED_OUTPUT_BYTES,
 };
@@ -157,6 +157,14 @@ pub struct NativeReceipt {
     pub schema: String,
     pub boundary_hash: String,
     pub toolchain: String,
+    /// The host toolchain version Forgentex resolved, as a bare semver (for
+    /// example `0.17.0` or `1.99.0`), or `None` when it could not be read from
+    /// the compiler banner.
+    pub toolchain_semver: Option<String>,
+    /// The version requirement this call was admitted under (for example the
+    /// reviewed Zig series `0.17.x`, or the Rust floor `>=1.82`), or `None` for
+    /// languages Forgentex does not version-gate.
+    pub toolchain_requirement: Option<String>,
     pub duration_ms: u128,
     pub wall_limit_ms: Option<u128>,
     pub wall_limit_source: String,
@@ -241,6 +249,29 @@ pub struct NativeReceipt {
     pub job_read_transfer_bytes: Option<u64>,
     pub job_write_transfer_bytes: Option<u64>,
     pub job_other_transfer_bytes: Option<u64>,
+    /// GPU evidence for a CUDA call; `None` for every other language.
+    pub gpu: Option<NativeGpuReceipt>,
+}
+
+/// What a CUDA call ran on and how the GPU was scoped. It records no payload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeGpuReceipt {
+    /// The declared code target, passed to nvcc as `-arch` (`sm_120`).
+    pub target: String,
+    /// The runner's default device, by `nvidia-smi` index.
+    pub device_index: u32,
+    pub device_name: String,
+    pub compute_capability: String,
+    pub driver_version: String,
+    /// The runner's `CUDA_VISIBLE_DEVICES`, or `all` when the `gpu.compute`
+    /// grant names no device.
+    pub visible_devices: String,
+    /// How the host-memory ceiling reached the runner: `data_segment`
+    /// (`RLIMIT_DATA`), because the CUDA driver's address-space reservations
+    /// rule out `RLIMIT_AS`.
+    pub host_memory_limit: String,
+    /// `disabled`: the driver's PTX JIT cache is not written to the host.
+    pub jit_cache: String,
 }
 
 /// Non-payload evidence for a failed native dispatch. The caller-facing error
@@ -754,12 +785,19 @@ fn is_zig_language(language: &str) -> bool {
     language == "zig"
 }
 
+fn is_cuda_language(language: &str) -> bool {
+    language == "cuda"
+}
+
 fn is_c_family_language(language: &str) -> bool {
     language == "c" || is_cpp_language(language)
 }
 
 fn is_live_native_language(language: &str) -> bool {
-    is_c_family_language(language) || is_rust_language(language) || is_zig_language(language)
+    is_c_family_language(language)
+        || is_rust_language(language)
+        || is_zig_language(language)
+        || is_cuda_language(language)
 }
 
 fn native_standard(capsule: &Capsule) -> Result<&'static str, String> {
@@ -785,13 +823,49 @@ fn native_standard(capsule: &Capsule) -> Result<&'static str, String> {
                 capsule.name, version
             )),
         },
-        "zig" => match capsule.version.as_str() {
-            "0.14" => Ok("0.14"),
-            version => Err(format!(
-                "Zig capsule '{}' declares unsupported version '{}'; this slice pins Zig 0.14",
-                capsule.name, version
-            )),
-        },
+        "zig" => {
+            // The declared version is a constraint (a series like `0.15`, an
+            // exact `0.17.1`, or a range like `>=0.16`); it is accepted when at
+            // least one reviewed Zig series satisfies it. The returned label is
+            // unused for Zig.
+            let declared = crate::toolchain_version::VersionConstraint::parse(&capsule.version)
+                .map_err(|err| {
+                    format!(
+                        "Zig capsule '{}' declares an unsupported version '{}': {err}",
+                        capsule.name, capsule.version
+                    )
+                })?;
+            if declared.intersects(&crate::toolchain_version::zig_reviewed()) {
+                Ok("zig")
+            } else {
+                Err(format!(
+                    "Zig capsule '{}' declares '{}', outside the reviewed Zig series ({})",
+                    capsule.name,
+                    capsule.version,
+                    crate::toolchain_version::zig_reviewed().describe()
+                ))
+            }
+        }
+        "cuda" => {
+            // The declaration names a toolkit (`cuda-13.0`); CUDA source, and
+            // the C++ runner nvcc builds beside it, compile as C++17.
+            let declared = crate::cuda::declared_toolkit(&capsule.version).map_err(|err| {
+                format!(
+                    "CUDA capsule '{}' declares an unsupported toolkit: {err}",
+                    capsule.name
+                )
+            })?;
+            if declared.intersects(&crate::toolchain_version::cuda_min_supported()) {
+                Ok("-std=c++17")
+            } else {
+                Err(format!(
+                    "CUDA capsule '{}' declares '{}', older than the oldest supported toolkit ({})",
+                    capsule.name,
+                    capsule.version,
+                    crate::toolchain_version::cuda_min_supported().describe()
+                ))
+            }
+        }
         language => Err(format!(
             "native language '{language}' is not executable in this slice"
         )),
@@ -799,18 +873,46 @@ fn native_standard(capsule: &Capsule) -> Result<&'static str, String> {
 }
 
 fn native_source_extension(capsule: &Capsule) -> &'static str {
-    if is_cpp_language(&capsule.language) {
+    if is_cuda_language(&capsule.language) {
+        "cu"
+    } else if is_cpp_language(&capsule.language) {
         "cpp"
     } else {
         "c"
     }
 }
 
+/// The generated runner is plain C++ for a CUDA capsule: nvcc hands it to the
+/// host compiler, and only the capsule itself is device code.
+fn native_runner_extension(capsule: &Capsule) -> &'static str {
+    if is_cuda_language(&capsule.language) {
+        "cpp"
+    } else {
+        native_source_extension(capsule)
+    }
+}
+
+/// The Zig versions a capsule may run on: its declaration narrowed to the
+/// reviewed series. Several Zigs can be installed side by side; host
+/// resolution looks for the newest one inside this range, so each capsule runs
+/// on a compiler of the series it was written for.
+fn zig_capsule_want(capsule: &Capsule) -> crate::toolchain_version::VersionConstraint {
+    use crate::toolchain_version::{zig_reviewed, VersionConstraint};
+    VersionConstraint::parse(&capsule.version)
+        .ok()
+        .and_then(|declared| declared.intersection(&zig_reviewed()))
+        .unwrap_or_else(zig_reviewed)
+}
+
 fn detect_native_toolchain(capsule: &Capsule) -> Option<Toolchain> {
+    use crate::toolchain_version::rust_min_supported;
     if is_rust_language(&capsule.language) {
-        detect_rust_toolchain()
+        // Rust has no declared version, only a minimum supported compiler.
+        resolve_rust_toolchain(&rust_min_supported())
     } else if is_zig_language(&capsule.language) {
-        detect_zig_toolchain()
+        resolve_zig_toolchain(&zig_capsule_want(capsule))
+    } else if is_cuda_language(&capsule.language) {
+        crate::native_build::resolve_cuda_toolchain(&crate::cuda::capsule_toolkit_want(capsule))
     } else if is_cpp_language(&capsule.language) {
         detect_cpp_toolchain()
     } else {
@@ -843,6 +945,8 @@ fn compiler_unavailable_message(capsule: &Capsule) -> &'static str {
         "no host Rust compiler found (looked for $RUSTC, rustc)"
     } else if is_zig_language(&capsule.language) {
         "no host Zig compiler found (looked for $ZIG, zig)"
+    } else if is_cuda_language(&capsule.language) {
+        "no CUDA toolkit found (looked for $NVCC, nvcc on PATH, $CUDA_HOME, $CUDA_PATH, /usr/local/cuda*, /opt/cuda)"
     } else if is_cpp_language(&capsule.language) {
         "no host C++ compiler found (looked for $CXX, c++, clang++, g++)"
     } else {
@@ -854,12 +958,74 @@ pub(crate) fn validate_native_toolchain_version(
     capsule: &Capsule,
     toolchain: &Toolchain,
 ) -> Result<(), String> {
-    let reviewed_zig = toolchain.version == "0.14" || toolchain.version.starts_with("0.14.");
-    if is_zig_language(&capsule.language) && !reviewed_zig {
-        return Err(format!(
-            "native_runtime_version_mismatch: capsule '{}' pins Zig 0.14, found {}",
-            capsule.name, toolchain.version
-        ));
+    use crate::toolchain_version::{rust_min_supported, zig_reviewed, Version, VersionConstraint};
+
+    if is_zig_language(&capsule.language) {
+        // Zig makes no cross-version source promise, so the host must land in
+        // the reviewed series and also satisfy the capsule's own declaration.
+        let reviewed = zig_reviewed();
+        let host = Version::extract(&toolchain.version).ok_or_else(|| {
+            format!(
+                "native_runtime_version_mismatch: capsule '{}' could not read a Zig version from '{}'",
+                capsule.name, toolchain.version
+            )
+        })?;
+        if !reviewed.matches(&host) {
+            return Err(format!(
+                "native_runtime_version_mismatch: capsule '{}' needs Zig {} (the reviewed series), found {}",
+                capsule.name,
+                reviewed.describe(),
+                host
+            ));
+        }
+        let declared = VersionConstraint::parse(&capsule.version).map_err(|err| {
+            format!(
+                "Zig capsule '{}' declares an unparseable version '{}': {err}",
+                capsule.name, capsule.version
+            )
+        })?;
+        if !declared.matches(&host) {
+            return Err(format!(
+                "native_runtime_version_mismatch: capsule '{}' declares Zig {}, found {}",
+                capsule.name,
+                declared.describe(),
+                host
+            ));
+        }
+    } else if is_cuda_language(&capsule.language) {
+        // Resolution looks for a toolkit inside the declaration, but falls
+        // back to whatever it found so the mismatch can be reported here.
+        let want = crate::cuda::capsule_toolkit_want(capsule);
+        let host = Version::extract(&toolchain.version).ok_or_else(|| {
+            format!(
+                "native_runtime_version_mismatch: capsule '{}' could not read a CUDA release from '{}'",
+                capsule.name, toolchain.version
+            )
+        })?;
+        if !want.matches(&host) {
+            return Err(format!(
+                "native_runtime_version_mismatch: capsule '{}' declares {} (CUDA {}), found CUDA {}",
+                capsule.name,
+                capsule.version,
+                want.describe(),
+                host
+            ));
+        }
+    } else if is_rust_language(&capsule.language) {
+        // Rust is backward compatible, so this is a minimum (MSRV): the emitted
+        // runners use `unsafe extern`. A host version we cannot read is not
+        // rejected — we only fail a version we can read and that is too old.
+        if let Some(host) = Version::extract(&toolchain.version) {
+            let minimum = rust_min_supported();
+            if !minimum.matches(&host) {
+                return Err(format!(
+                    "native_runtime_version_mismatch: capsule '{}' needs rustc {} (generated runners use `unsafe extern`), found {}",
+                    capsule.name,
+                    minimum.describe(),
+                    host
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -988,6 +1154,12 @@ fn native_process_limits(capsule: &Capsule) -> NativeProcessLimits {
             _ => {}
         }
     }
+    if is_cuda_language(&capsule.language) && cfg!(unix) {
+        // The CUDA driver reserves tens of GB of address space when it creates
+        // a context, so an address-space ceiling stops every CUDA runner; the
+        // same budget is applied to the data segment instead.
+        applied.limits.data_bytes = applied.limits.memory_bytes.take();
+    }
     applied
 }
 
@@ -995,8 +1167,14 @@ fn validate_live_native_capability_profile(
     capsule: &Capsule,
     host_owned_artifact_write: bool,
 ) -> Result<(), String> {
+    let cuda = is_cuda_language(&capsule.language);
     let unsupported = |capability: &str| {
         if capability.ends_with(".none") {
+            return false;
+        }
+        // GPU compute is what a CUDA capsule is for; the device it may use is
+        // scoped through `CUDA_VISIBLE_DEVICES` (see `crate::cuda`).
+        if cuda && capability == "gpu.compute" {
             return false;
         }
         let category = capability.split('.').next().unwrap_or(capability);
@@ -1156,11 +1334,16 @@ fn cpp_symbol_has_explicit_c_linkage(source: &str, symbol: &str) -> bool {
 
 fn validate_native_language_contract(capsule: &Capsule) -> Result<(), String> {
     native_standard(capsule)?;
-    if is_cpp_language(&capsule.language) {
+    if is_cpp_language(&capsule.language) || is_cuda_language(&capsule.language) {
+        let label = if is_cuda_language(&capsule.language) {
+            "CUDA"
+        } else {
+            "C++"
+        };
         let source = capsule.code.join("\n");
         if !cpp_symbol_has_explicit_c_linkage(&source, &capsule.name) {
             return Err(format!(
-                "C++ capsule '{}' must define its boundary function with explicit extern \"C\" linkage",
+                "{label} capsule '{}' must define its boundary function with explicit extern \"C\" linkage",
                 capsule.name
             ));
         }
@@ -1172,7 +1355,7 @@ fn validate_native_language_contract(capsule: &Capsule) -> Result<(), String> {
         let free_symbol = format!("{}_free", capsule.name);
         if owns_output && !cpp_symbol_has_explicit_c_linkage(&source, &free_symbol) {
             return Err(format!(
-                "C++ capsule '{}' must define its owned-output deallocator '{}' with explicit extern \"C\" linkage",
+                "{label} capsule '{}' must define its owned-output deallocator '{}' with explicit extern \"C\" linkage",
                 capsule.name, free_symbol
             ));
         }
@@ -1984,9 +2167,11 @@ fn invoke_live_impl(
     args: &[NativeValue],
     mut cache: Option<&mut NativeRunnerCache>,
 ) -> Result<NativeInvocation, String> {
-    if capsule.risk_class() != "native" || !is_live_native_language(&capsule.language) {
+    if !matches!(capsule.risk_class(), "native" | "gpu")
+        || !is_live_native_language(&capsule.language)
+    {
         return Err(format!(
-            "native_runtime_unsupported: live native dispatch currently supports C/C++/Rust/Zig capsules, got '{}' ({})",
+            "native_runtime_unsupported: live native dispatch currently supports C/C++/Rust/Zig/CUDA capsules, got '{}' ({})",
             capsule.name, capsule.language
         ));
     }
@@ -2036,6 +2221,11 @@ fn invoke_live_impl(
     } else if is_zig_language(&capsule.language) {
         validate_zig_boundary(program, capsule, args)?;
     }
+    let cuda_request = if is_cuda_language(&capsule.language) {
+        Some(validate_cuda_capsule(capsule)?)
+    } else {
+        None
+    };
 
     let signature = extern_c_signature(capsule)
         .map_err(|err| format!("native_capsule_boundary_unsupported: {err}"))?;
@@ -2059,6 +2249,10 @@ fn invoke_live_impl(
         )
     })?;
     validate_native_toolchain_version(capsule, &toolchain)?;
+    let cuda_device = match &cuda_request {
+        Some(request) => Some(select_cuda_device(capsule, request)?),
+        None => None,
+    };
     let started = Instant::now();
     let wall_limit = native_wall_limit(capsule);
     let wall_limit_ms = Some(wall_limit.timeout.as_millis());
@@ -2148,6 +2342,17 @@ fn invoke_live_impl(
                 .unwrap_or_default()
         )),
         toolchain: format!("{} ({})", toolchain.name, toolchain.version),
+        toolchain_semver: crate::toolchain_version::Version::extract(&toolchain.version)
+            .map(|version| version.to_string()),
+        toolchain_requirement: if is_zig_language(&capsule.language) {
+            Some(zig_capsule_want(capsule).describe())
+        } else if is_cuda_language(&capsule.language) {
+            Some(crate::cuda::capsule_toolkit_want(capsule).describe())
+        } else if is_rust_language(&capsule.language) {
+            Some(crate::toolchain_version::rust_min_supported().describe())
+        } else {
+            None
+        },
         duration_ms: started.elapsed().as_millis(),
         wall_limit_ms,
         wall_limit_source: wall_limit.source.to_string(),
@@ -2159,7 +2364,10 @@ fn invoke_live_impl(
         containment: "process_tree".to_string(),
         cpu_limit_ms: process_limits.limits.cpu_ms,
         cpu_limit_source: process_limits.cpu_source.to_string(),
-        memory_limit_bytes: process_limits.limits.memory_bytes,
+        memory_limit_bytes: process_limits
+            .limits
+            .memory_bytes
+            .or(process_limits.limits.data_bytes),
         memory_limit_source: process_limits.memory_source.to_string(),
         peak_tree_memory_bytes: invocation.runner_peak_tree_memory_bytes,
         peak_tree_processes: invocation.runner_peak_tree_processes,
@@ -2228,8 +2436,105 @@ fn invoke_live_impl(
         job_read_transfer_bytes: invocation.runner_job_io.map(|usage| usage.read_bytes),
         job_write_transfer_bytes: invocation.runner_job_io.map(|usage| usage.write_bytes),
         job_other_transfer_bytes: invocation.runner_job_io.map(|usage| usage.other_bytes),
+        gpu: cuda_request.zip(cuda_device).map(|(request, device)| NativeGpuReceipt {
+            target: request.target.token,
+            device_index: device.index,
+            device_name: device.name,
+            compute_capability: device.compute_capability,
+            driver_version: device.driver_version,
+            visible_devices: if request.devices.is_empty() {
+                "all".to_string()
+            } else {
+                request
+                    .devices
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            },
+            host_memory_limit: if process_limits.limits.data_bytes.is_some() {
+                "data_segment"
+            } else {
+                "none"
+            }
+            .to_string(),
+            jit_cache: "disabled".to_string(),
+        }),
     });
     Ok(invocation)
+}
+
+/// A CUDA call's GPU target and device grant, checked before any host probe.
+struct CudaRequest {
+    target: crate::cuda::GpuTarget,
+    devices: Vec<u32>,
+}
+
+/// Host-independent CUDA checks: the platform, the declared target, the
+/// `gpu.compute` effect, and the device grant's shape.
+fn validate_cuda_capsule(capsule: &Capsule) -> Result<CudaRequest, String> {
+    if !cfg!(target_os = "linux") {
+        return Err(format!(
+            "native_runtime_unsupported: capsule '{}' is CUDA; live CUDA capsules run on Linux hosts",
+            capsule.name
+        ));
+    }
+    let target = crate::cuda::GpuTarget::of(capsule).ok_or_else(|| {
+        format!(
+            "native_capsule_boundary_unsupported: CUDA capsule '{}' must declare a GPU target (sm_NN or compute_NN) in its env, for example env \"cuda-13-sm_120\"",
+            capsule.name
+        )
+    })?;
+    if !capsule.effects.iter().any(|effect| effect == "gpu.compute") {
+        return Err(format!(
+            "native_capsule_boundary_unsupported: CUDA capsule '{}' must declare the gpu.compute effect",
+            capsule.name
+        ));
+    }
+    let devices = crate::cuda::granted_devices(capsule)
+        .map_err(|err| format!("native_capsule_capability_unsupported: {err}"))?;
+    Ok(CudaRequest { target, devices })
+}
+
+/// The GPU a CUDA call will run on: its first granted device, or the first GPU
+/// when the grant names none. Refuses before compiling when the host has no
+/// GPU, lacks a granted one, or has one the declared target cannot run on.
+fn select_cuda_device(
+    capsule: &Capsule,
+    request: &CudaRequest,
+) -> Result<crate::cuda::GpuDevice, String> {
+    let devices = crate::cuda::gpu_devices();
+    if devices.is_empty() {
+        return Err(format!(
+            "native_runtime_unavailable: capsule '{}' needs an NVIDIA GPU, and nvidia-smi reported none",
+            capsule.name
+        ));
+    }
+    for granted in &request.devices {
+        if !devices.iter().any(|device| device.index == *granted) {
+            return Err(format!(
+                "native_runtime_unavailable: capsule '{}' is granted GPU {granted}, which this host does not have (GPUs: {})",
+                capsule.name,
+                devices
+                    .iter()
+                    .map(|device| device.index.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+    let device = match request.devices.first() {
+        Some(first) => devices.iter().find(|device| device.index == *first),
+        None => devices.first(),
+    }
+    .expect("the granted devices were checked above");
+    if !request.target.runs_on(device.arch) {
+        return Err(format!(
+            "native_capsule_gpu_target_unsupported: capsule '{}' targets {}, which GPU {} ({}, compute capability {}) cannot run",
+            capsule.name, request.target.token, device.index, device.name, device.compute_capability
+        ));
+    }
+    Ok(device.clone())
 }
 
 fn borrowed_native_input_bytes(
@@ -2315,7 +2620,7 @@ fn native_failure(capsule: &Capsule, started: Instant, message: String) -> Box<N
             compile_wall_limit_ms: NATIVE_COMPILE_WALL_MS,
             cpu_limit_ms: limits.limits.cpu_ms,
             cpu_limit_source: limits.cpu_source.to_string(),
-            memory_limit_bytes: limits.limits.memory_bytes,
+            memory_limit_bytes: limits.limits.memory_bytes.or(limits.limits.data_bytes),
             memory_limit_source: limits.memory_source.to_string(),
             process_limit: limits.limits.active_processes,
             process_limit_source: limits.process_source.to_string(),
@@ -2513,7 +2818,15 @@ fn invoke_c_runner(request: LiveRunner<'_>) -> Result<NativeInvocation, String> 
     let capsule_c = scratch.join(format!("capsule.{}", native_source_extension(capsule)));
     let types_h = scratch.join("types.h");
     let boundary_h = scratch.join("boundary.h");
-    let runner_c = scratch.join(format!("live_runner.{}", native_source_extension(capsule)));
+    let runner_c = scratch.join(format!("live_runner.{}", native_runner_extension(capsule)));
+    // CUDA: nvcc compiles the capsule's device code for the declared target;
+    // the runner and the link are host-only.
+    let cuda = is_cuda_language(&capsule.language);
+    let device_target = cuda
+        .then(|| {
+            crate::cuda::GpuTarget::of(capsule).map(|target| format!("-arch={}", target.token))
+        })
+        .flatten();
     let capsule_o = scratch.join("capsule.o");
     let runner_o = scratch.join("live_runner.o");
     let exe = native_runner_exe(scratch);
@@ -2530,17 +2843,18 @@ fn invoke_c_runner(request: LiveRunner<'_>) -> Result<NativeInvocation, String> 
         format!("{}\n", args.join("\n"))
     };
     let steps = [
-        vec![
-            tc(toolchain),
-            standard.into(),
-            "-O2".into(),
-            "-c".into(),
-            "-I".into(),
-            disp(scratch),
-            disp(&capsule_c),
-            "-o".into(),
-            disp(&capsule_o),
-        ],
+        [tc(toolchain), standard.into(), "-O2".into()]
+            .into_iter()
+            .chain(device_target)
+            .chain([
+                "-c".into(),
+                "-I".into(),
+                disp(scratch),
+                disp(&capsule_c),
+                "-o".into(),
+                disp(&capsule_o),
+            ])
+            .collect(),
         vec![
             tc(toolchain),
             standard.into(),
@@ -2565,7 +2879,12 @@ fn invoke_c_runner(request: LiveRunner<'_>) -> Result<NativeInvocation, String> 
             let output = run_native_compile_step(argv, compiler_dir)?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                return Err(format!("native_capsule_compile_failed: {stderr}"));
+                let hint = cuda
+                    .then(|| crate::cuda::compile_hint(&stderr))
+                    .flatten()
+                    .map(|hint| format!(" (hint: {hint})"))
+                    .unwrap_or_default();
+                return Err(format!("native_capsule_compile_failed: {stderr}{hint}"));
             }
         }
     }
@@ -2576,16 +2895,30 @@ fn invoke_c_runner(request: LiveRunner<'_>) -> Result<NativeInvocation, String> 
     verify_native_runner_before_launch(&exe, expected_runner_sha256, verified_runner_sha256)?;
     let argv = vec![disp(&exe)];
     let wall = native_wall_limit(capsule);
-    let run = match run_with_path_timeout_limited_isolated(
-        &argv,
-        compiler_dir,
-        scratch,
-        request.as_bytes(),
-        wall.timeout,
-        native_process_limits(capsule).limits,
-    )
-    .map_err(native_child_error)?
-    {
+    let limits = native_process_limits(capsule).limits;
+    let launched = if cuda {
+        let devices = crate::cuda::granted_devices(capsule)
+            .map_err(|err| format!("native_capsule_capability_unsupported: {err}"))?;
+        crate::native_build::run_with_path_timeout_limited_isolated_env(
+            &argv,
+            compiler_dir,
+            scratch,
+            &crate::cuda::runner_environment(&devices),
+            request.as_bytes(),
+            wall.timeout,
+            limits,
+        )
+    } else {
+        run_with_path_timeout_limited_isolated(
+            &argv,
+            compiler_dir,
+            scratch,
+            request.as_bytes(),
+            wall.timeout,
+            limits,
+        )
+    };
+    let run = match launched.map_err(native_child_error)? {
         Some(run) => run,
         None => return Err(native_timeout_error(capsule, wall)),
     };
@@ -3116,9 +3449,27 @@ fn invoke_zig_runner(request: LiveRunner<'_>) -> Result<NativeInvocation, String
     let cache_dir = scratch.join("zig-cache");
     let global_cache_dir = scratch.join("zig-global-cache");
     let exe = native_runner_exe(scratch);
+    // The runner is generated for the resolved compiler's API family, and
+    // boundaries that compiler is known to miscompile are refused up front.
+    let host = crate::toolchain_version::Version::extract(&toolchain.version).ok_or_else(|| {
+        format!(
+            "native_runtime_version_mismatch: capsule '{}' could not read a Zig version from '{}'",
+            capsule.name, toolchain.version
+        )
+    })?;
+    let profile = ZigRunnerProfile::for_version(&host).ok_or_else(|| {
+        format!(
+            "native_runtime_version_mismatch: capsule '{}' has no reviewed Zig runner profile for {host}",
+            capsule.name
+        )
+    })?;
+    refuse_zig_struct_abi_hazard(program, capsule, &host)?;
     if !reuse_runner {
         write_file(&capsule_zig, &capsule.code.join("\n"))?;
-        write_file(&runner_zig, &generate_zig_live_runner(program, capsule)?)?;
+        write_file(
+            &runner_zig,
+            &generate_zig_live_runner_for(program, capsule, profile)?,
+        )?;
     }
     let request = if args.is_empty() {
         String::new()
@@ -3209,9 +3560,161 @@ fn invoke_zig_runner(request: LiveRunner<'_>) -> Result<NativeInvocation, String
     Ok(invocation)
 }
 
+/// How a generated Zig runner talks to the standard library. Zig's I/O API
+/// changed twice across the reviewed series, so the runner's entry point,
+/// request read, and result writer are generated per API family; argument
+/// parsing, the capsule call, and result printing are shared by all three.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ZigRunnerProfile {
+    /// Zig 0.14: `main()`, `std.io.getStdIn`/`getStdOut`, unbuffered writer.
+    Classic,
+    /// Zig 0.15: `main()` with buffered `std.fs.File` readers and writers.
+    Buffered,
+    /// Zig 0.16 and 0.17: `main(init: std.process.Init)` with the `std.Io`
+    /// interface threaded through every file operation.
+    Io,
+}
+
+impl ZigRunnerProfile {
+    /// The profile for a host Zig version, or `None` outside the reviewed
+    /// series (`toolchain_version::zig_reviewed`).
+    pub(crate) fn for_version(version: &crate::toolchain_version::Version) -> Option<Self> {
+        match (version.major, version.minor) {
+            (0, 14) => Some(Self::Classic),
+            (0, 15) => Some(Self::Buffered),
+            (0, 16) | (0, 17) => Some(Self::Io),
+            _ => None,
+        }
+    }
+
+    /// `main` through `wire`, the request read from stdin.
+    fn prologue(self) -> &'static str {
+        match self {
+            Self::Classic => "pub fn main() !void {\n    const allocator = std.heap.page_allocator;\n    const request = try std.io.getStdIn().reader().readAllAlloc(allocator, 64 * 1024 * 1024);\n    defer allocator.free(request);\n    const wire = std.mem.trimRight(u8, request, \"\\r\\n\");\n",
+            Self::Buffered => "pub fn main() !void {\n    const allocator = std.heap.page_allocator;\n    var stdin_buffer: [4096]u8 = undefined;\n    var stdin_reader = std.fs.File.stdin().reader(&stdin_buffer);\n    const request = try stdin_reader.interface.allocRemaining(allocator, .limited(64 * 1024 * 1024));\n    defer allocator.free(request);\n    const wire = std.mem.trimEnd(u8, request, \"\\r\\n\");\n",
+            Self::Io => "pub fn main(init: std.process.Init) !void {\n    const io = init.io;\n    const allocator = init.gpa;\n    var stdin_buffer: [4096]u8 = undefined;\n    var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buffer);\n    const request = try stdin_reader.interface.allocRemaining(allocator, .limited(64 * 1024 * 1024));\n    defer allocator.free(request);\n    const wire = std.mem.trimEnd(u8, request, \"\\r\\n\");\n",
+        }
+    }
+
+    /// Binds `stdout`, the writer every result line goes through.
+    fn stdout_setup(self) -> &'static str {
+        match self {
+            Self::Classic => "    const stdout = std.io.getStdOut().writer();\n",
+            Self::Buffered => "    var stdout_buffer: [4096]u8 = undefined;\n    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);\n    const stdout = &stdout_writer.interface;\n",
+            Self::Io => "    var stdout_buffer: [4096]u8 = undefined;\n    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);\n    const stdout = &stdout_writer.interface;\n",
+        }
+    }
+
+    /// Drains `stdout` before `main` returns; the classic writer is unbuffered.
+    fn stdout_finish(self) -> &'static str {
+        match self {
+            Self::Classic => "",
+            Self::Buffered | Self::Io => "    try stdout.flush();\n",
+        }
+    }
+}
+
+/// Zig 0.14 through 0.16 miscompile some by-value `extern struct`s on x86-64
+/// System V: those larger than 8 and smaller than 16 bytes that hold a scalar
+/// field and an array straddling byte 8, where the struct's two register-sized
+/// halves meet. The call crashes or returns wrong values (reproduced with
+/// 0.14.1, 0.15.2, and 0.16.0 in `-O ReleaseSafe`; fixed in 0.17.0). Exactly
+/// 8- or 16-byte structs, array-only structs, and arrays that sit wholly on
+/// one side of byte 8 are unaffected. Such a boundary is refused rather than
+/// run; the rule is conservative (a 14-byte struct of this shape is refused
+/// although it was observed to work).
+pub(crate) fn refuse_zig_struct_abi_hazard(
+    program: &Program,
+    capsule: &Capsule,
+    host: &crate::toolchain_version::Version,
+) -> Result<(), String> {
+    if !cfg!(all(target_arch = "x86_64", not(windows)))
+        || *host >= crate::toolchain_version::Version::new(0, 17, 0)
+    {
+        return Ok(());
+    }
+    let by_value: Vec<&str> = capsule
+        .inputs
+        .iter()
+        .chain(capsule.outputs.iter())
+        .filter_map(|binding| match &binding.ty {
+            Type::Named(name) => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    if by_value.is_empty() {
+        return Ok(());
+    }
+    let layouts = crate::abi::analyze_abi(program, "x86_64-unknown-linux-gnu").structs;
+    for name in by_value {
+        let Some(layout) = layouts.iter().find(|layout| layout.name == name) else {
+            continue;
+        };
+        if layout.size <= 8 || layout.size >= 16 {
+            continue;
+        }
+        let (mut scalars, mut straddling_array) = (false, false);
+        walk_struct_fields(
+            program,
+            &layouts,
+            name,
+            0,
+            &mut scalars,
+            &mut straddling_array,
+        );
+        if scalars && straddling_array {
+            return Err(format!(
+                "native_capsule_boundary_unsupported: capsule '{}' passes struct '{name}' ({} bytes, a scalar field and an array crossing byte 8) by value, which Zig {host} miscompiles on x86-64; use a Zig 0.17 compiler for this capsule",
+                capsule.name, layout.size
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Visit a struct's fields with nested structs flattened, noting whether any
+/// field is a scalar and whether any array spans byte offset 8.
+fn walk_struct_fields(
+    program: &Program,
+    layouts: &[crate::abi::StructLayout],
+    name: &str,
+    base: usize,
+    scalars: &mut bool,
+    straddling_array: &mut bool,
+) {
+    let (Ok(decl), Some(layout)) = (
+        validate_native_struct(program, name),
+        layouts.iter().find(|layout| layout.name == name),
+    ) else {
+        return;
+    };
+    for (field, field_layout) in decl.fields.iter().zip(&layout.fields) {
+        let start = base + field_layout.offset;
+        let end = start + field_layout.size;
+        match &field.ty {
+            Type::Array { .. } => *straddling_array |= start < 8 && end > 8,
+            Type::Named(nested) => {
+                walk_struct_fields(program, layouts, nested, start, scalars, straddling_array)
+            }
+            _ => *scalars = true,
+        }
+    }
+}
+
+/// The live runner for the newest reviewed Zig API family; tests use it to
+/// inspect generated code without resolving a host compiler.
+#[cfg(test)]
 pub(crate) fn generate_zig_live_runner(
     program: &Program,
     capsule: &Capsule,
+) -> Result<String, String> {
+    generate_zig_live_runner_for(program, capsule, ZigRunnerProfile::Io)
+}
+
+pub(crate) fn generate_zig_live_runner_for(
+    program: &Program,
+    capsule: &Capsule,
+    profile: ZigRunnerProfile,
 ) -> Result<String, String> {
     let mut parse = String::new();
     let mut call_args = Vec::new();
@@ -3392,14 +3895,20 @@ pub(crate) fn generate_zig_live_runner(
     } else {
         "    if (lines.next() != null) return error.ArgumentCountMismatch;\n"
     };
+    // Zig rejects an unused local, so only bind the line splitter when the
+    // capsule actually consumes argument lines.
+    let lines_decl = if capsule.inputs.is_empty() {
+        String::new()
+    } else {
+        "    var lines = std.mem.splitScalar(u8, wire, '\\n');\n".to_string()
+    };
+    let prologue = profile.prologue();
+    let stdout_setup = profile.stdout_setup();
+    let stdout_finish = profile.stdout_finish();
     let runner = format!(
-        "const std = @import(\"std\");\nconst capsule = @import(\"capsule.zig\");\n\nfn parseArg(comptime T: type, value: ?[]const u8, position: usize) !T {{\n    _ = position;\n    const text = value orelse return error.ArgumentMissing;\n    return switch (@typeInfo(T)) {{\n        .int => std.fmt.parseInt(T, text, 10),\n        .float => std.fmt.parseFloat(T, text),\n        else => error.UnsupportedArgumentType,\n    }};\n}}\n\nfn parseSlice(comptime T: type, allocator: std.mem.Allocator, value: ?[]const u8, position: usize) ![]T {{\n    const text = value orelse return error.ArgumentMissing;\n    if (text.len == 0) return allocator.alloc(T, 0);\n    const count = std.mem.count(u8, text, \",\") + 1;\n    if (count > {MAX_NATIVE_SLICE_ELEMENTS}) return error.SliceTooLarge;\n    const result = try allocator.alloc(T, count);\n    errdefer allocator.free(result);\n    var tokens = std.mem.splitScalar(u8, text, ',');\n    for (result) |*item| item.* = try parseArg(T, tokens.next(), position);\n    return result;\n}}\n\npub fn main() !void {{\n    const allocator = std.heap.page_allocator;\n    const argv = try std.process.argsAlloc(allocator);\n    defer std.process.argsFree(allocator, argv);\n    if (argv.len != 2) return error.RequestPathMissing;\n    const request = try std.fs.cwd().readFileAlloc(allocator, argv[1], 64 * 1024 * 1024);\n    defer allocator.free(request);\n    const wire = std.mem.trimRight(u8, request, \"\\r\\n\");\n    var lines = std.mem.splitScalar(u8, wire, '\\n');\n{parse}{count_check}    const result: {output_ty} = capsule.{name}({call_args});\n    const stdout = std.io.getStdOut().writer();\n{result_print}{mutations}}}\n",
+        "const std = @import(\"std\");\nconst capsule = @import(\"capsule.zig\");\n\nfn parseArg(comptime T: type, value: ?[]const u8, position: usize) !T {{\n    _ = position;\n    const text = value orelse return error.ArgumentMissing;\n    return switch (@typeInfo(T)) {{\n        .int => std.fmt.parseInt(T, text, 10),\n        .float => std.fmt.parseFloat(T, text),\n        else => error.UnsupportedArgumentType,\n    }};\n}}\n\nfn parseSlice(comptime T: type, allocator: std.mem.Allocator, value: ?[]const u8, position: usize) ![]T {{\n    const text = value orelse return error.ArgumentMissing;\n    if (text.len == 0) return allocator.alloc(T, 0);\n    const count = std.mem.count(u8, text, \",\") + 1;\n    if (count > {MAX_NATIVE_SLICE_ELEMENTS}) return error.SliceTooLarge;\n    const result = try allocator.alloc(T, count);\n    errdefer allocator.free(result);\n    var tokens = std.mem.splitScalar(u8, text, ',');\n    for (result) |*item| item.* = try parseArg(T, tokens.next(), position);\n    return result;\n}}\n\n{prologue}{lines_decl}{parse}{count_check}    const result: {output_ty} = capsule.{name}({call_args});\n{stdout_setup}{result_print}{mutations}{stdout_finish}}}\n",
         name = capsule.name,
         call_args = call_args.join(", ")
-    );
-    let runner = runner.replace(
-        "    const argv = try std.process.argsAlloc(allocator);\n    defer std.process.argsFree(allocator, argv);\n    if (argv.len != 2) return error.RequestPathMissing;\n    const request = try std.fs.cwd().readFileAlloc(allocator, argv[1], 64 * 1024 * 1024);\n",
-        "    const request = try std.io.getStdIn().reader().readAllAlloc(allocator, 64 * 1024 * 1024);\n",
     );
     let string_parser = format!(
         "fn hexNibble(byte: u8) !u8 {{\n    return switch (byte) {{\n        '0'...'9' => byte - '0',\n        'a'...'f' => byte - 'a' + 10,\n        'A'...'F' => byte - 'A' + 10,\n        else => error.InvalidStringEncoding,\n    }};\n}}\n\nfn parseString(allocator: std.mem.Allocator, value: ?[]const u8, position: usize) ![]u8 {{\n    _ = position;\n    const text = value orelse return error.StringArgumentMissing;\n    if (!std.mem.startsWith(u8, text, \"str:\")) return error.InvalidStringEnvelope;\n    const hex = text[4..];\n    if (hex.len % 2 != 0) return error.InvalidStringEncoding;\n    const byte_len = hex.len / 2;\n    if (byte_len > {MAX_NATIVE_STRING_INPUT_BYTES}) return error.StringTooLarge;\n    const result = try allocator.alloc(u8, byte_len);\n    errdefer allocator.free(result);\n    for (result, 0..) |*byte, index| {{\n        const high = try hexNibble(hex[index * 2]);\n        const low = try hexNibble(hex[index * 2 + 1]);\n        byte.* = (high << 4) | low;\n    }}\n    if (!std.unicode.utf8ValidateSlice(result)) return error.InvalidUtf8;\n    return result;\n}}\n\n"

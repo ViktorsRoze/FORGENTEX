@@ -1,6 +1,6 @@
 # Native data boundaries: Zig returns an owned pointer-width unsigned Vec[usize].
 
-foreign make_sizes_usize_zig zig version "0.14" effects [alloc]:
+foreign make_sizes_usize_zig zig version "0.17" effects [alloc]:
     input count: i32
     output sizes: Vec[usize]
     sandbox "fs.none"

@@ -17,6 +17,16 @@ pub struct ToolProbe {
     pub version: Option<String>,
 }
 
+/// One toolchain found by Phase 2 discovery, with whether it falls in the
+/// language's reviewed set (see `docs/toolchain_versioning.md`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiscoveredToolchain {
+    pub language: String,
+    pub name: String,
+    pub version: String,
+    pub reviewed: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DoctorReport {
     pub schema: String,
@@ -32,6 +42,9 @@ pub struct DoctorReport {
     pub native_c_ready: bool,
     pub zig_ready: bool,
     pub tools: Vec<ToolProbe>,
+    pub discovered_toolchains: Vec<DiscoveredToolchain>,
+    /// NVIDIA GPUs that CUDA capsules can run on, as `nvidia-smi` reports them.
+    pub gpus: Vec<crate::cuda::GpuDevice>,
     pub issues: Vec<String>,
     pub recommendations: Vec<String>,
 }
@@ -61,6 +74,7 @@ pub fn doctor_report() -> DoctorReport {
     let source_build_ready = rustc.found && cargo.found;
     let native_c_ready = native_c.found;
     let zig_ready = zig.found;
+    let discovered_toolchains = discover_toolchains();
 
     let mut issues = Vec::new();
     let mut recommendations = Vec::new();
@@ -90,7 +104,7 @@ pub fn doctor_report() -> DoctorReport {
         );
     }
     if !zig_ready {
-        recommendations.push("install Zig 0.14 only when using the Zig backend".to_string());
+        recommendations.push("install Zig from a reviewed series (0.14-0.17) only when using the Zig backend or Zig capsules".to_string());
     }
 
     DoctorReport {
@@ -107,9 +121,69 @@ pub fn doctor_report() -> DoctorReport {
         native_c_ready,
         zig_ready,
         tools: vec![rustc, cargo, git, native_c, zig],
+        discovered_toolchains,
+        gpus: crate::cuda::gpu_devices().to_vec(),
         issues,
         recommendations,
     }
+}
+
+/// Enumerate every native toolchain Phase 2 discovery can see, tagged with
+/// whether it falls in the language's reviewed set.
+fn discover_toolchains() -> Vec<DiscoveredToolchain> {
+    use crate::toolchain_version::{cuda_min_supported, rust_min_supported, zig_reviewed, Version};
+    let mut discovered = Vec::new();
+    for toolchain in crate::native_build::discover_zig_toolchains() {
+        let reviewed = Version::extract(&toolchain.version)
+            .is_some_and(|value| zig_reviewed().matches(&value));
+        discovered.push(DiscoveredToolchain {
+            language: "zig".to_string(),
+            name: toolchain.name,
+            version: toolchain.version,
+            reviewed,
+        });
+    }
+    for toolchain in crate::native_build::discover_rust_toolchains() {
+        let reviewed = Version::extract(&toolchain.version)
+            .is_some_and(|value| rust_min_supported().matches(&value));
+        discovered.push(DiscoveredToolchain {
+            language: "rust".to_string(),
+            name: toolchain.name,
+            version: toolchain.version,
+            reviewed,
+        });
+    }
+    for toolchain in crate::julia_run::discover_julia() {
+        let reviewed = Version::extract(&toolchain.version)
+            .is_some_and(|value| crate::julia_run::julia_min_supported().matches(&value));
+        discovered.push(DiscoveredToolchain {
+            language: "julia".to_string(),
+            name: toolchain.name,
+            version: toolchain.version,
+            reviewed,
+        });
+    }
+    for toolchain in crate::moonbit_run::discover_moonbit() {
+        let reviewed = Version::parse(&toolchain.moonc_version)
+            .is_some_and(|value| crate::moonbit_run::moonbit_min_supported().matches(&value));
+        discovered.push(DiscoveredToolchain {
+            language: "moonbit".to_string(),
+            name: toolchain.moon.display().to_string(),
+            version: toolchain.moonc_version,
+            reviewed,
+        });
+    }
+    for toolchain in crate::native_build::discover_cuda_toolchains() {
+        let reviewed = Version::extract(&toolchain.version)
+            .is_some_and(|value| cuda_min_supported().matches(&value));
+        discovered.push(DiscoveredToolchain {
+            language: "cuda".to_string(),
+            name: toolchain.name,
+            version: toolchain.version,
+            reviewed,
+        });
+    }
+    discovered
 }
 
 impl DoctorReport {
@@ -161,6 +235,39 @@ impl DoctorReport {
             out.push('\n');
         }
         out.push_str("  ],\n");
+        out.push_str("  \"discovered_toolchains\": [\n");
+        for (index, toolchain) in self.discovered_toolchains.iter().enumerate() {
+            out.push_str(&format!(
+                "    {{\"language\": {}, \"name\": {}, \"version\": {}, \"reviewed\": {}}}",
+                string(&toolchain.language),
+                string(&toolchain.name),
+                string(&toolchain.version),
+                toolchain.reviewed
+            ));
+            if index + 1 < self.discovered_toolchains.len() {
+                out.push(',');
+            }
+            out.push('\n');
+        }
+        out.push_str("  ],\n");
+        out.push_str("  \"gpus\": [\n");
+        for (index, gpu) in self.gpus.iter().enumerate() {
+            out.push_str(&format!(
+                "    {{\"index\": {}, \"name\": {}, \"compute_capability\": {}, \"memory_mib\": {}, \"driver_version\": {}}}",
+                gpu.index,
+                string(&gpu.name),
+                string(&gpu.compute_capability),
+                gpu.memory_mib
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "null".to_string()),
+                string(&gpu.driver_version)
+            ));
+            if index + 1 < self.gpus.len() {
+                out.push(',');
+            }
+            out.push('\n');
+        }
+        out.push_str("  ],\n");
         out.push_str(&format!("  \"issues\": {},\n", string_array(&self.issues)));
         out.push_str(&format!(
             "  \"recommendations\": {}\n",
@@ -186,6 +293,28 @@ impl DoctorReport {
             readiness(self.native_c_ready),
             readiness(self.zig_ready)
         );
+        for toolchain in &self.discovered_toolchains {
+            out.push_str(&format!(
+                "toolchain: {} {} ({}){}\n",
+                toolchain.language,
+                toolchain.version,
+                toolchain.name,
+                if toolchain.reviewed { " reviewed" } else { "" }
+            ));
+        }
+        for gpu in &self.gpus {
+            out.push_str(&format!(
+                "gpu: {} {} (compute {}, sm_{}, {} MiB, driver {})\n",
+                gpu.index,
+                gpu.name,
+                gpu.compute_capability,
+                gpu.arch,
+                gpu.memory_mib
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
+                gpu.driver_version
+            ));
+        }
         for issue in &self.issues {
             out.push_str(&format!("issue: {issue}\n"));
         }
@@ -281,6 +410,7 @@ fn os_version() -> String {
 /// Turn Windows' NT compatibility version into the product generation users
 /// expect. Windows 11 deliberately still reports major/minor `10.0`; build
 /// 22000 is the stable boundary between Windows 10 and Windows 11.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn classify_windows_version(raw: &str) -> String {
     let version = raw
         .split(|character: char| !(character.is_ascii_digit() || character == '.'))

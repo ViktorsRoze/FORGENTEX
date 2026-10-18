@@ -1,6 +1,6 @@
 # Owned-output v1.1: Zig transfers a Vec[u8] descriptor and frees it explicitly.
 
-foreign make_bytes_zig zig version "0.14" effects [alloc, cpu.avx2]:
+foreign make_bytes_zig zig version "0.17" effects [alloc, cpu.avx2]:
     input count: i32
     output bytes: Vec[u8]
     sandbox "fs.none"

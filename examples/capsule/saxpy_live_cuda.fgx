@@ -1,0 +1,53 @@
+# A live CUDA capsule: y = a*x + y on the GPU.
+# The boundary is an extern "C" host function, as for a C++ capsule. It copies
+# the borrowed host slices to device memory, launches the kernel, and copies y
+# back; Forgentex copies y back to the caller. The env names the GPU target
+# (sm_120 is the RTX 50 series); the gpu.compute grant names the device.
+
+foreign saxpy_gpu cuda version "cuda-13.0" env "cuda-13-sm_120" effects [gpu.compute, alloc]:
+    input a: f32
+    input x: &[f32]
+    input y: &mut [f32]
+    output ok: bool
+    sandbox "gpu.compute device:0"
+    sandbox "limit.mem_mb 512"
+    code:
+        #include <cuda_runtime.h>
+        #include <cstddef>
+
+        __global__ void saxpy_kernel(std::size_t n, float a, const float *x, float *y) {
+            std::size_t i = blockIdx.x * static_cast<std::size_t>(blockDim.x) + threadIdx.x;
+            if (i < n) y[i] = a * x[i] + y[i];
+        }
+
+        extern "C" bool saxpy_gpu(
+            float a,
+            const float *x,
+            std::size_t x_len,
+            float *y,
+            std::size_t y_len
+        ) {
+            if (x_len != y_len) return false;
+            if (x_len == 0) return true;
+            const std::size_t bytes = x_len * sizeof(float);
+            float *dx = nullptr;
+            float *dy = nullptr;
+            bool ok = cudaMalloc(&dx, bytes) == cudaSuccess
+                && cudaMalloc(&dy, bytes) == cudaSuccess
+                && cudaMemcpy(dx, x, bytes, cudaMemcpyHostToDevice) == cudaSuccess
+                && cudaMemcpy(dy, y, bytes, cudaMemcpyHostToDevice) == cudaSuccess;
+            if (ok) {
+                const unsigned blocks = static_cast<unsigned>((x_len + 255) / 256);
+                saxpy_kernel<<<blocks, 256>>>(x_len, a, dx, dy);
+                ok = cudaGetLastError() == cudaSuccess
+                    && cudaDeviceSynchronize() == cudaSuccess
+                    && cudaMemcpy(y, dy, bytes, cudaMemcpyDeviceToHost) == cudaSuccess;
+            }
+            cudaFree(dx);
+            cudaFree(dy);
+            return ok;
+        }
+
+fn saxpy_then_first(a: f32, x: &[f32], y: &mut [f32]) -> f32 effects [gpu.compute, alloc]:
+    let ok: bool = saxpy_gpu(a, x, y)
+    return y[0]

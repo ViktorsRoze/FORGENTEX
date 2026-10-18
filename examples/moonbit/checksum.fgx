@@ -1,0 +1,45 @@
+# MoonBit, compiled to WebAssembly and run sandboxed.
+#
+#   fgx capsule-run examples/moonbit/checksum.fgx --moonbit
+#
+# Forgentex wraps this body in a generated main, builds it with `moon` for the
+# wasm-gc target, and runs it in moonrun under a deny-all policy: no files, no
+# network, no environment. The compiled module may import only the console the
+# wrapper uses, so a MoonBit capsule is compute-only. `version "0.10"` is the
+# moonc 0.10.x series.
+
+foreign fletcher16 moonbit version "0.10" effects [alloc]:
+    input data: &[i32]
+    output checksum: i32
+    sandbox "fs.none"
+    code:
+        fn fletcher16(data : Array[Int]) -> Int {
+          let mut sum1 = 0
+          let mut sum2 = 0
+          for byte in data {
+            sum1 = (sum1 + (byte & 255)) % 255
+            sum2 = (sum2 + sum1) % 255
+          }
+          (sum2 << 8) | sum1
+        }
+
+foreign collatz_steps moonbit version "0.10" effects [alloc]:
+    input start: i64
+    output steps: i64
+    sandbox "fs.none"
+    mock 1 -> 0
+    mock 6 -> 8
+    mock 27 -> 111
+    code:
+        fn collatz_steps(start : Int64) -> Int64 {
+          let mut n = start
+          let mut steps = 0L
+          while n != 1L {
+            n = if n % 2L == 0L { n / 2L } else { 3L * n + 1L }
+            steps = steps + 1L
+          }
+          steps
+        }
+
+fn checksum_of(data: &[i32]) -> i32 effects [alloc]:
+    return fletcher16(data)

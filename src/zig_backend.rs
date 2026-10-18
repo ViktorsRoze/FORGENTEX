@@ -312,10 +312,11 @@ fn emit_function(
     ensure_zig_lowerable(function)?;
     let mut env = Env::from_params(&function.params, &function.ret, enums, function_returns);
     let ir_function = ir_function_for_ast(ir, function)?;
+    let reassigned = reassigned_params(ir_function);
     let mut out = String::new();
-    out.push_str(&function_signature_from_ir(ir_function)?);
+    out.push_str(&function_signature_from_ir(ir_function, &reassigned)?);
     out.push_str(" {\n");
-    try_emit_fir_body(ir_function, &mut env, structs, &mut out).map_err(|reason| {
+    try_emit_fir_body(ir_function, &reassigned, &mut env, structs, &mut out).map_err(|reason| {
         format!(
             "Zig backend could not emit FIR body for function '{}': {reason}",
             function.name
@@ -327,6 +328,7 @@ fn emit_function(
 
 fn try_emit_fir_body(
     function: &IrFunction,
+    reassigned: &std::collections::HashSet<String>,
     env: &mut Env,
     structs: &HashMap<String, StructDecl>,
     out: &mut String,
@@ -338,6 +340,18 @@ fn try_emit_fir_body(
     let mut trial_env = env.clone();
     let mut body = String::new();
     body.push_str("    // FIR body entry\n");
+    // Zig parameters are immutable; copy any reassigned parameter into a
+    // mutable local of the same name so the body's assignments are legal.
+    for param in &function.params {
+        if reassigned.contains(&param.name) {
+            body.push_str(&format!(
+                "    var {}: {} = {};\n",
+                ident(&param.name),
+                zig_type_from_ir(&param.ty)?,
+                ident(&format!("{}__arg", param.name))
+            ));
+        }
+    }
     let mut cursor = 0;
     match emit_fir_instructions(
         &block.instructions,
@@ -711,6 +725,12 @@ fn emit_fir_instruction(
                 ident(name),
                 zig_type(&ty)?
             ));
+            // Zig rejects a local that is never mutated or never read. The
+            // lowering cannot always know downstream use, so bind the address
+            // once: this marks the local used and mutation-capable without
+            // changing behavior, and is a no-op for locals that are genuinely
+            // reassigned or freed.
+            out.push_str(&format!("{pad}_ = &{};\n", ident(name)));
             if let Some(suffix) = native_vec_suffix(&ty) {
                 out.push_str(&format!(
                     "{pad}defer fgx_vec_{suffix}_free(&{});\n",
@@ -1069,17 +1089,48 @@ fn ir_struct_for_ast<'a>(ir: &'a BackendIr, decl: &StructDecl) -> Result<&'a IrS
         .ok_or_else(|| format!("FIR struct missing for '{}'", decl.name))
 }
 
-fn function_signature_from_ir(function: &IrFunction) -> Result<String, String> {
+/// Parameters the body reassigns. Zig function parameters are immutable, so
+/// these are renamed to `<name>__arg` in the signature and copied into a
+/// mutable local shadow of the original name at the top of the body.
+fn reassigned_params(function: &IrFunction) -> std::collections::HashSet<String> {
+    let names: std::collections::HashSet<&str> = function
+        .params
+        .iter()
+        .map(|param| param.name.as_str())
+        .collect();
+    let mut reassigned = std::collections::HashSet::new();
+    for block in &function.blocks {
+        for instruction in &block.instructions {
+            if instruction.op != "assign" {
+                continue;
+            }
+            if let [target_text, _] = instruction.args.as_slice() {
+                if let Ok(Expr::Var(name)) = parse_expr(target_text) {
+                    if names.contains(name.as_str()) {
+                        reassigned.insert(name);
+                    }
+                }
+            }
+        }
+    }
+    reassigned
+}
+
+fn function_signature_from_ir(
+    function: &IrFunction,
+    reassigned: &std::collections::HashSet<String>,
+) -> Result<String, String> {
     let visibility = if function.public { "pub " } else { "" };
     let params = function
         .params
         .iter()
         .map(|param| {
-            Ok(format!(
-                "{}: {}",
-                ident(&param.name),
-                zig_type_from_ir(&param.ty)?
-            ))
+            let name = if reassigned.contains(&param.name) {
+                ident(&format!("{}__arg", param.name))
+            } else {
+                ident(&param.name)
+            };
+            Ok(format!("{}: {}", name, zig_type_from_ir(&param.ty)?))
         })
         .collect::<Result<Vec<String>, String>>()?
         .join(", ");
@@ -1110,7 +1161,12 @@ fn emit_cast(
         Ok(format!("@as({target}, @floatFromInt({value}))"))
     } else if ty.is_integer() && source.is_float() {
         Ok(format!("@as({target}, @intFromFloat({value}))"))
-    } else if ty.is_integer() && source.is_integer() {
+    } else if ty.is_integer() {
+        // The source is another integer width (u32, usize, i64, ...) or could
+        // not be inferred (for example a builtin such as `str_len` that returns
+        // usize). Zig performs no implicit integer narrowing, so route every
+        // integer-target cast through @intCast; it is the identity when the
+        // widths already match.
         Ok(format!("@as({target}, @intCast({value}))"))
     } else {
         Ok(format!("@as({target}, {value})"))

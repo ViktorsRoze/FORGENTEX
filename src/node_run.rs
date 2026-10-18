@@ -72,6 +72,55 @@ pub fn detect_node() -> Option<(String, String)> {
     None
 }
 
+/// Why a TypeScript capsule cannot run on `node_name`, whose banner is
+/// `version` (as returned by `detect_node`, e.g. `node v18.19.1`), or `None`
+/// when it can. TypeScript runs through `--experimental-strip-types`, which
+/// needs the version in `toolchain_version::node_typescript_min` *and* a Node
+/// build that bundles the type stripper: distribution builds such as Ubuntu's
+/// `nodejs` package omit it, so a new-enough version is not sufficient. A
+/// banner that carries no readable version is not treated as too old.
+pub(crate) fn typescript_unsupported_reason(node_name: &str, version: &str) -> Option<String> {
+    use crate::toolchain_version::{node_typescript_min, Version};
+    if let Some(found) = Version::extract(version) {
+        let minimum = node_typescript_min();
+        if !minimum.matches(&found) {
+            return Some(format!(
+                "TypeScript capsules need Node {} for --experimental-strip-types; host node is {found}",
+                minimum.describe()
+            ));
+        }
+    }
+    if node_reports_typescript(node_name) == Some(false) {
+        return Some(format!(
+            "TypeScript capsules need a Node build with TypeScript support; host {version} reports process.features.typescript = false (distribution builds such as Ubuntu's nodejs package omit it)"
+        ));
+    }
+    None
+}
+
+/// Ask `node_name` whether it can strip TypeScript types. Node 22.10+ answers
+/// through `process.features.typescript` (`"strip"`, `"transform"`, or
+/// `false`). Returns `None` when the answer is unavailable — an older Node
+/// without the property, or a probe that failed to run — so the caller falls
+/// back to the version check alone.
+fn node_reports_typescript(node_name: &str) -> Option<bool> {
+    let output = Command::new(node_name)
+        .args([
+            "-p",
+            "typeof process.features.typescript === 'undefined' ? 'unknown' : String(process.features.typescript)",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    match String::from_utf8_lossy(&output.stdout).trim() {
+        "false" => Some(false),
+        "strip" | "transform" | "true" => Some(true),
+        _ => None,
+    }
+}
+
 pub(crate) fn dedent(lines: &[String]) -> String {
     let indent = lines
         .iter()
@@ -160,8 +209,13 @@ pub fn invoke_live_with(
     let body = dedent(&capsule.code);
     let entry = find_entry(&body)
         .ok_or_else(|| "no top-level function found in capsule body".to_string())?;
-    let (node_name, _version) =
+    let (node_name, version) =
         detect_node().ok_or_else(|| "no host node found (looked for $NODE, node)".to_string())?;
+    if capsule.language == "typescript" {
+        if let Some(reason) = typescript_unsupported_reason(&node_name, &version) {
+            return Err(reason);
+        }
+    }
 
     use std::sync::atomic::{AtomicU64, Ordering};
     static LIVE_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -289,6 +343,16 @@ pub fn run(file: &str, program: &Program, name: Option<&str>) -> Result<WebRun, 
             return Ok(report);
         }
     };
+    // A Node too old for type stripping cannot run TypeScript at all; that is
+    // the same honest outcome as having no Node, not a capsule failure.
+    if capsule.language == "typescript" {
+        if let Some(reason) = typescript_unsupported_reason(&node_name, &version) {
+            report.runtime = Some(version);
+            report.status = "runtime_unavailable".to_string();
+            report.message = Some(reason);
+            return Ok(report);
+        }
+    }
     report.runtime = Some(version);
 
     use std::sync::atomic::{AtomicU64, Ordering};

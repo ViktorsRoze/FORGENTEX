@@ -62,7 +62,7 @@ checklist is how to do that.
 Linux and macOS gaps, and the work that closes them, are itemised in
 [native_containment_platform_verification.md](native_containment_platform_verification.md).
 
-### Managed capsules (Python, Node, TypeScript, Go, JVM, .NET), cold path
+### Managed capsules (Python, Node, TypeScript, Go, JVM, .NET, Julia, MoonBit), cold path
 
 Managed runtimes run inside the same process containment as native runners
 (`src/managed_exec.rs`), without the AppContainer. Every property below is
@@ -96,7 +96,22 @@ declarations are waived, and the call's receipt records `"profile": "trusted"`
 and the waived list. Nothing a capsule declares can grant this — trust comes
 from whoever runs the program.
 
-### Warm workers (Python, Node, TypeScript, Go)
+### MoonBit capsules: the Wasm sandbox
+
+MoonBit capsules run under the managed layer above *and* inside `moonrun`'s
+deny-all policy, with their compiled imports checked first
+([julia_and_moonbit_capsules.md](julia_and_moonbit_capsules.md)). That changes
+the rows the managed layer cannot provide:
+
+| Property | All platforms |
+| --- | --- |
+| Filesystem denial | ✅ `moonrun` policy, and no file import may be compiled in — **demonstrated** (`Sandbox policy blocked file read`) |
+| Network denial | ✅ `moonrun` policy, and no socket import may be compiled in |
+| Environment | ✅ none visible to the guest — **demonstrated** (`@env` modules are refused at the import check) |
+| Process spawning | ✅ denied by the policy, and no spawn import may be compiled in |
+| Host effects (`fs.*`, `net.*`, `env.*`, `proc.*`) | refused before building |
+
+### Warm workers (Python, Node, TypeScript, Go, Julia)
 
 A warm worker is one long-lived process shared by every call to a capsule, so it
 cannot apply per-call limits. A capsule that declares any `limit.*` therefore

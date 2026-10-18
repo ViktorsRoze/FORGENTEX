@@ -24,6 +24,11 @@ ecosystems, and the package-lock files that pin them:
 | java | maven, gradle | pom.xml, gradle.lockfile |
 | csharp | nuget | packages.lock.json |
 | go | go | go.sum |
+| julia | julia | Manifest.toml |
+| moonbit | mooncakes | — |
+
+Julia and MoonBit capsules run live; see
+[julia_and_moonbit_capsules.md](julia_and_moonbit_capsules.md).
 
 ## Ecosystem reconciliation
 

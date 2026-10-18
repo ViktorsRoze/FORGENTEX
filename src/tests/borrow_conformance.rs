@@ -273,6 +273,8 @@ fn scheduled_ci_runs_multiple_replayable_borrow_campaign_seeds() {
     }
     assert!(workflow.contains("--campaign-cases 96"));
     assert!(workflow.contains("--failure-dir $artifactDirectory"));
-    assert!(workflow.contains("actions/upload-artifact@v4"));
+    // v6 is the first upload-artifact major that runs on Node 24; v4 and v5
+    // declare Node 20, which GitHub's runners no longer support.
+    assert!(workflow.contains("actions/upload-artifact@v6"));
     assert!(workflow.contains("target/borrow-campaign-failures"));
 }
