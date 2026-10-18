@@ -2866,13 +2866,13 @@ fn invoke_c_runner(request: LiveRunner<'_>) -> Result<NativeInvocation, String> 
             "-o".into(),
             disp(&runner_o),
         ],
-        vec![
-            tc(toolchain),
-            disp(&capsule_o),
-            disp(&runner_o),
-            "-o".into(),
-            disp(&exe),
-        ],
+        // The runner's hash is part of every pipeline cache key, so its build
+        // must be reproducible; see `reproducible_link_flags`.
+        [tc(toolchain), disp(&capsule_o), disp(&runner_o)]
+            .into_iter()
+            .chain(crate::native_build::reproducible_link_flags(toolchain))
+            .chain(["-o".into(), disp(&exe)])
+            .collect(),
     ];
     if !reuse_runner {
         for argv in &steps {
@@ -5383,7 +5383,7 @@ fn generate_live_runner(
     };
     let mutations = generate_mutation_output(program, capsule)?;
     let runner = format!(
-        "#include <errno.h>\n#include <stdint.h>\n#include <stddef.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"boundary.h\"\n\nstatic char *read_line(FILE *input) {{\n    size_t length = 0;\n    size_t capacity = 128;\n    char *line = (char *)malloc(capacity);\n    if (line == NULL) return NULL;\n    int ch = 0;\n    while ((ch = fgetc(input)) != EOF && ch != '\\n') {{\n        if (length + 1 >= capacity) {{\n            if (capacity > SIZE_MAX / 2) {{ free(line); return NULL; }}\n            capacity *= 2;\n            char *grown = (char *)realloc(line, capacity);\n            if (grown == NULL) {{ free(line); return NULL; }}\n            line = grown;\n        }}\n        line[length++] = (char)ch;\n    }}\n    if (ch == EOF && length == 0) {{ free(line); return NULL; }}\n    line[length] = '\\0';\n    return line;\n}}\n\nint main(int argc, char **argv) {{\n    if (argc != 2) {{\n        fputs(\"native capsule request path missing\\n\", stderr);\n        return 2;\n    }}\n    FILE *request = fopen(argv[1], \"rb\");\n    if (request == NULL) {{\n        fputs(\"native capsule request unavailable\\n\", stderr);\n        return 2;\n    }}\n{parse}    if (fgetc(request) != EOF) {{\n        fputs(\"native capsule argument count mismatch\\n\", stderr);\n        return 2;\n    }}\n    fclose(request);\n    fputs(\"result=\", stdout);\n{result_print}    fputc('\\n', stdout);\n{mutations}{cleanup}    return 0;\n}}\n"
+        "#include <errno.h>\n#include <stdint.h>\n#include <stddef.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"boundary.h\"\n\nstatic char *read_line(FILE *input) {{\n    size_t length = 0;\n    size_t capacity = 128;\n    char *line = (char *)malloc(capacity);\n    if (line == NULL) return NULL;\n    int ch = 0;\n    while ((ch = fgetc(input)) != EOF && ch != '\\n') {{\n        if (length + 1 >= capacity) {{\n            if (capacity > SIZE_MAX / 2) {{ free(line); return NULL; }}\n            capacity *= 2;\n            char *grown = (char *)realloc(line, capacity);\n            if (grown == NULL) {{ free(line); return NULL; }}\n            line = grown;\n        }}\n        line[length++] = (char)ch;\n    }}\n    if (ch == EOF && length == 0) {{ free(line); return NULL; }}\n    line[length] = '\\0';\n    return line;\n}}\n\nint main(int argc, char **argv) {{\n    if (argc != 2) {{\n        fputs(\"native capsule request path missing\\n\", stderr);\n        return 2;\n    }}\n    FILE *request = fopen(argv[1], \"rb\");\n    if (request == NULL) {{\n        fputs(\"native capsule request unavailable\\n\", stderr);\n        return 2;\n    }}\n{parse}    if (fgetc(request) != EOF) {{\n        fputs(\"native capsule argument count mismatch\\n\", stderr);\n        return 2;\n    }}\n    fclose(request);\n    fputs(\"result=\", stdout);\n{result_print}    fputc('\\n', stdout);\n{mutations}{cleanup}    if (fflush(stdout) != 0 || ferror(stdout)) {{\n        fputs(\"native capsule result could not be written\\n\", stderr);\n        return 6;\n    }}\n    return 0;\n}}\n"
     );
     Ok(runner
         .replace(
@@ -6134,7 +6134,9 @@ fn generate_harness(
         };
         out.push_str(&line);
     }
-    out.push_str("    return 0;\n}\n");
+    out.push_str(
+        "    if (fflush(stdout) != 0 || ferror(stdout)) {\n        fputs(\"native capsule result could not be written\\n\", stderr);\n        return 6;\n    }\n    return 0;\n}\n",
+    );
     Ok(out)
 }
 

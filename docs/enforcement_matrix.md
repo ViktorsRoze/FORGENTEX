@@ -184,8 +184,10 @@ Two properties came with it:
   send their printing down the result pipe as tagged `D` lines, so they lose
   nothing. A warm **Go** capsule redirects its body's output to the error stream,
   which is discarded, so its printing is not reported — the cold path reports it.
-  That the flake responds to how many pipes the host holds is also evidence about
-  its mechanism, which the original investigation did not have.
+  That the flake responds to how many pipes the host holds was the first evidence
+  about its mechanism. It was later traced to the runner's exit-time stdout flush
+  and fixed on 2026-10-18; see
+  [known limits](public_0_1_profile.md#known-limits).
 - **A warm call has a deadline** (60 s, the managed default). A warm worker
   applies no per-call limits, which is why a capsule declaring any runs cold, but
   "no limits" must not mean "may hang the run forever": a worker that stops

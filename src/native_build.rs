@@ -169,6 +169,51 @@ pub fn detect_toolchain() -> Option<Toolchain> {
     None
 }
 
+/// Linker flags that make a native runner build reproducible.
+///
+/// The same source and toolchain must produce the same bytes: a runner's hash
+/// is part of every pipeline cache key (`runner_artifact_sha256`), so a build
+/// that differs from one compile to the next makes the cache miss on every
+/// run and breaks the repeatability the pipeline receipts promise.
+///
+/// The one known source on Windows is the PE header's link timestamp. GNU
+/// `ld` as shipped by MinGW-Builds — the compiler on GitHub's Windows runners —
+/// stamps it, so two links a second apart differ in exactly those bytes; a
+/// w64devkit build does not, which is why this never reproduced locally.
+/// `--no-insert-timestamp` writes zero instead. It is passed only when the
+/// compiler targets MinGW: an MSVC-targeting clang links with `link.exe` or
+/// `lld-link`, which do not accept it, and ELF linkers stamp no time at all.
+pub(crate) fn reproducible_link_flags(toolchain: &Toolchain) -> Vec<String> {
+    if cfg!(windows) && targets_mingw(&toolchain.name) {
+        vec!["-Wl,--no-insert-timestamp".to_string()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Whether a compiler driver targets MinGW, by asking it (`-dumpmachine`)
+/// rather than guessing from its name: `cc`, `gcc`, and `clang` can each
+/// target either MinGW or MSVC. Answered once per compiler per process.
+fn targets_mingw(compiler: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static KNOWN: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    let known = KNOWN.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(answer) = known.lock().ok().and_then(|map| map.get(compiler).copied()) {
+        return answer;
+    }
+    let answer = Command::new(compiler)
+        .arg("-dumpmachine")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .is_some_and(|output| String::from_utf8_lossy(&output.stdout).contains("mingw"));
+    if let Ok(mut map) = known.lock() {
+        map.insert(compiler.to_string(), answer);
+    }
+    answer
+}
+
 /// Detect a usable host C++ compiler: `$CXX` first, then the conventional
 /// `c++`, `clang++`, and `g++` driver names. Native C++ capsules use the C++
 /// driver for compilation and linking so their runtime dependencies resolve

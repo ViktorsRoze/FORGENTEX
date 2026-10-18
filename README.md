@@ -462,9 +462,9 @@ regression-tested behavior:
   or a hex dump.
 - **Quality gates:** the Rust library and CLI suites currently total **1,290
   passing tests** (1,225 library tests and 65 CLI tests), plus fuzz,
-  differential, conformance, and strict release-gate workflows. One Windows
-  native-capture flake is characterised and `#[ignore]`d rather than left to
-  fail intermittently; see
+  differential, conformance, and strict release-gate workflows. A Windows
+  native output-loss defect that long looked like a test flake was traced to the
+  C runtime's exit-time flush and fixed; see
   [known limits](docs/public_0_1_profile.md#known-limits).
 
 For the detailed ledger, see [V3 progress](docs/v3_progress.md) and the

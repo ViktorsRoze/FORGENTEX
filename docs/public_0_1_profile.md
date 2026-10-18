@@ -89,11 +89,16 @@ suggested. `token-report` now labels every heuristic ratio and takes
 read-once text-patch baseline, `edit-bench` measures 0.94–1.83×. The larger
 published multiples were against resending the whole file.
 
-**One known test flake, on Windows.** A contained native runner can exit 0
-having written nothing, because the parent loses both pipes early; it reproduces
-in roughly 1 run in 10 concurrently and the reproducer is `#[ignore]`d with its
-evidence so the gate stays deterministic. CI runs tests serially, where it has
-not been observed. The managed path does not show it.
+**Fixed: the Windows native output-loss defect.** A native capsule call
+could fail with `missing result envelope (runner exit 0, no output at all)`.
+The runner's reply sat in the C runtime's stdout buffer until the exit sequence
+wrote it, and with MinGW-Builds' UCRT runtime inside the containment that write
+sometimes never reached the pipe — rarely with a w64devkit compiler, but about
+ten times per run on GitHub's Windows runners, which use MinGW-Builds. Runners
+now flush while `main` is still running: in a concurrent reproducer that went
+from 3 failures in 10 to 0, and in the serial native suites from 8 and 5 to 0
+and 0. Why the exit-time write is lost is not established, so this is recorded
+as fixed by measurement rather than by a proven mechanism.
 
 **Polyglot capsules need their host runtimes.** A capsule's language toolchain
 (CPython, Node, Go, a JDK, .NET, Zig, a C compiler) is optional and resolved on

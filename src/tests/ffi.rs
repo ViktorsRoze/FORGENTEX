@@ -4578,33 +4578,27 @@ fn recursively_embedded_native_struct_is_rejected_without_recursing_forever() {
     assert!(error.contains("recursively embedded"), "got: {error}");
 }
 
-/// Reproduces a known, unfixed Windows defect; ignored so it does not make the
-/// suite non-deterministic. Run it explicitly to work on the bug:
-/// `cargo test concurrent_live_native_calls -- --ignored`.
+/// Guards the Windows output-capture defect that made native capsule calls
+/// fail with `missing result envelope (runner exit 0, no output at all)`.
 ///
-/// Fails roughly one run in ten. What the investigation established:
+/// For months this was treated as a parent-side race, because a 0 exit seemed
+/// to prove the runner had written its reply. It did not: the runner's stdout
+/// is fully buffered on a pipe, so a 0 exit proves only that the reply was
+/// *buffered*. The buffer is written by the C runtime's exit sequence, and with
+/// MinGW-Builds' UCRT runtime inside the containment that exit-time write
+/// sometimes never reaches the pipe. Why it is lost there is not established.
+/// What is established, with the compiler GitHub's Windows runners use:
 ///
-/// * the runner exits 0 having written nothing to stdout. Its generated `main`
-///   has exactly one `return 0`, reached only after every stdout write, and all
-///   of its failure paths write to stderr and return 2..=5 — so a 0 exit proves
-///   the child *did* produce and write its reply;
-/// * a stderr probe at the top of `main` arrives, while a second probe written
-///   milliseconds later does not. Both pipes therefore reach EOF early, while
-///   the child is still running and writing;
-/// * the parent loses the child's output, in other words, rather than the child
-///   failing to produce it.
+/// * this test, run 10 times: 3 failures before the fix, 0 after;
+/// * the serial native suites (`capsule_runtime`, `ffi`, `pipeline`): 8 and 5
+///   output-loss failures in two runs before, 0 and 0 in two runs after;
+/// * a w64devkit-compiled runner (older msvcrt runtime) failed far less often,
+///   which is why it was rare locally and frequent in CI.
 ///
-/// Ruled out: every process limit (peak memory ~586KB against a 512MB cap, peak
-/// processes 1 against a cap of 1, wall and CPU budgets untouched); a truncated
-/// or corrupt runner binary; the pipeline layer, since plain `invoke_live`
-/// reproduces it; and a spawn-time handle-inheritance race, since serialising
-/// all process creation in this process does not change the failure rate.
-///
-/// It is not a regression from any change in this tree: it reproduces through
-/// code paths this branch never touched, and the same failure shows up in the
-/// `tests::pipeline` suite, whose tests are unmodified.
+/// The generated runners now `fflush(stdout)` while `main` is still running
+/// and return 6 with a stderr message if that fails, so a write that cannot be
+/// completed is reported as one rather than as an empty success.
 #[test]
-#[ignore = "reproduces an unfixed Windows output-capture race; see the doc comment"]
 fn concurrent_live_native_calls_each_receive_their_own_reply() {
     // Every native capsule call gets a private scratch directory and a fresh
     // contained process, so calls made at the same time must not be able to

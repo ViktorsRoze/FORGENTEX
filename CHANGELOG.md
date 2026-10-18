@@ -71,5 +71,5 @@ host (`x86_64-pc-windows-msvc`); managed capsules get limits but not filesystem
 or network denial; the dense agent syntax measures about 1% *larger* than the
 readable one under a real BPE tokenizer, not smaller; semantic patching is
 0.94–1.83× a read-once text patch, not the larger multiples measured against
-whole-file resend; and one Windows native-capture flake is characterised and
-excluded from the gate rather than left to fail intermittently.
+whole-file resend. A Windows native output-loss defect that long looked like a
+flake is fixed, by measurement rather than by a proven mechanism.
